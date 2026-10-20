@@ -1,0 +1,42 @@
+{
+  "name": "events-finder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hermes Agent skill + Telegram bot: finds events and places in Ukrainian cities for any number of users, sends personalised digests, alerts and reminders.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "bot": "tsx scripts/bot.ts",
+    "doctor": "tsx scripts/doctor.ts",
+    "search": "tsx scripts/search.ts",
+    "digest": "tsx scripts/digest.ts",
+    "follows": "tsx scripts/follows.ts",
+    "places": "tsx scripts/places.ts",
+    "reminders": "tsx scripts/reminders.ts",
+    "prefs": "tsx scripts/prefs.ts",
+    "tg-login": "tsx scripts/tg-login.ts",
+    "test": "tsx tests/run.ts",
+    "typecheck": "tsc --noEmit",
+    "db:push": "drizzle-kit push",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "cheerio": "^1.0.0",
+    "drizzle-orm": "^0.45.4",
+    "pg": "^8.23.1",
+    "telegram": "^2.26.22",
+    "yaml": "^2.6.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.23.1",
+    "drizzle-kit": "^0.31.11",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
