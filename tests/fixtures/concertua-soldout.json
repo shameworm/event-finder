@@ -1,0 +1,20 @@
+{
+  "@context": "http://schema.org",
+  "@type": "ComedyEvent",
+  "name": "Batya 2 Solo Stand-Up",
+  "description": "",
+  "url": "https://concert.ua/en/event/batya-2-kharkiv",
+  "startDate": "2026-10-24T19:00:00+03:00",
+  "eventStatus": "EventScheduled",
+  "location": {
+    "@type": "Place",
+    "name": "Mono Stage",
+    "address": { "@type": "PostalAddress", "streetAddress": "", "addressLocality": "Kharkiv" }
+  },
+  "offers": {
+    "@type": "Offer",
+    "price": 450,
+    "priceCurrency": "UAH",
+    "availability": "http://schema.org/SoldOut"
+  }
+}
