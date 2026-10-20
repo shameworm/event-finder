@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# your real config and secrets (only the *.example.yaml files are committed)
+config.yaml
+preferences.yaml
+.env
+.env.local
+
+# local data: sqlite db, logs, GramJS session, websearch inbox
+data/
+*.db
+*.db-wal
+*.db-shm
+*.session
+*.log
+
+# drizzle output
+drizzle/meta/
+drizzle/*.sql
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Conductor workspace scratch
+.context/
