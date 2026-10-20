@@ -1,0 +1,230 @@
+/**
+ * Zod schemas for everything that arrives from outside this codebase:
+ * YAML files, scraped schema.org markup, Telegram API payloads and the
+ * agent's web-search hand-off file.
+ *
+ * Scraped data is parsed *leniently* — a site adding a field or sending a
+ * price as a string must never crash a run — but a missing name/url is a
+ * hard failure for that one item, which the caller skips.
+ */
+import { z } from 'zod';
+import { CategorySchema, KindSchema, StatusSchema } from './types.ts';
+
+/* ------------------------------------------------------------ config.yaml --- */
+
+export const ConcertUaCitySchema = z.object({
+  slug: z.string().min(1),
+  categories: z.array(z.string()).optional(),
+});
+
+export const KarabasCitySchema = z.object({
+  subdomain: z.string().min(1),
+  paths: z.array(z.string()).optional(),
+});
+
+export const KontramarkaCitySchema = z.object({
+  /** Empty string means the bare domain (Kyiv). */
+  subdomain: z.string().default(''),
+  categories: z.array(z.string()).optional(),
+});
+
+export const CityConfigSchema = z.object({
+  label: z.string().optional(),
+  aliases: z.array(z.string()).default([]),
+  concertua: ConcertUaCitySchema.optional(),
+  karabas: KarabasCitySchema.optional(),
+  kontramarka: KontramarkaCitySchema.optional(),
+  telegram_channels: z.array(z.string()).default([]),
+  place_queries: z.array(z.string()).default([]),
+});
+
+export const ConfigSchema = z.object({
+  timezone: z.string().default('Europe/Kyiv'),
+  default_city: z.string().default('kharkiv'),
+  locale: z.string().default('en-GB'),
+  http: z
+    .object({
+      delay_ms: z.number().int().nonnegative().default(1500),
+      timeout_ms: z.number().int().positive().default(20000),
+      retries: z.number().int().nonnegative().max(10).default(2),
+      max_pages: z.number().int().positive().max(50).default(6),
+      user_agent: z.string().min(10).default(
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ),
+    })
+    .prefault({}),
+  telegram: z
+    .object({
+      parse_mode: z.enum(['HTML', 'MarkdownV2']).default('HTML'),
+      disable_preview: z.boolean().default(true),
+    })
+    .prefault({}),
+  digest: z
+    .object({
+      max_items_per_day: z.number().int().nonnegative().default(8),
+      week_top: z.number().int().positive().default(15),
+      weekend_top: z.number().int().positive().default(5),
+      places_top: z.number().int().positive().default(3),
+    })
+    .prefault({}),
+  bot: z
+    .object({
+      /** false = only chat ids on the allowlist may use the bot. */
+      public: z.boolean().default(true),
+      allowlist: z.array(z.coerce.string()).default([]),
+      /** Searches per user per hour; each one can trigger a scrape. */
+      searches_per_hour: z.number().int().positive().default(20),
+      /** Items in an on-demand answer. */
+      max_results: z.number().int().positive().default(10),
+      /** Pause between users when fanning a digest out, to stay under Telegram's rate limit. */
+      send_delay_ms: z.number().int().nonnegative().default(60),
+      /** Pages per source for on-demand searches — keep it small, people are waiting. */
+      interactive_pages: z.number().int().positive().default(2),
+    })
+    .prefault({}),
+  cache: z
+    .object({
+      /** How long a scraped city/window stays reusable. 0 disables the cache. */
+      ttl_seconds: z.number().int().nonnegative().default(1800),
+    })
+    .prefault({}),
+  cities: z.record(z.string(), CityConfigSchema).default({}),
+});
+
+export type ConfigInput = z.input<typeof ConfigSchema>;
+export type Config = z.infer<typeof ConfigSchema>;
+export type CityConfig = z.infer<typeof CityConfigSchema>;
+
+/* --------------------------------------------------- scraped schema.org --- */
+
+/** A price that may arrive as 790, "790", "790.00" or "от 790 грн". */
+export const LoosePrice = z.preprocess((v) => {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : undefined;
+  if (typeof v === 'string') {
+    const m = v.replace(/\s/g, '').replace(',', '.').match(/\d+(\.\d+)?/);
+    return m ? Number(m[0]) : undefined;
+  }
+  return undefined;
+}, z.number().nonnegative().optional());
+
+/** schema.org values are often wrapped in a one-element array. */
+const unwrap = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess((v) => (Array.isArray(v) ? v[0] : v), schema);
+
+const NameOnly = z.object({ name: z.string().optional() }).loose();
+
+export const SchemaOfferSchema = z
+  .object({
+    price: LoosePrice,
+    lowPrice: LoosePrice,
+    highPrice: LoosePrice,
+    priceCurrency: z.string().optional(),
+    availability: z.string().optional(),
+    url: z.string().optional(),
+  })
+  .loose();
+
+export const SchemaPlaceSchema = z
+  .object({
+    name: z.string().optional(),
+    address: unwrap(
+      z.union([z.string(), z.object({ streetAddress: z.string().optional(), addressLocality: z.string().optional() }).loose()]).optional(),
+    ),
+  })
+  .loose();
+
+/** One schema.org Event, as published by Concert.ua / Karabas / Kontramarka. */
+export const SchemaEventSchema = z
+  .object({
+    '@type': z.union([z.string(), z.array(z.string())]).optional(),
+    '@id': z.string().optional(),
+    name: z.string().min(1),
+    url: z.string().optional(),
+    description: z.string().optional(),
+    startDate: z.string().optional(),
+    endDate: z.string().optional(),
+    eventStatus: z.string().optional(),
+    isAccessibleForFree: z.boolean().optional(),
+    location: unwrap(SchemaPlaceSchema.optional()),
+    offers: unwrap(SchemaOfferSchema.optional()),
+    performer: unwrap(NameOnly.optional()),
+    workPerformed: unwrap(NameOnly.optional()),
+  })
+  .loose()
+  // either url or @id must be usable as a link
+  .refine((o) => Boolean(o.url || o['@id']), { message: 'event has no url' });
+
+export type SchemaEvent = z.infer<typeof SchemaEventSchema>;
+
+/* ------------------------------------------------------ telegram bot api --- */
+
+export const TgMessageSchema = z
+  .object({
+    message_id: z.number().int(),
+    date: z.number().int(),
+    chat: z.object({ id: z.union([z.number(), z.string()]), type: z.string().optional() }).loose(),
+    text: z.string().optional(),
+    reply_to_message: z.object({ message_id: z.number().int(), text: z.string().optional() }).loose().optional(),
+    from: z.object({ id: z.number(), username: z.string().optional() }).loose().optional(),
+  })
+  .loose();
+
+export const TgUpdateSchema = z
+  .object({
+    update_id: z.number().int(),
+    message: TgMessageSchema.optional(),
+    edited_message: TgMessageSchema.optional(),
+  })
+  .loose();
+
+export const TgResponseSchema = <T extends z.ZodTypeAny>(result: T) =>
+  z.object({ ok: z.boolean(), result: result.optional(), description: z.string().optional() }).loose();
+
+export type TgMessage = z.infer<typeof TgMessageSchema>;
+export type TgUpdate = z.infer<typeof TgUpdateSchema>;
+
+/* -------------------------------------------------- web-search hand-off --- */
+
+/**
+ * What the agent writes back after running the queries from
+ * `scripts/websearch.ts --queries` with its own web_search tool.
+ * Deliberately forgiving: title + url are the only required fields.
+ */
+export const WebResultSchema = z.object({
+  title: z.string().min(1),
+  url: z.string().min(1),
+  snippet: z.string().optional(),
+  description: z.string().optional(),
+  city: z.string().optional(),
+  kind: KindSchema.optional(),
+  category: CategorySchema.optional(),
+  venue: z.string().optional(),
+  address: z.string().optional(),
+  /** ISO date/time or free text ("25 жовтня, 19:00") — parsed downstream. */
+  date: z.string().optional(),
+  startsAt: z.string().optional(),
+  price: z.string().optional(),
+  status: StatusSchema.optional(),
+});
+
+export const WebIngestSchema = z.union([
+  z.array(WebResultSchema),
+  z.object({
+    city: z.string().optional(),
+    kind: KindSchema.optional(),
+    results: z.array(WebResultSchema),
+  }),
+]);
+
+export type WebResult = z.infer<typeof WebResultSchema>;
+
+/* ------------------------------------------------------- gramjs messages --- */
+
+export const TgChannelPostSchema = z.object({
+  id: z.number().int(),
+  channel: z.string().min(1),
+  date: z.number().int().optional(),
+  text: z.string().default(''),
+});
+
+export type TgChannelPost = z.infer<typeof TgChannelPostSchema>;
