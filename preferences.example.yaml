@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# events-finder — DEFAULTS FOR NEW USERS
+#
+#   cp preferences.example.yaml preferences.yaml
+#
+# This file is the taste model handed to someone the first time they send
+# /start to the bot. After that, each person's preferences live in the database
+# under their own Telegram chat id, and they change them by chatting
+# ("add stand-up to favourites", "I'm in Lviv next week") or with:
+#
+#   npx tsx scripts/prefs.ts --chat <id> "add jazz to favourites"
+#   npx tsx scripts/prefs.ts --list                 # who is registered
+#   npx tsx scripts/prefs.ts --defaults "..."       # edit THIS file
+#
+# Two fields are deliberately NOT inherited by new users, because they are
+# personal to whoever set this file up: `follow` and `watch_cities`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+home_city: kharkiv
+
+# Extra cities to watch for follow alerts.
+# NOT copied to new users — they add their own with "watch Odesa".
+watch_cities:
+  - kyiv
+  - lviv
+
+# Categories you like. Known keys:
+#   concert standup theatre exhibition lecture party festival workshop cinema kids sport
+#   cafe bar gallery spot
+favourite_categories:
+  - standup
+  - concert
+  - exhibition
+
+# Genres/scenes you do not want to see. Free text works too ("classical", "шансон").
+disliked_categories:
+  - classical
+  - chanson
+
+# Artists, comedians, bands, theatres. A show by any of these triggers an
+# immediate alert from scripts/follows.ts, in any of that user's cities.
+# NOT copied to new users — each person builds their own with "follow <name>".
+follow:
+  - Курган і Agregat
+  - Антон Тимошенко
+  - Жадан і Собаки
+  - Latexfauna
+
+# Hard budget in UAH. Items whose cheapest ticket is above this are dropped
+# (unless you follow the performer). Set to null for no limit.
+max_ticket_price: 1200
+currency: UAH
+
+# Temporary location — set automatically by "I'm in Lviv next week".
+# trip:
+#   city: lviv
+#   from: 2026-10-26
+#   to: 2026-11-01
+trip: null
+
+# Free-text interests used for ranking and for weekly place suggestions.
+interests:
+  - indie
+  - speciality coffee
+  - vinyl
+  - contemporary art
+
+notes: []

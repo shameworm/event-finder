@@ -1,0 +1,165 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# events-finder — site/city configuration
+# Copy to config.yaml and edit:  cp config.example.yaml config.yaml
+# Secrets do NOT go here; they live in ~/.hermes/.env (see .env.example).
+# ─────────────────────────────────────────────────────────────────────────────
+
+timezone: Europe/Kyiv      # all schedules, digests and day grouping use this
+default_city: kharkiv      # used when a request names no city and preferences are empty
+locale: en-GB              # affects day labels ("Fri 24 Oct")
+
+http:
+  delay_ms: 1500           # minimum gap between two requests to the same host — be polite
+  timeout_ms: 20000
+  retries: 2
+  max_pages: 6             # per category/path, per source
+  user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+telegram:
+  parse_mode: HTML
+  disable_preview: true
+
+digest:
+  max_items_per_day: 8     # cap inside one day section of the weekly digest
+  week_top: 15             # Monday "this week" digest
+  weekend_top: 5           # Thursday weekend picks
+  places_top: 3            # weekly place suggestions
+
+# The public bot. Every user gets their own city, taste and digest schedule;
+# these settings are about protecting the source sites and staying inside
+# Telegram's rate limits.
+bot:
+  public: true             # false = only chat ids in `allowlist` may use it
+  allowlist: []            # e.g. ["123456789"] — only used when public: false
+  searches_per_hour: 20    # per user; an on-demand search can trigger a scrape
+  max_results: 10          # items in an on-demand answer
+  interactive_pages: 2     # pages per source when someone is waiting on a reply
+  send_delay_ms: 60        # pause between users when fanning out a digest
+
+cache:
+  # One scrape of a city/window serves every user in it for this long.
+  # This is what makes the bot safe to share: 200 users in Kharkiv asking about
+  # the same weekend cost one crawl, not 200. Set to 0 to disable.
+  ttl_seconds: 1800
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cities. One section per city; `aliases` is how free text is matched, so add
+# every spelling/declension you might type ("у Харкові", "Kharkov").
+#
+#   concertua.slug        -> https://concert.ua/en/catalog/<slug>/<category>
+#   karabas.subdomain     -> https://<subdomain>.karabas.com/<path>?page=N
+#   kontramarka.subdomain -> https://<subdomain>.kontramarka.ua/uk/<category>
+#                            (Kyiv has no subdomain — leave it as "")
+#   telegram_channels     -> @usernames or t.me links, read via GramJS
+#   place_queries         -> web-search queries for new cafés/bars/galleries
+# ─────────────────────────────────────────────────────────────────────────────
+cities:
+
+  kharkiv:
+    label: Kharkiv
+    aliases: [kharkiv, kharkov, харків, харкові, харкова, харьков, харькове, хрк, kh]
+    concertua:
+      slug: kharkiv
+      categories: [all-categories, concerts, humor, theater, festivals, dance, electronic, show, other]
+    karabas:
+      subdomain: kharkiv
+      paths: ["/"]            # the city root already lists every category
+    kontramarka:
+      subdomain: kharkiv
+      categories: [concert, standUp, theatre, exhibition, festival, clubs, museum]
+    telegram_channels: []     # ← fill in, e.g. ["@kharkiv_afisha", "@standup_kharkiv"]
+    place_queries:
+      - "нові кав'ярні Харків 2026 відкриття"
+      - "бар з живою музикою Харків"
+      - "галерея виставка Харків новий простір"
+      - "незвичайні місця Харків куди піти"
+
+  kyiv:
+    label: Kyiv
+    aliases: [kyiv, kiev, київ, києві, києва, киев, киеве, kyyiv]
+    concertua:
+      slug: kyiv
+      categories: [all-categories, concerts, humor, theater, festivals, dance, electronic]
+    karabas:
+      subdomain: kyiv
+      paths: ["/"]
+    kontramarka:
+      subdomain: ""           # Kyiv lives on https://kontramarka.ua/uk
+      categories: [concert, standUp, theatre, exhibition, festival, clubs]
+    telegram_channels: []
+    place_queries:
+      - "нові кав'ярні Київ відкриття 2026"
+      - "бар з живою музикою Київ"
+      - "нова галерея Київ виставка"
+
+  lviv:
+    label: Lviv
+    aliases: [lviv, lvov, львів, львові, львова, львов, львове]
+    concertua:
+      slug: lviv
+      categories: [all-categories, concerts, humor, theater, festivals]
+    karabas:
+      subdomain: lviv
+      paths: ["/"]
+    kontramarka:
+      subdomain: lviv
+      categories: [concert, standUp, theatre, exhibition, festival]
+    telegram_channels: []
+    place_queries:
+      - "нові кав'ярні Львів 2026"
+      - "бар з живою музикою Львів"
+      - "галерея Львів виставка"
+
+  dnipro:
+    label: Dnipro
+    aliases: [dnipro, дніпро, дніпрі, дніпра, днепр, днепре, dnepr]
+    concertua:
+      slug: dnipro
+      categories: [all-categories, concerts, humor, theater, festivals]
+    karabas:
+      subdomain: dnipro
+      paths: ["/"]
+    kontramarka:
+      subdomain: dnipro
+      categories: [concert, standUp, theatre, exhibition, festival]
+    telegram_channels: []
+    place_queries:
+      - "нові кав'ярні Дніпро 2026"
+      - "бар з живою музикою Дніпро"
+
+  odesa:
+    label: Odesa
+    aliases: [odesa, odessa, одеса, одесі, одеси, одесса, одессе]
+    concertua:
+      slug: odesa
+      categories: [all-categories, concerts, humor, theater, festivals]
+    karabas:
+      subdomain: odesa
+      paths: ["/"]
+    kontramarka:
+      subdomain: odesa
+      categories: [concert, standUp, theatre, exhibition, festival]
+    telegram_channels: []
+    place_queries:
+      - "нові кав'ярні Одеса 2026"
+      - "бар з живою музикою Одеса"
+
+  # Add more cities the same way. Check the slug works before trusting it:
+  #   curl -sI https://concert.ua/en/catalog/<slug>/all-categories | head -1
+  #   curl -sI https://<sub>.karabas.com/ | head -1
+  #   curl -sI https://<sub>.kontramarka.ua/uk/concert | head -1
+  ivano-frankivsk:
+    label: Ivano-Frankivsk
+    aliases: [ivano-frankivsk, івано-франківськ, франківськ, франик, ифр]
+    concertua:
+      slug: ivano-frankivsk
+      categories: [all-categories]
+    karabas:
+      subdomain: ivano-frankivsk
+      paths: ["/"]
+    kontramarka:
+      subdomain: ivano-frankivsk
+      categories: [concert, standUp, theatre]
+    telegram_channels: []
+    place_queries:
+      - "нові кав'ярні Івано-Франківськ"
