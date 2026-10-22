@@ -70,7 +70,7 @@ const COMMANDS = `<b>Що я вмію</b>
 /setup — зібрати смаки заново, крок за кроком
 /city — змінити місто
 /prefs — що я думаю про твої смаки
-/reminders — твої нагадування 🔔
+/reminders — твої нагадування ⏰
 /stop — відписатися
 
 Або просто скажи, чого хочеться:
@@ -82,11 +82,12 @@ const COMMANDS = `<b>Що я вмію</b>
 · <i>додай стендап до улюблених</i>
 · <i>не люблю класичну музику</i>
 · <i>слідкуй за Latexfauna</i>
+· <i>додай Київ до міст</i>
 · <i>максимум 800 грн</i>
 · <i>я у Львові наступного тижня</i>
 
-Відповідай 🔔 на будь-яку подію (або «🔔 3» — на третю зі списку), і я нагадаю
-за добу та за три години до початку.`;
+Тапни ❤️ на події — і я нагадаю за добу та за три години до початку, а ще
+запамʼятаю, що таке тобі заходить. Знімеш ❤️ — скасую нагадування.`;
 
 /* ------------------------------------------------------------- utilities --- */
 
@@ -606,6 +607,7 @@ export async function answerSearch(
 
   const ranked = rank(collected, { query, prefs: user.prefs, tz: cfg.timezone });
   const items = ranked.items.slice(0, opts.top ?? cfg.bot.max_results);
+  const offTaste = ranked.dropped.filter((d) => d.why === 'not in their taste').length;
 
   const title =
     kinds.includes('place')
@@ -623,10 +625,16 @@ export async function answerSearch(
     maxPerDay: 0,
     // an on-demand answer is allowed to repeat things: they asked for it
     record: !ctx.dryRun,
+    // the filter has to admit when it loosened, or a short list looks like a bug
     footer:
       items.length === 0
         ? 'Нічого не знайшлося. Спробуй ширший період («наступного тижня»), інше місто, або глянь /prefs — можливо, я щось відфільтровую.'
-        : undefined,
+        : ranked.toppedUp > 0
+          ? `Твого на цей період знайшлося небагато, тож додав ще ${ranked.toppedUp} — просто щоб ти знав(ла), що є. ` +
+            `Скажи, що любиш («додай театр до улюблених»), і я звужу.`
+          : offTaste > 0
+            ? `Показав тільки те, що тобі заходить — ще ${offTaste} події відфільтрував. /prefs, якщо це занадто вузько.`
+            : undefined,
   });
   if (failed.length && !outcome.chatGone) {
     await opts.reply(`(до речі: ${failed.join(', ')} не відповіли, тож список може бути неповним)`);
@@ -1024,15 +1032,19 @@ async function handleBell(ctx: HandlerContext, msg: TgMessage, chatId: string, i
   if (outcome === 'no-date') return `У «${escapeHtml(chosen.title)}» ще немає часу початку.`;
 
   const user = await getUser(ctx.store, chatId, ctx.log);
-  const learned = user ? await learnFromHeart(ctx, user, chosen) : null;
+  const learned = user ? await learnFromHeart(ctx, user, chosen) : { tag: null, follow: null };
   return reminderSaid(outcome, chosen.title, learned);
 }
 
 /* --------------------------------------------------------- the reactions --- */
 
-function reminderSaid(outcome: string, title: string, learned: string | null): string {
+function reminderSaid(outcome: string, title: string, learned: Learned): string {
   const said = `⏰ Нагадування ${outcome === 'exists' ? 'вже стоїть' : 'поставив'} — <b>${escapeHtml(title)}</b>. Нагадаю за добу та за 3 години до початку.`;
-  return learned ? `${said}\n(додав «${escapeHtml(tagLabel(learned))}» до улюбленого)` : said;
+  const notes = [
+    learned.tag ? `додав «${escapeHtml(tagLabel(learned.tag))}» до улюбленого` : '',
+    learned.follow ? `стежу за «${escapeHtml(learned.follow)}» — скажу, щойно оголосять ще щось` : '',
+  ].filter(Boolean);
+  return notes.length ? `${said}\n(${notes.join('; ')})` : said;
 }
 
 /**
@@ -1078,30 +1090,55 @@ export async function handleReaction(ctx: HandlerContext, update: TgReactionUpda
   if (outcome === 'no-date') return reply(`У «${escapeHtml(item.title)}» ще немає часу початку.`);
 
   const learned = await learnFromHeart(ctx, user, item);
-  ctx.log.info(`chat ${chatId} hearted "${item.title}" (reminder ${outcome}${learned ? `, learned ${learned}` : ''})`);
+  ctx.log.info(
+    `chat ${chatId} hearted "${item.title}" (reminder ${outcome}` +
+      `${learned.tag ? `, learned ${learned.tag}` : ''}${learned.follow ? `, now following ${learned.follow}` : ''})`,
+  );
   return reply(reminderSaid(outcome, item.title, learned));
 }
 
-/**
- * A heart is a free sample of someone's taste, so take it: the event's category
- * joins their favourites (an interesting place joins their interests).
- * Returns the tag that was learned, or null when there was nothing new.
- */
-async function learnFromHeart(ctx: HandlerContext, user: BotUser, item: Item): Promise<string | null> {
-  const tag = canonicalTag(item.category);
-  if (!tag) return null;
-  const has = (list: string[]) => list.some((v) => normText(v) === normText(tag));
-  if (has(user.prefs.disliked_categories)) return null;
+/** What one ❤️ taught us that is worth saying out loud. */
+interface Learned {
+  /** The tag added to their favourites/interests, if it was not there already. */
+  tag: string | null;
+  /** The performer added to their follow list. */
+  follow: string | null;
+}
 
-  if (item.kind === 'place') {
-    if (has(user.prefs.interests)) return null;
-    await saveUserPrefs(ctx.store, user, { ...user.prefs, interests: [...user.prefs.interests, tag] });
-  } else {
-    if (has(user.prefs.favourite_categories)) return null;
-    await saveUserPrefs(ctx.store, user, {
-      ...user.prefs,
-      favourite_categories: [...user.prefs.favourite_categories, tag],
-    });
-  }
-  return tag;
+/**
+ * A heart is a free sample of someone's taste, so take all of it:
+ *
+ *  · the event's category joins their favourites (a place joins their interests)
+ *  · the tally for that tag goes up, every time — that is what makes hearting
+ *    twenty concerts mean more to the ranker than hearting one
+ *  · whoever is on stage joins the follow list, where the real weight lives:
+ *    followed acts are alerted on by name and ignore budget and dislikes
+ *
+ * One save, because two in a row from the same loaded user would lose the
+ * first one's changes.
+ */
+async function learnFromHeart(ctx: HandlerContext, user: BotUser, item: Item): Promise<Learned> {
+  const nothing: Learned = { tag: null, follow: null };
+  const tag = canonicalTag(item.category);
+  if (!tag) return nothing;
+  const has = (list: string[], value: string) => list.some((v) => normText(v) === normText(value));
+  if (has(user.prefs.disliked_categories, tag)) return nothing;
+
+  const place = item.kind === 'place';
+  const list = place ? user.prefs.interests : user.prefs.favourite_categories;
+  const fresh = !has(list, tag);
+
+  // schema.org gives us a performer only when the ticket site bothered to fill
+  // it in, and a title is not a name ("Вечір імпровізації" is nobody)
+  const who = place ? undefined : (item.performers ?? []).map((n) => n.trim()).find((n) => n.length >= 3);
+  const follow = who && !has(user.prefs.follow, who) ? who : null;
+
+  await saveUserPrefs(ctx.store, user, {
+    ...user.prefs,
+    taste: { ...user.prefs.taste, [tag]: (user.prefs.taste[tag] ?? 0) + 1 },
+    favourite_categories: !place && fresh ? [...list, tag] : user.prefs.favourite_categories,
+    interests: place && fresh ? [...list, tag] : user.prefs.interests,
+    follow: follow ? [...user.prefs.follow, follow] : user.prefs.follow,
+  });
+  return { tag: fresh ? tag : null, follow };
 }
