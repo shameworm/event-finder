@@ -16,7 +16,7 @@ import { collectCity } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
 import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
-import { addDays, today } from './util.ts';
+import { WORD_END, addDays, today } from './util.ts';
 
 export interface HandlerContext {
   store: Store;
@@ -151,7 +151,7 @@ function settingsPanel(user: BotUser): { text: string; inlineKeyboard: InlineBut
 
 /** "🔔", "🔔3", "🔔 3", "remind me 2" */
 export function parseBell(text: string): { bell: boolean; index?: number } {
-  const bell = /🔔|🛎|⏰/u.test(text) || /^\s*(bell|remind me|нагадай)\b/i.test(text);
+  const bell = /🔔|🛎|⏰/u.test(text) || new RegExp(`^\\s*(bell|remind me|нагадай)${WORD_END}`, 'iu').test(text);
   if (!bell) return { bell: false };
   const m = text.match(/(\d{1,2})/);
   return { bell: true, index: m ? Number(m[1]) : undefined };

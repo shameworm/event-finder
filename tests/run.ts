@@ -503,8 +503,43 @@ describe('preference commands', () => {
     assert.ok(applyPrefsCommand('watch Odesa', current).prefs.watch_cities.includes('odesa'));
   });
 
+  /**
+   * Every Ukrainian phrase here was dead for as long as the rules used `\b`,
+   * which is ASCII-only and therefore never finds a boundary before "д".
+   * The bot advertises these exact phrasings in /help, so they are checked.
+   */
+  it('understands the Ukrainian phrasings the bot suggests', () => {
+    check('додай джаз до улюблених', { understood: true, changed: true, contains: 'улюблене + джаз' });
+    check('не люблю балет', { understood: true, changed: true, contains: 'небажане + балет' });
+    // "класичну" is the inflected form of a tag already in the fixture's dislikes
+    check('не люблю класичну музику', { understood: true, changed: false });
+    check('слідкуй за Latexfauna', { understood: true, changed: true, contains: 'стежу за «Latexfauna»' });
+    check('максимум 800 грн', { understood: true, changed: true, contains: '800' });
+    check('прибери стендап з улюблених', { understood: true, changed: true, contains: 'улюблене − стендап' });
+    check('додай фолк до інтересів', { understood: true, changed: true, contains: 'інтереси + фолк' });
+  });
+
+  it('reads Ukrainian cities and trips', () => {
+    assert.equal(applyPrefsCommand('моє місто Одеса', current).prefs.home_city, 'odesa');
+    assert.ok(applyPrefsCommand('слідкуй за Львовом', current).prefs.watch_cities.includes('lviv'));
+    assert.equal(applyPrefsCommand('я у Львові наступного тижня', current).prefs.trip?.city, 'lviv');
+  });
+
+  it('folds an inflected tag onto the same key as its dictionary form', () => {
+    assert.equal(canonicalTag('класичну'), 'classical');
+    assert.equal(canonicalTag('класична'), 'classical');
+  });
+
+  it('switches to places when the request is Ukrainian', () => {
+    const base = '2026-10-21';
+    assert.deepEqual(parseRequest('тільки місця у Львові', { prefs, base }).kinds, ['place']);
+    assert.ok(parseRequest('нові кафе в Харкові', { prefs, base }).kinds.includes('place'));
+    assert.deepEqual(parseRequest('концерти на вихідних', { prefs, base }).kinds, ['event']);
+  });
+
   it('ignores things that are not preference changes', () => {
     check("what's on tonight in Kharkiv?", { understood: false, changed: false });
+    check('що цікавого у Харкові на вихідних', { understood: false, changed: false });
   });
 });
 
@@ -936,6 +971,8 @@ describe('bot handlers', () => {
   it('reads the bell with and without an index', () => {
     assert.deepEqual(parseBell('🔔'), { bell: true, index: undefined });
     assert.deepEqual(parseBell('🔔 3'), { bell: true, index: 3 });
+    assert.equal(parseBell('нагадай').bell, true);
+    assert.equal(parseBell('нагадай 2').index, 2);
     assert.equal(parseBell('what is on').bell, false);
   });
 
