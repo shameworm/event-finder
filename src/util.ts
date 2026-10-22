@@ -155,7 +155,7 @@ export function pad2(n: number): string {
 }
 
 /** Human day label: "Fri 24 Oct". */
-export function dayLabel(date: string, locale = 'en-GB'): string {
+export function dayLabel(date: string, locale = 'uk-UA'): string {
   const d = new Date(`${date}T12:00:00Z`);
   return new Intl.DateTimeFormat(locale, { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }).format(d);
 }

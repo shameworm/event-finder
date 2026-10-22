@@ -2,6 +2,7 @@ import type { Kind, Preferences, Query } from './types.ts';
 import { EVENT_CATEGORIES, KEYWORDS, PLACE_CATEGORIES, TAG_SYNONYMS } from './categories.ts';
 import { loadConfig, resolveCity } from './config.ts';
 import { addDays, hasWord, monthFromWord, normText, pad2, today, weekdayOf } from './util.ts';
+import * as copy from './copy.ts';
 
 /* ------------------------------------------------------------- date ranges --- */
 
@@ -12,23 +13,23 @@ export function weekendRange(base: string): DateRange {
   const wd = weekdayOf(base); // 0=Sun
   let from: string;
   if (wd === 5 || wd === 6) from = base;           // Fri, Sat -> from today
-  else if (wd === 0) return { from: base, to: base, label: 'this weekend (Sunday)' };
+  else if (wd === 0) return { from: base, to: base, label: copy.RANGE.weekendSunday };
   else from = addDays(base, 5 - wd);               // Mon..Thu -> coming Friday
   const to = addDays(from, weekdayOf(from) === 5 ? 2 : weekdayOf(from) === 6 ? 1 : 0);
-  return { from, to, label: 'this weekend' };
+  return { from, to, label: copy.RANGE.weekend };
 }
 
 /** Today through Sunday of the current ISO week. */
 export function thisWeekRange(base: string): DateRange {
   const wd = weekdayOf(base);
   const to = addDays(base, wd === 0 ? 0 : 7 - wd);
-  return { from: base, to, label: 'this week' };
+  return { from: base, to, label: copy.RANGE.thisWeek };
 }
 
 export function nextWeekRange(base: string): DateRange {
   const wd = weekdayOf(base);
   const from = addDays(base, wd === 0 ? 1 : 8 - wd); // next Monday
-  return { from, to: addDays(from, 6), label: 'next week' };
+  return { from, to: addDays(from, 6), label: copy.RANGE.nextWeek };
 }
 
 function monthEnd(base: string): string {
@@ -58,24 +59,26 @@ export function parseDateRange(text: string, base = today(loadConfig().timezone)
   // normText drops punctuation, so date patterns are matched on the raw text
   const raw = text.toLowerCase();
 
-  if (hasWord(t, 'today', 'tonight', 'сьогодні', 'сегодня')) return { from: base, to: base, label: 'today' };
-  if (hasWord(t, 'tomorrow', 'завтра')) return { from: addDays(base, 1), to: addDays(base, 1), label: 'tomorrow' };
-  if (hasWord(t, 'післязавтра', 'послезавтра')) return { from: addDays(base, 2), to: addDays(base, 2), label: 'the day after tomorrow' };
+  if (hasWord(t, 'today', 'tonight', 'сьогодні', 'сегодня')) return { from: base, to: base, label: copy.RANGE.today };
+  if (hasWord(t, 'tomorrow', 'завтра')) return { from: addDays(base, 1), to: addDays(base, 1), label: copy.RANGE.tomorrow };
+  if (hasWord(t, 'післязавтра', 'послезавтра')) {
+    return { from: addDays(base, 2), to: addDays(base, 2), label: copy.RANGE.dayAfterTomorrow };
+  }
   if (/(next weekend|наступні вихідні|наступних вихідних|на наступних вихідних)/.test(t)) {
     const w = weekendRange(addDays(base, 7));
-    return { ...w, label: 'next weekend' };
+    return { ...w, label: copy.RANGE.nextWeekend };
   }
   if (/(weekend|вихідн|выходн)/.test(t)) return weekendRange(base);
   if (/(next week|наступного тижня|на наступному тижні|наступний тиждень|на следующей неделе)/.test(t)) return nextWeekRange(base);
   if (/(this week|цього тижня|на цьому тижні|цей тиждень|на этой неделе)/.test(t)) return thisWeekRange(base);
   if (/(this month|цього місяця|у цьому місяці|в этом месяце)/.test(t)) {
-    return { from: base, to: monthEnd(base), label: 'this month' };
+    return { from: base, to: monthEnd(base), label: copy.RANGE.thisMonth };
   }
 
   const nDays = t.match(/(?:next|наступні|найближчі|ближайшие|за)\s+(\d{1,2})\s*(?:days|дні|днів|дня|дней)/);
   if (nDays) {
     const n = Number(nDays[1]);
-    return { from: base, to: addDays(base, Math.max(1, n) - 1), label: `next ${n} days` };
+    return { from: base, to: addDays(base, Math.max(1, n) - 1), label: copy.RANGE.nextDays(n) };
   }
 
   // 25-27 жовтня / 25–27 october
@@ -120,11 +123,11 @@ export function parseDateRange(text: string, base = today(loadConfig().timezone)
       const cur = weekdayOf(base);
       const delta = (wd - cur + 7) % 7;
       const d = addDays(base, delta === 0 ? 7 : delta);
-      return { from: d, to: d, label: `next ${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][wd]}` };
+      return { from: d, to: d, label: copy.WEEKDAY_NEXT[wd] as string };
     }
   }
 
-  return { from: base, to: addDays(base, 7), label: 'next 7 days' };
+  return { from: base, to: addDays(base, 7), label: copy.RANGE.nextDays(8) };
 }
 
 /* -------------------------------------------------------------- taste tags --- */
@@ -221,7 +224,7 @@ export function parseRequest(text: string, opts: ParseOptions = {}): Query {
 
   // --- dates
   const range = opts.from || opts.to
-    ? { from: opts.from ?? base, to: opts.to ?? opts.from ?? base, label: 'explicit range' }
+    ? { from: opts.from ?? base, to: opts.to ?? opts.from ?? base, label: copy.RANGE.explicit }
     : parseDateRange(text, base);
 
   // --- taste
