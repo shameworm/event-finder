@@ -214,6 +214,29 @@ export async function editMessageText(
 }
 
 /**
+ * Take a message back — used for the "⏳ Шукаю…" placeholder once the answer it
+ * was standing in for has arrived.
+ *
+ * Never throws: the message may already be gone, or older than the 48 hours
+ * Telegram allows a bot to delete within, and neither is worth an error to
+ * someone who just got their results.
+ */
+export async function deleteMessage(
+  messageId: number,
+  opts: { chatId: string; dryRun?: boolean; log?: Logger },
+): Promise<void> {
+  if (opts.dryRun) {
+    process.stdout.write(`\n──────── delete ${opts.messageId} in chat ${opts.chatId} ────────\n`);
+    return;
+  }
+  try {
+    await call('deleteMessage', { chat_id: opts.chatId, message_id: messageId }, z.boolean());
+  } catch (err) {
+    opts.log?.debug(`deleteMessage failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
  * Stop the spinner on a tapped button. Telegram expects this within seconds,
  * and a failure here must never sink the work the tap asked for.
  */
