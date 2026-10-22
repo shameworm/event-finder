@@ -968,6 +968,15 @@ describe('bot handlers', () => {
     }
   });
 
+  it('answers "покажи налаштування" with the panel instead of a search', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3014', city: 'kharkiv' });
+      const reply = await say(store, '3014', 'покажи налаштування');
+      assert.ok(reply.includes('Налаштування'), reply.slice(0, 300));
+      assert.ok(!reply.includes('Шукаю'), 'it must not kick off a scrape');
+    });
+  });
+
   it('reads the bell with and without an index', () => {
     assert.deepEqual(parseBell('🔔'), { bell: true, index: undefined });
     assert.deepEqual(parseBell('🔔 3'), { bell: true, index: 3 });

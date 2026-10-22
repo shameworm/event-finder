@@ -149,6 +149,13 @@ function settingsPanel(user: BotUser): { text: string; inlineKeyboard: InlineBut
   };
 }
 
+/**
+ * "покажи налаштування", "мої смаки", "show my settings" — asking to see the
+ * panel, which must not turn into a twenty-second scrape for "налаштування".
+ */
+const SHOW_SETTINGS =
+  /^\s*(?:покажи|показати|show|list|які|яке)?\s*(?:my |мої |моє )?(?:налаштування|settings|смаки|уподобання|prefs|preferences)\s*\??\s*$/iu;
+
 /** "🔔", "🔔3", "🔔 3", "remind me 2" */
 export function parseBell(text: string): { bell: boolean; index?: number } {
   const bell = /🔔|🛎|⏰/u.test(text) || new RegExp(`^\\s*(bell|remind me|нагадай)${WORD_END}`, 'iu').test(text);
@@ -460,6 +467,12 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
   /* --- 🔔 reminder ------------------------------------------------------ */
   const { bell, index } = parseBell(text);
   if (bell) return reply(await handleBell(ctx, msg, chatId, index));
+
+  /* --- "покажи налаштування" is a panel, not a search ------------------- */
+  if (SHOW_SETTINGS.test(text)) {
+    const panel = settingsPanel(user);
+    return reply(panel.text, { inlineKeyboard: panel.inlineKeyboard });
+  }
 
   /* --- a preference change, or a search -------------------------------- */
   const edit = applyPrefsCommand(text, user.prefs);
