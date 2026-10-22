@@ -38,8 +38,11 @@ export function defaultPrefs(city?: string): Preferences {
   return PreferencesSchema.parse({
     ...seed,
     home_city: home,
-    // the seed file's follow list belongs to the operator, not to new users
+    // the seed file's follow list belongs to the operator, not to new users —
+    // and neither do their favourites, because onboarding now asks the person
+    // what they like and fills this in from their own answer
     follow: [],
+    favourite_categories: [],
     trip: null,
     watch_cities: [],
   });

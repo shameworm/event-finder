@@ -13,6 +13,7 @@ import { PreferencesSchema } from './types.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
 import { canonicalTag } from './categories.ts';
 import { normText, today } from './util.ts';
+import * as copy from './copy.ts';
 import { nextWeekRange, parseDateRange, thisWeekRange } from './request.ts';
 
 export interface PrefsEdit {
@@ -24,15 +25,28 @@ export interface PrefsEdit {
   note?: string;
 }
 
-const CITY = String.raw`([A-Za-zА-Яа-яЄєІіЇїҐґ'\- ]{3,30}?)`;
+/**
+ * Unicode word boundaries.
+ *
+ * JavaScript's `\b` is defined against ASCII `\w`, so `/\bне люблю/` can never
+ * match — see the note in src/util.ts. Every pattern in this file is therefore
+ * built as a string with these lookarounds and compiled with the `u` flag;
+ * writing `\b` here would silently kill the Ukrainian phrasings, which is
+ * exactly what used to happen.
+ */
+const B = String.raw`(?<![\p{L}\p{N}])`;
+const E = String.raw`(?![\p{L}\p{N}])`;
+const re = (body: string, flags = 'iu'): RegExp => new RegExp(body, flags);
+
+const CITY = String.raw`([\p{L}'\- ]{3,30}?)`;
 
 /** Trim filler words a human leaves on a tag: "classical music" -> "classical". */
 function cleanTag(raw: string): string {
   let t = raw
-    .replace(/[«»"'’.!?,;:]+/g, ' ')
-    .replace(/\b(music|музику|музика|музыку|музыка|genre|жанр|events?|подій|події|шоу)\b/gi, ' ')
-    .replace(/\b(please|будь ласка|pls)\b/gi, ' ')
-    .replace(/\s+/g, ' ')
+    .replace(/[«»"'’.!?,;:]+/gu, ' ')
+    .replace(re(`${B}(?:music|музику|музика|музыку|музыка|genre|жанр|events?|подій|події|шоу)${E}`, 'giu'), ' ')
+    .replace(re(`${B}(?:please|будь ласка|pls)${E}`, 'giu'), ' ')
+    .replace(/\s+/gu, ' ')
     .trim();
   if (t.length > 60) t = t.slice(0, 60).trim();
   return t;
@@ -65,37 +79,52 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   const prefs = PreferencesSchema.parse(JSON.parse(JSON.stringify(current)));
   const base = today(cfg.timezone);
   const t = text.trim();
-  const low = normText(t);
   const ok = (changes: string[], note?: string): PrefsEdit => ({ changes, prefs, understood: true, note });
 
   /* --- show ------------------------------------------------------------- */
-  if (/^(show|list|які|what are)?\s*(my )?(prefs|preferences|налаштування|уподобання|смаки)\b/i.test(t) && !/add|remove/i.test(t)) {
-    return ok([], 'nothing to change');
+  if (
+    re(`^(?:show|list|які|what are)?\\s*(?:my )?(?:prefs|preferences|налаштування|уподобання|смаки)${E}`).test(t) &&
+    !re(`${B}(?:add|remove|додай|прибери)${E}`).test(t)
+  ) {
+    return ok([], copy.prefsNote.nothing);
   }
 
   /* --- budget ----------------------------------------------------------- */
-  if (/\b(no|без)\s*(price\s*)?(limit|ліміт|обмежень|budget)\b|unlimited/i.test(t)) {
+  if (re(`${B}(?:no|без)\\s*(?:price\\s*)?(?:limit|ліміт|обмежень|budget)${E}|${B}unlimited${E}`).test(t)) {
     const changed = prefs.max_ticket_price !== null;
     prefs.max_ticket_price = null;
-    return ok(changed ? ['max ticket price → no limit'] : [], changed ? undefined : 'already unlimited');
+    return ok(changed ? [copy.prefsChange.budgetNone] : [], changed ? undefined : copy.prefsNote.budgetUnlimited);
   }
   const budget = t.match(
-    /\b(?:max(?:imum)?|budget|limit|ліміт|бюджет|не більше|не дорожче|cheaper than|under|до)\b[^\d]{0,15}(\d{2,5})/i,
+    re(
+      `${B}(?:max(?:imum)?|максимум|budget|limit|ліміт|лімі́т|бюджет|не більше|не дорожче|дешевше|cheaper than|under|до)${E}` +
+        String.raw`[^\d]{0,15}(\d{2,5})`,
+    ),
   );
-  if (budget && /price|грн|uah|₴|budget|бюджет|ціна|цін|квит|ticket|max|limit|ліміт|до|under/i.test(t)) {
+  if (budget && /price|грн|uah|₴|budget|бюджет|ціна|цін|квит|ticket|max|максимум|limit|ліміт|до|under/iu.test(t)) {
     const value = Number(budget[1]);
     const changed = prefs.max_ticket_price !== value;
     prefs.max_ticket_price = value;
-    return ok(changed ? [`max ticket price → ${value} ${prefs.currency}`] : [], changed ? undefined : 'already set');
+    return ok(
+      changed ? [copy.prefsChange.budget(value, prefs.currency)] : [],
+      changed ? undefined : copy.prefsNote.alreadySet,
+    );
   }
 
   /* --- trip ------------------------------------------------------------- */
-  if (/\b(cancel|скасуй|скасувати)\b.*\b(trip|поїздк)|back home|повернувся додому|i'?m home/i.test(t)) {
+  if (
+    re(
+      `${B}(?:cancel|скасуй|скасувати)${E}.*${B}(?:trip|поїздк)|` +
+        `${B}back home${E}|${B}повернувся додому${E}|${B}i'?m home${E}`,
+    ).test(t)
+  ) {
     const changed = prefs.trip !== null;
     prefs.trip = null;
-    return ok(changed ? ['trip → cleared'] : [], changed ? undefined : 'no trip was set');
+    return ok(changed ? [copy.prefsChange.tripCleared] : [], changed ? undefined : copy.prefsNote.noTrip);
   }
-  const trip = t.match(new RegExp(String.raw`\b(?:i'?m|i am|я|ill be|i'?ll be|буду|їду|поїду|going)\b\s*(?:in|to|у|в|до)?\s*${CITY}\b`, 'i'));
+  const trip = t.match(
+    re(`${B}(?:i'?m|i am|я|ill be|i'?ll be|буду|їду|поїду|going)${E}\\s*(?:in|to|у|в|до)?\\s*${CITY}${E}`),
+  );
   if (trip) {
     const city = resolveCity(trip[1] as string);
     if (city) {
@@ -105,113 +134,179 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
           ? thisWeekRange(base)
           : parseDateRange(t, base);
       prefs.trip = { city, from: range.from, to: range.to };
-      return ok([`trip → ${cityLabel(city)} ${range.from} → ${range.to} (${range.label})`]);
+      return ok([copy.prefsChange.trip(cityLabel(city), range.from, range.to, range.label)]);
     }
   }
 
   /* --- cities ----------------------------------------------------------- */
-  const home = t.match(new RegExp(String.raw`\b(?:home city|home|домашнє місто|моє місто)\b\s*(?:is|=|:|—)?\s*${CITY}\b`, 'i'));
+  const home = t.match(
+    re(`${B}(?:home city|home|домашнє місто|моє місто|місто)${E}\\s*(?:is|=|:|—)?\\s*${CITY}${E}`),
+  );
   if (home) {
     const city = resolveCity(home[1] as string);
     if (city) {
       const changed = prefs.home_city !== city;
       prefs.home_city = city;
-      return ok(changed ? [`home city → ${cityLabel(city)}`] : [], changed ? undefined : 'already your home city');
+      return ok(
+        changed ? [copy.prefsChange.homeCity(cityLabel(city))] : [],
+        changed ? undefined : copy.prefsNote.alreadyHome,
+      );
     }
   }
-  const unwatch = t.match(new RegExp(String.raw`\b(?:unwatch|stop watching|не слідкуй за|прибери місто)\s*${CITY}\b`, 'i'));
+  const unwatch = t.match(
+    re(`${B}(?:unwatch|stop watching|не слідкуй за містом|не слідкуй за|прибери місто)\\s*${CITY}${E}`),
+  );
   if (unwatch) {
     const city = resolveCity(unwatch[1] as string);
     if (city) {
       const changed = drop(prefs.watch_cities, city);
-      return ok(changed ? [`watch cities − ${cityLabel(city)}`] : [], changed ? undefined : 'was not watched');
+      return ok(
+        changed ? [copy.prefsChange.watchDrop(cityLabel(city))] : [],
+        changed ? undefined : copy.prefsNote.notWatched,
+      );
     }
   }
-  const watch = t.match(new RegExp(String.raw`\b(?:watch|also watch|слідкуй за|додай місто)\s*${CITY}\b`, 'i'));
+  const watch = t.match(
+    re(`${B}(?:watch|also watch|слідкуй за містом|додай місто)\\s*${CITY}${E}`),
+  );
   if (watch) {
     const city = resolveCity(watch[1] as string);
     if (city) {
       const changed = add(prefs.watch_cities, city);
-      return ok(changed ? [`watch cities + ${cityLabel(city)}`] : [], changed ? undefined : 'already watched');
+      return ok(
+        changed ? [copy.prefsChange.watchAdd(cityLabel(city))] : [],
+        changed ? undefined : copy.prefsNote.alreadyWatched,
+      );
     }
   }
 
   /* --- follow list ------------------------------------------------------ */
-  const unfollow = t.match(/\b(?:unfollow|stop following|не слідкуй за|розлюби)\s+(.+)$/i);
+  const unfollow = t.match(re(`${B}(?:unfollow|stop following|не слідкуй за|розлюби)\\s+(.+)$`));
   if (unfollow) {
     const who = cleanTag(unfollow[1] as string);
     const changed = drop(prefs.follow, who);
-    return ok(changed ? [`unfollowed "${who}"`] : [], changed ? undefined : `"${who}" was not on the follow list`);
+    return ok(changed ? [copy.prefsChange.followDrop(who)] : [], changed ? undefined : copy.prefsNote.notFollowed(who));
   }
-  const follow = t.match(/\b(?:follow|слідкуй за|стеж за|підпишись на)\s+(.+)$/i);
+  const follow = t.match(re(`${B}(?:follow|слідкуй за|стеж за|підпишись на)\\s+(.+)$`));
   if (follow) {
     const who = cleanTag(follow[1] as string);
     const changed = add(prefs.follow, who);
-    return ok(changed ? [`following "${who}"`] : [], changed ? undefined : `already following "${who}"`);
+    return ok(changed ? [copy.prefsChange.followAdd(who)] : [], changed ? undefined : copy.prefsNote.alreadyFollowed(who));
   }
 
   /* --- interests -------------------------------------------------------- */
-  const interest = t.match(/\b(?:add|додай)\s+(.+?)\s+(?:to|в|до)\s+(?:interests?|інтересів|цікавого)\b/i);
+  const interest = t.match(re(`${B}(?:add|додай)\\s+(.+?)\\s+(?:to|в|до)\\s+(?:interests?|інтересів|цікавого)${E}`));
   if (interest) {
     const tag = asTag(interest[1] as string);
     const changed = add(prefs.interests, tag);
-    return ok(changed ? [`interests + ${tag}`] : [], changed ? undefined : 'already an interest');
+    return ok(changed ? [copy.prefsChange.interestAdd(tag)] : [], changed ? undefined : copy.prefsNote.alreadyInterest);
   }
 
   /* --- dislikes --------------------------------------------------------- */
-  const undislike = t.match(/\b(?:remove|delete|прибери|видали|убери)\s+(.+?)\s+(?:from|з|із)\s+(?:dislikes?|disliked|чорного списку|blacklist)\b/i);
+  const undislike = t.match(
+    re(`${B}(?:remove|delete|прибери|видали|убери)\\s+(.+?)\\s+(?:from|з|із)\\s+(?:dislikes?|disliked|чорного списку|blacklist)${E}`),
+  );
   if (undislike) {
     const tag = asTag(undislike[1] as string);
     const changed = drop(prefs.disliked_categories, tag);
-    return ok(changed ? [`dislikes − ${tag}`] : [], changed ? undefined : 'was not disliked');
+    return ok(changed ? [copy.prefsChange.dislikeDrop(tag)] : [], changed ? undefined : copy.prefsNote.notDisliked);
   }
-  const dislike = t.match(/\b(?:i\s+)?(?:don'?t like|do not like|dislike|hate|не люблю|не цікавить|ненавиджу|не хочу)\s+(.+)$/i)
-    ?? t.match(/^\s*(?:no|без|ніякого|никакого)\s+(.+)$/i)
-    ?? t.match(/\b(?:add)\s+(.+?)\s+(?:to)\s+(?:dislikes?|disliked)\b/i);
+  const dislike =
+    t.match(
+      re(
+        `${B}(?:i\\s+)?(?:don'?t like|do not like|dislike|hate|не люблю|не подобається|` +
+          `не цікавить|ненавиджу|не хочу|терпіти не можу)\\s+(.+)$`,
+      ),
+    ) ??
+    t.match(re(`^\\s*(?:no|без|ніякого|никакого|жодного)\\s+(.+)$`)) ??
+    t.match(re(`${B}add\\s+(.+?)\\s+to\\s+(?:dislikes?|disliked)${E}`));
   if (dislike) {
     const tag = asTag(dislike[1] as string);
     if (tag) {
       const changed = add(prefs.disliked_categories, tag);
       const alsoDropped = drop(prefs.favourite_categories, tag);
-      const changes = [...(changed ? [`dislikes + ${tag}`] : []), ...(alsoDropped ? [`favourites − ${tag}`] : [])];
-      return ok(changes, changes.length ? undefined : `already disliked`);
+      const changes = [
+        ...(changed ? [copy.prefsChange.dislikeAdd(tag)] : []),
+        ...(alsoDropped ? [copy.prefsChange.favDrop(tag)] : []),
+      ];
+      return ok(changes, changes.length ? undefined : copy.prefsNote.alreadyDisliked);
     }
   }
 
   /* --- favourites ------------------------------------------------------- */
-  const unfav = t.match(/\b(?:remove|delete|прибери|видали|убери)\s+(.+?)\s+(?:from|з|із)\s+(?:favourites?|favorites?|улюблених|улюблен\w*)\b/i);
+  const unfav = t.match(
+    re(`${B}(?:remove|delete|прибери|видали|убери)\\s+(.+?)\\s+(?:from|з|із)\\s+(?:favourites?|favorites?|улюблен[\\p{L}]*)${E}`),
+  );
   if (unfav) {
     const tag = asTag(unfav[1] as string);
     const changed = drop(prefs.favourite_categories, tag);
-    return ok(changed ? [`favourites − ${tag}`] : [], changed ? undefined : 'was not a favourite');
+    return ok(changed ? [copy.prefsChange.favDrop(tag)] : [], changed ? undefined : copy.prefsNote.notFavourite);
   }
   const fav =
-    t.match(/\b(?:add|додай|додати)\s+(.+?)\s+(?:to|в|до)\s+(?:favourites?|favorites?|улюблен\w*|любимих)\b/i) ??
-    t.match(/\b(?:i\s+)?(?:like|love|люблю|подобається|обожнюю)\s+(.+)$/i);
+    t.match(
+      re(`${B}(?:add|додай|додати)\\s+(.+?)\\s+(?:to|в|до)\\s+(?:favourites?|favorites?|улюблен[\\p{L}]*|любимих)${E}`),
+    ) ??
+    t.match(re(`${B}(?:i\\s+)?(?:like|love|люблю|подобається|до душі|обожнюю|кайфую від)\\s+(.+)$`));
   if (fav) {
     const tag = asTag(fav[1] as string);
     if (tag) {
       const changed = add(prefs.favourite_categories, tag);
       const alsoDropped = drop(prefs.disliked_categories, tag);
-      const changes = [...(changed ? [`favourites + ${tag}`] : []), ...(alsoDropped ? [`dislikes − ${tag}`] : [])];
-      return ok(changes, changes.length ? undefined : 'already a favourite');
+      const changes = [
+        ...(changed ? [copy.prefsChange.favAdd(tag)] : []),
+        ...(alsoDropped ? [copy.prefsChange.dislikeDrop(tag)] : []),
+      ];
+      return ok(changes, changes.length ? undefined : copy.prefsNote.alreadyFavourite);
     }
   }
 
   return { changes: [], prefs: current, understood: false };
 }
 
+/**
+ * The taste step of onboarding: a bare list of things someone likes.
+ *
+ * `applyPrefsCommand` needs a verb — "люблю джаз" — but when the bot has just
+ * asked "що тобі подобається?", the question supplies the verb and the answer
+ * is usually a list: "стендап, джаз, театр". So each part is taken as a
+ * favourite, provided it is either a genre/category we recognise or short
+ * enough to be a taste word rather than a sentence.
+ *
+ * The answer *replaces* the favourites rather than adding to them: we asked, so
+ * what they said is the whole answer, not an addition to somebody else's.
+ */
+export function favouritesFromList(text: string, current: Preferences): PrefsEdit {
+  const prefs = PreferencesSchema.parse(JSON.parse(JSON.stringify(current)));
+  prefs.favourite_categories = [];
+  const changes: string[] = [];
+
+  for (const part of text.split(/[,;/\n·•]+|\s+(?:та|і|й|and)\s+/i)) {
+    const cleaned = cleanTag(part);
+    if (cleaned.length < 2) continue;
+    const tag = canonicalTag(cleaned);
+    // canonicalTag only rewrites what it knows; an unchanged long phrase is a
+    // sentence, not a taste word, and guessing on it would poison the model
+    const recognised = normText(tag) !== normText(cleaned);
+    if (!recognised && cleaned.split(/\s+/).length > 2) continue;
+    if (prefs.disliked_categories.some((d) => normText(d) === normText(tag))) continue;
+    if (add(prefs.favourite_categories, tag)) changes.push(copy.prefsChange.favAdd(tag));
+  }
+
+  return { changes, prefs, understood: changes.length > 0 };
+}
+
 /** One-screen summary of the current preferences, for the bot and the CLI. */
 export function describePrefs(prefs: Preferences): string {
+  const l = copy.prefsLabel;
   const lines = [
-    `home city: ${cityLabel(prefs.home_city)}`,
-    `watch cities: ${prefs.watch_cities.map((c) => cityLabel(c)).join(', ') || '—'}`,
-    `favourites: ${prefs.favourite_categories.join(', ') || '—'}`,
-    `dislikes: ${prefs.disliked_categories.join(', ') || '—'}`,
-    `following: ${prefs.follow.join(', ') || '—'}`,
-    `max ticket price: ${prefs.max_ticket_price ? `${prefs.max_ticket_price} ${prefs.currency}` : 'no limit'}`,
-    `interests: ${(prefs.interests ?? []).join(', ') || '—'}`,
+    `${l.homeCity}: ${cityLabel(prefs.home_city)}`,
+    `${l.watchCities}: ${prefs.watch_cities.map((c) => cityLabel(c)).join(', ') || '—'}`,
+    `${l.favourites}: ${copy.tagList(prefs.favourite_categories)}`,
+    `${l.dislikes}: ${copy.tagList(prefs.disliked_categories)}`,
+    `${l.following}: ${prefs.follow.join(', ') || '—'}`,
+    `${l.maxPrice}: ${prefs.max_ticket_price ? copy.money(prefs.max_ticket_price, prefs.currency) : l.noLimit}`,
+    `${l.interests}: ${copy.tagList(prefs.interests ?? [])}`,
   ];
-  if (prefs.trip) lines.push(`trip: ${cityLabel(prefs.trip.city)} ${prefs.trip.from} → ${prefs.trip.to}`);
+  if (prefs.trip) lines.push(`${l.trip}: ${cityLabel(prefs.trip.city)} ${prefs.trip.from} → ${prefs.trip.to}`);
   return lines.join('\n');
 }
