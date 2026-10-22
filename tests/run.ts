@@ -59,7 +59,7 @@ const { splitForTelegram } = await import('../src/telegram-api.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs } = await import('../src/users.ts');
 const { cacheKey } = await import('../src/cache.ts');
 const { fanout } = await import('../src/fanout.ts');
-const { handleMessage, parseBell, isAllowed, BOT_COMMANDS } = await import('../src/bot-handlers.ts');
+const { handleMessage, handleCallback, parseBell, isAllowed, BOT_COMMANDS } = await import('../src/bot-handlers.ts');
 const { makeLogger } = await import('../src/log.ts');
 const { ALL_SOURCE_NAMES } = await import('../src/pipeline.ts');
 
@@ -858,7 +858,72 @@ describe('bot handlers', () => {
     });
   });
 
-  it('publishes a command menu that the router actually answers', () => {
+  /** Capture what a tap on an inline button produces. */
+  async function tap(store: StoreType, chatId: string, data: string): Promise<string> {
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    (process.stdout as { write: unknown }).write = (chunk: unknown) => {
+      chunks.push(String(chunk));
+      return true;
+    };
+    try {
+      await handleCallback({ store, log, dryRun: true }, {
+        id: 'cb',
+        data,
+        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' } },
+        from: { id: Number(chatId) },
+      } as never);
+    } finally {
+      (process.stdout as { write: unknown }).write = original;
+    }
+    return chunks.join('');
+  }
+
+  it('offers /settings as a panel of buttons', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3010', city: 'kharkiv' });
+      const panel = await say(store, '3010', '/settings');
+      assert.ok(panel.includes('Settings'), panel.slice(0, 300));
+      assert.ok(panel.includes('(set:weekend_digest)'), 'every digest needs its own button');
+      assert.ok(panel.includes('(set:city)') && panel.includes('(set:prefs)'), panel.slice(0, 600));
+    });
+  });
+
+  it('toggles a digest from the panel and redraws it in place', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3011', city: 'kharkiv' });
+      const off = await tap(store, '3011', 'set:weekend_digest');
+      assert.equal((await store.getUser('3011'))?.weekend_digest, 0);
+      assert.ok(off.includes('edit 42'), 'the panel is rewritten, not reposted');
+      assert.ok(off.includes('❌ 🎉 Weekend picks'), off.slice(0, 400));
+
+      await tap(store, '3011', 'set:weekend_digest');
+      assert.equal((await store.getUser('3011'))?.weekend_digest, 1);
+    });
+  });
+
+  it('changes the city from the panel', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3012', city: 'kharkiv' });
+      const picker = await tap(store, '3012', 'set:city');
+      assert.ok(picker.includes('(city:lviv)'), picker.slice(0, 400));
+      await tap(store, '3012', 'city:lviv');
+      assert.equal((await store.getUser('3012'))?.city, 'lviv');
+    });
+  });
+
+  it('asks before unsubscribing from a button', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3013', city: 'kharkiv' });
+      const confirm = await tap(store, '3013', 'set:stop');
+      assert.ok(confirm.includes('Unsubscribe?'), confirm.slice(0, 300));
+      assert.equal((await store.getUser('3013'))?.blocked, 0, 'one tap must not unsubscribe anyone');
+      await tap(store, '3013', 'set:stop!');
+      assert.equal((await store.getUser('3013'))?.blocked, 1);
+    });
+  });
+
+  it('publishes a command menu that the router actually answers', async () => {
     const source = readFileSync(new URL('../src/bot-handlers.ts', import.meta.url), 'utf8');
     assert.ok(BOT_COMMANDS.length > 0);
     for (const { command, description } of BOT_COMMANDS) {

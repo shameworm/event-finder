@@ -85,11 +85,18 @@ In Telegram, as yourself:
 5. `add jazz to favourites` → "✅ Noted: favourites + jazz".
 6. `/prefs` → jazz is listed.
 7. `stand-up this weekend` → a search, not a preference change.
-8. `/settings`, `/mute weekend`, `/settings` → the weekend flag flips to ❌.
-9. `/city` → keyboard; pick another city; `/today` → events from the new city.
-10. `/nonsense` → the help text.
-11. `/stop` → unsubscribed. `npx tsx scripts/prefs.ts --list` shows them gone
-    from the active list. `/start` brings them back.
+8. Type `/` → Telegram autocompletes the command list, and the ☰ button next
+   to the text field shows the same menu.
+9. `/settings` → a panel with a button per digest. Tap **Weekend picks** → the
+   same message redraws with ❌ and no new message appears; tap it again → ✅.
+10. In the panel: **Change city** → city buttons → pick one → back to the panel
+    with the new city. **My taste** → the preference summary with ⬅️ Back.
+11. `/mute weekend`, then `/settings` → the panel shows the weekend flag ❌ too.
+12. `/city` → keyboard; pick another city; `/today` → events from the new city.
+13. `/nonsense` → the help text.
+14. `/stop`, or **Unsubscribe** in the panel (which asks first) → unsubscribed.
+    `npx tsx scripts/prefs.ts --list` shows them gone from the active list.
+    `/start` brings them back, with quick-action buttons under the greeting.
 
 Then **as a second person** (another Telegram account, or a friend): `/start`,
 pick a different city, set a different taste. Both of you should now be in

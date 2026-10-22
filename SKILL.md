@@ -42,6 +42,13 @@ What users can send it: `/start` (onboarding asks for their city), `/week`,
 `/unfollow X`, `/stop`, `/help`, and `/stats` (owner only). Anything else is
 treated as a preference change if it reads like one, otherwise as a search.
 
+Most of that is also reachable without typing. The bot publishes `BOT_COMMANDS`
+with `setMyCommands` on start-up, so Telegram autocompletes `/` and fills the ☰
+menu; `/start` and `/help` carry quick-action buttons; and `/settings` is a
+panel of inline buttons that toggles each digest, changes the city and shows the
+taste model, rewriting itself in place on every tap. Button presses arrive as
+`callback_query` updates and are handled by `handleCallback`.
+
 ## Answering a request yourself
 
 When the user asks you directly rather than the bot, use the CLI:

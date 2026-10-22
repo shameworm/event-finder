@@ -19,7 +19,7 @@ import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore, type Store } from '../src/db.ts';
 import { botToken, getMe, getUpdates, setMyCommands } from '../src/telegram-api.ts';
-import { BOT_COMMANDS, handleMessage, type HandlerContext } from '../src/bot-handlers.ts';
+import { BOT_COMMANDS, handleCallback, handleMessage, type HandlerContext } from '../src/bot-handlers.ts';
 import { sleep } from '../src/util.ts';
 
 const args = parseArgs();
@@ -41,15 +41,18 @@ async function drain(store: Store, timeout: number): Promise<number> {
 
   for (const update of updates) {
     const msg = update.message ?? update.edited_message;
-    if (msg) {
+    const cb = update.callback_query;
+    if (msg || cb) {
       const started = Date.now();
+      const where = msg ? msg.chat.id : (cb?.message?.chat.id ?? cb?.from?.id);
       try {
-        await handleMessage(ctx, msg);
-        log.info(`handled update ${update.update_id} from chat ${msg.chat.id} in ${Date.now() - started}ms`);
+        if (msg) await handleMessage(ctx, msg);
+        else if (cb) await handleCallback(ctx, cb);
+        log.info(`handled update ${update.update_id} from chat ${where} in ${Date.now() - started}ms`);
       } catch (err) {
-        // one user's bad message must never take the bot down
+        // one user's bad message or button tap must never take the bot down
         log.error(
-          `update ${update.update_id} from chat ${msg.chat.id} failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
+          `update ${update.update_id} from chat ${where} failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
         );
       }
     }
