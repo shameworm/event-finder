@@ -108,6 +108,11 @@ export const PreferencesSchema = z.object({
   trip: TripSchema.nullable().default(null),
   /** Free-text interests used for ranking and place suggestions. */
   interests: z.array(z.string()).default([]),
+  /**
+   * How many ❤️ each tag has collected, so a category someone keeps hearting
+   * outranks one they hearted once. Written by the bot, not by hand.
+   */
+  taste: z.record(z.string(), z.number().nonnegative()).default({}),
   notes: z.array(z.string()).default([]),
 });
 export type Preferences = z.infer<typeof PreferencesSchema>;

@@ -72,3 +72,9 @@ interests:
   - contemporary art
 
 notes: []
+
+# Written by the bot, not by hand: how many ❤️ each tag has collected, which is
+# what makes a category someone keeps hearting outrank one they hearted once.
+# taste:
+#   standup: 7
+#   concert: 2
