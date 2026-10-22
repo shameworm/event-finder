@@ -67,6 +67,13 @@ const GENRE_LABEL: Record<string, string> = {
   poetry: 'поезія',
 };
 
+/**
+ * The genres offered as buttons on the "what should I never show you?" screen —
+ * the handful people actually want gone. Keys, so `tagLabel` stays the one
+ * place Ukrainian labels live.
+ */
+export const DISLIKE_SUGGESTIONS: string[] = ['classical', 'opera', 'ballet', 'chanson', 'karaoke', 'tribute'];
+
 /** A tag as a person should read it: a known key in Ukrainian, else as typed. */
 export function tagLabel(tag: string): string {
   return CATEGORY_LABEL[tag as Category] ?? GENRE_LABEL[tag] ?? tag;

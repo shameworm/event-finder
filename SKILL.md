@@ -36,11 +36,12 @@ npx tsx scripts/bot.ts --dry-run   # print replies instead of sending
 check nothing is already running (`pgrep -fl "scripts/bot.ts"`). In production it
 belongs under a supervisor — see the README.
 
-What users can send it: `/start` (onboarding asks for their city), `/week`,
-`/weekend`, `/today`, `/tomorrow`, `/places`, `/city`, `/prefs`, `/settings`,
-`/mute week|weekend|follows|places`, `/unmute`, `/reminders`, `/follow X`,
-`/unfollow X`, `/stop`, `/help`, and `/stats` (owner only). Anything else is
-treated as a preference change if it reads like one, otherwise as a search.
+What users can send it: `/start` (the walkthrough — see below), `/week`,
+`/weekend`, `/today`, `/tomorrow`, `/places`, `/city`, `/prefs`, `/setup`,
+`/settings`, `/mute week|weekend|follows|places`, `/unmute`, `/reminders`,
+`/follow X`, `/unfollow X`, `/stop`, `/help`, and `/stats` (owner only).
+Anything else is treated as a preference change if it reads like one, otherwise
+as a search.
 
 **The bot speaks Ukrainian.** Every string a user reads — the command menu, the
 settings panel, digests, reminders, prices and date labels — is Ukrainian; logs,
@@ -51,6 +52,20 @@ language, so a lookup layer would buy nothing. Day names come from
 
 Requests may be written in Ukrainian, Russian or English — that was always true
 of the parser and is unchanged.
+
+**Nobody inherits anybody's taste.** `/start` runs a five-step walkthrough —
+city, liked categories, dislikes, budget, follow list — and a new user's profile
+is whatever they tapped, starting from empty. The step lives in `users.stage`
+(`city → likes → dislikes → budget → follow → NULL`); every screen renders its
+ticks from the stored preferences, so `/setup` and `/settings → 🎛 Мої смаки`
+reopen the same screens later to change one thing. Only `stage = 'city'` holds
+someone back from the scheduled jobs: walking away at "what's your budget?"
+costs them nothing. `preferences.yaml` is the operator's own profile and the
+CLI's defaults — never a template for strangers.
+
+Users who registered before the walkthrough existed are offered it once, with a
+button; declining is remembered in the `state` table under
+`setup_offered:<chat id>`.
 
 Most of that is also reachable without typing. The bot publishes `BOT_COMMANDS`
 with `setMyCommands` on start-up, so Telegram autocompletes `/` and fills the ☰

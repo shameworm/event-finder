@@ -11,12 +11,13 @@ import type { TgCallbackQuery, TgMessage } from './schemas.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
 import { answerCallbackQuery, editMessageText, escapeHtml, sendMessage, type InlineButton } from './telegram-api.ts';
 import { applyPrefsCommand, describePrefs } from './prefs-engine.ts';
+import { CATEGORY_LABEL, DISLIKE_SUGGESTIONS, EMOJI, EVENT_CATEGORIES, tagLabel } from './categories.ts';
 import { parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
 import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
-import { WORD_END, addDays, today } from './util.ts';
+import { WORD_END, addDays, normText, today } from './util.ts';
 
 export interface HandlerContext {
   store: Store;
@@ -38,6 +39,7 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: 'tomorrow', description: '📅 Що завтра' },
   { command: 'places', description: '📍 Нові кавʼярні, бари та галереї' },
   { command: 'settings', description: '⚙️ Розсилки, місто і смаки' },
+  { command: 'setup', description: '🎛 Налаштувати смаки кнопками' },
   { command: 'city', description: '🏙 Змінити місто' },
   { command: 'prefs', description: '🎛 Що я думаю про твої смаки' },
   { command: 'reminders', description: '⏰ Твої нагадування' },
@@ -63,6 +65,7 @@ const COMMANDS = `<b>Що я вмію</b>
 /today · /tomorrow — просто зараз
 /places — нові кавʼярні, бари й галереї, куди варто зайти
 /settings — розсилки, місто і смаки, кнопками
+/setup — зібрати смаки заново, крок за кроком
 /city — змінити місто
 /prefs — що я думаю про твої смаки
 /reminders — твої нагадування 🔔
@@ -119,6 +122,317 @@ function quickActions(): InlineButton[][] {
       { text: '⚙️ Налаштування', callback_data: 'go:settings' },
     ],
   ];
+}
+
+/* ------------------------------------------------------- the walkthrough --- */
+
+/**
+ * The /start walkthrough: where a new person's taste comes from, now that they
+ * no longer inherit the operator's (see `newUserPrefs`).
+ *
+ * The current step lives in `users.stage`. Every screen draws its ticks from
+ * the *stored* preferences rather than from any in-memory wizard state — which
+ * is what lets /settings reopen the very same screens later to change one
+ * thing, and what makes an interrupted walkthrough pick up where it stopped.
+ */
+const STEPS = ['city', 'likes', 'dislikes', 'budget', 'follow'] as const;
+type Step = (typeof STEPS)[number];
+/** Every step but the city, which is a reply keyboard rather than a screen. */
+type TasteStep = Exclude<Step, 'city'>;
+
+const BUDGETS = [500, 1000, 2000];
+
+export function isStep(stage: string | null): stage is Step {
+  return Boolean(stage && (STEPS as readonly string[]).includes(stage));
+}
+
+function isTasteStep(value: string): value is TasteStep {
+  return isStep(value) && value !== 'city';
+}
+
+function nextStep(step: Step): Step | undefined {
+  return STEPS[STEPS.indexOf(step) + 1];
+}
+
+interface Screen {
+  text: string;
+  inlineKeyboard: InlineButton[][];
+}
+
+/**
+ * Walkthrough or /settings? Read off the stage, so no button has to carry it:
+ * someone with a step in `stage` is mid-walkthrough, anyone else is editing.
+ */
+function modeOf(user: BotUser): 'wizard' | 'settings' {
+  return isStep(user.row.stage) ? 'wizard' : 'settings';
+}
+
+/** The row under a step: onwards in the walkthrough, back in /settings. */
+function footRow(step: TasteStep, mode: 'wizard' | 'settings'): InlineButton[] {
+  if (mode === 'settings') return [{ text: '⬅️ Назад', callback_data: 'onb:taste' }];
+  return [
+    { text: nextStep(step) ? 'Далі →' : 'Готово ✅', callback_data: 'onb:next' },
+    { text: 'Пропустити', callback_data: 'onb:skip' },
+  ];
+}
+
+const tick = (on: boolean, label: string) => `${on ? '✅' : '▫️'} ${label}`;
+
+/** Tags are stored as canonical keys, but cased however the person typed them. */
+function hasTag(list: string[], tag: string): boolean {
+  return list.some((v) => v.toLowerCase() === tag.toLowerCase());
+}
+
+/**
+ * One taste screen — the same thing whether it is a step of the walkthrough or
+ * a visit from /settings.
+ */
+function tasteScreen(user: BotUser, step: TasteStep, mode = modeOf(user)): Screen {
+  const p = user.prefs;
+  // the city is asked before the count starts, so /setup can skip it honestly
+  const head = mode === 'wizard' ? ` <i>${STEPS.indexOf(step)}/${STEPS.length - 1}</i>` : '';
+  const now = (list: string[]) => (list.length ? `\n\nЗараз: <b>${escapeHtml(list.map(tagLabel).join(', '))}</b>` : '');
+
+  switch (step) {
+    case 'likes':
+      return {
+        text: `<b>🎛 Що тобі заходить?</b>${head}\n\nТисни все, що твоє — я підніматиму це вище у списках.${now(p.favourite_categories)}`,
+        inlineKeyboard: [
+          ...rows(
+            EVENT_CATEGORIES.filter((c) => c !== 'other').map((c) => ({
+              text: tick(hasTag(p.favourite_categories, c), `${EMOJI[c]} ${CATEGORY_LABEL[c]}`),
+              callback_data: `onb:like:${c}`,
+            })),
+            2,
+          ),
+          footRow(step, mode),
+        ],
+      };
+
+    case 'dislikes':
+      return {
+        text: `<b>🚫 Чого не показувати?</b>${head}\n\nЦе я викидатиму зі списків — крім тих, за ким ти стежиш.${now(p.disliked_categories)}`,
+        inlineKeyboard: [
+          ...rows(
+            DISLIKE_SUGGESTIONS.map((t) => ({
+              text: tick(hasTag(p.disliked_categories, t), tagLabel(t)),
+              callback_data: `onb:dis:${t}`,
+            })),
+            2,
+          ),
+          footRow(step, mode),
+        ],
+      };
+
+    case 'budget':
+      return {
+        text:
+          `<b>💸 Максимум за квиток?</b>${head}\n\nДорожче не показуватиму. ` +
+          (mode === 'wizard' ? 'Напиши своє число, якщо цих не досить.' : 'Або напиши «<i>максимум 800 грн</i>».') +
+          `\n\nЗараз: <b>${p.max_ticket_price ? `${p.max_ticket_price} ${escapeHtml(p.currency)}` : 'без обмежень'}</b>`,
+        inlineKeyboard: [
+          ...rows(
+            [
+              ...BUDGETS.map((n) => ({ text: tick(p.max_ticket_price === n, `до ${n}`), callback_data: `onb:budget:${n}` })),
+              { text: tick(p.max_ticket_price === null, 'без ліміту'), callback_data: 'onb:budget:none' },
+            ],
+            2,
+          ),
+          footRow(step, mode),
+        ],
+      };
+
+    case 'follow':
+      return {
+        text:
+          `<b>⭐️ За ким стежити?</b>${head}\n\n` +
+          (mode === 'wizard'
+            ? 'Напиши імена через кому — <i>Антон Тимошенко, Latexfauna</i>. '
+            : 'Щоб додати — напиши «<i>слідкуй за Latexfauna</i>». ') +
+          'Їх я шукаю окремо й повідомляю одразу, щойно оголосять виступ — навіть якщо квиток дорожчий за твій ліміт.' +
+          (p.follow.length ? `\n\nЗараз: <b>${escapeHtml(p.follow.join(', '))}</b> — тисни, щоб прибрати.` : ''),
+        inlineKeyboard: [
+          ...rows(
+            p.follow.map((name, i) => ({ text: `❌ ${name}`, callback_data: `onb:unfollow:${i}` })),
+            2,
+          ),
+          footRow(step, mode),
+        ],
+      };
+  }
+}
+
+/** /settings → 🎛 Мої смаки: the summary, with a way into each screen. */
+function tasteMenu(user: BotUser): Screen {
+  return {
+    text:
+      `<b>🎛 Мої смаки</b>\n<code>${escapeHtml(describePrefs(user.prefs))}</code>\n\n` +
+      `Тисни, щоб змінити — або просто напиши «<i>додай джаз до улюблених</i>».`,
+    inlineKeyboard: [
+      [
+        { text: '🎛 Улюблене', callback_data: 'onb:step:likes' },
+        { text: '🚫 Небажане', callback_data: 'onb:step:dislikes' },
+      ],
+      [
+        { text: '💸 Бюджет', callback_data: 'onb:step:budget' },
+        { text: '⭐️ Стежу за', callback_data: 'onb:step:follow' },
+      ],
+      [{ text: '⬅️ Назад', callback_data: 'set:back' }],
+    ],
+  };
+}
+
+const setupOfferedKey = (chatId: string) => `setup_offered:${chatId}`;
+
+/**
+ * Offer the walkthrough once to someone who registered before it existed and
+ * therefore still carries the operator's old taste. Declining is remembered.
+ *
+ * The flag lives in the `state` table rather than a new users column, because
+ * `bootstrap` only ever runs `CREATE TABLE IF NOT EXISTS` — a new column would
+ * never reach a database that already exists.
+ */
+async function offerSetup(ctx: HandlerContext, user: BotUser, reply: Reply): Promise<void> {
+  if (isStep(user.row.stage)) return;
+  const key = setupOfferedKey(user.chatId);
+  if (await ctx.store.getState(key)) return;
+  // written before the send, so a flaky send can never turn into a nag
+  await ctx.store.setState(key, new Date().toISOString());
+  await reply(
+    `<b>👋 Тепер смаки можна налаштувати кнопками.</b>\n\n` +
+      `Раніше новим людям діставались чужі налаштування — твої, можливо, досі такі. Пройдемося?`,
+    {
+      inlineKeyboard: [
+        [
+          { text: '🎛 Налаштувати', callback_data: 'onb:start' },
+          { text: 'Не зараз', callback_data: 'onb:later' },
+        ],
+      ],
+    },
+  );
+}
+
+/** Put someone on a step and show it as a new message. */
+async function showStep(ctx: HandlerContext, user: BotUser, step: Step, reply: Reply, lead = ''): Promise<void> {
+  await ctx.store.setUserStage(user.chatId, step);
+  if (step === 'city') {
+    await reply(`${lead}<b>🏙 У якому ти місті?</b>`, { keyboard: cityKeyboard() });
+    return;
+  }
+  const screen = tasteScreen(user, step, 'wizard');
+  await reply(lead + screen.text, { inlineKeyboard: screen.inlineKeyboard });
+}
+
+/** End the walkthrough: clear the stage, then show what was recorded. */
+async function finishWizard(ctx: HandlerContext, chatId: string, show: (screen: Screen) => Promise<void>): Promise<void> {
+  await ctx.store.setUserStage(chatId, null);
+  await ctx.store.setState(setupOfferedKey(chatId), new Date().toISOString());
+  const user = await getUser(ctx.store, chatId, ctx.log);
+  if (!user) return;
+  await show({
+    text:
+      `<b>✅ Готово.</b> Ось що я запамʼятав:\n<code>${escapeHtml(describePrefs(user.prefs))}</code>\n\n` +
+      `Змінити будь-коли — /settings. Поїхали:`,
+    inlineKeyboard: quickActions(),
+  });
+}
+
+/** Walkthrough: move on from a step, redrawing the same message. */
+async function advanceInPlace(
+  ctx: HandlerContext,
+  chatId: string,
+  from: Step,
+  draw: (screen: Screen) => Promise<void>,
+): Promise<void> {
+  const after = nextStep(from);
+  if (!after || !isTasteStep(after)) return finishWizard(ctx, chatId, draw);
+  await ctx.store.setUserStage(chatId, after);
+  const fresh = await getUser(ctx.store, chatId, ctx.log);
+  if (fresh) await draw(tasteScreen(fresh, after, 'wizard'));
+}
+
+/** Tap a category on or off, keeping favourites and dislikes exclusive. */
+async function toggleTaste(ctx: HandlerContext, user: BotUser, kind: 'like' | 'dislike', tag: string): Promise<void> {
+  const drop = (list: string[]) => list.filter((v) => v.toLowerCase() !== tag.toLowerCase());
+  const liking = kind === 'like';
+  const mine = liking ? user.prefs.favourite_categories : user.prefs.disliked_categories;
+  const other = liking ? user.prefs.disliked_categories : user.prefs.favourite_categories;
+  const next = hasTag(mine, tag) ? drop(mine) : [...drop(mine), tag];
+  await saveUserPrefs(ctx.store, user, {
+    ...user.prefs,
+    favourite_categories: liking ? next : drop(other),
+    disliked_categories: liking ? drop(other) : next,
+  });
+}
+
+/** "готово", "далі", "skip" — leaving a step by typing instead of tapping. */
+const STEP_DONE = /^\s*(?:готово|далі|дальше|пропустити|next|skip|done|ok|—|-)\s*$/iu;
+
+/**
+ * A typed message while the walkthrough is open. Nothing here may fall through
+ * to `answerSearch`: typing "Антон Тимошенко" at the follow step must add a
+ * name, not start a twenty-second scrape of every ticket site.
+ */
+async function handleStepText(
+  ctx: HandlerContext,
+  user: BotUser,
+  step: Step,
+  text: string,
+  reply: Reply,
+): Promise<void> {
+  const show = (screen: Screen) => reply(screen.text, { inlineKeyboard: screen.inlineKeyboard });
+
+  if (step === 'city') {
+    const city = resolveCity(text);
+    if (!city) {
+      await reply(`Я поки не знаю «${escapeHtml(text)}». Обери зі списку або попроси власника додати твоє місто.`, {
+        keyboard: cityKeyboard(),
+      });
+      return;
+    }
+    const next = await saveUserPrefs(ctx.store, user, { ...user.prefs, home_city: city });
+    // the city keyboard has to go before an inline one can arrive
+    await reply(`✅ Нехай буде ${escapeHtml(cityLabel(city))}.`, { removeKeyboard: true });
+    await showStep(ctx, next, 'likes', reply);
+    return;
+  }
+
+  const onwards = async (from: BotUser) => {
+    const after = nextStep(step);
+    return after ? showStep(ctx, from, after, reply) : finishWizard(ctx, from.chatId, show);
+  };
+
+  if (STEP_DONE.test(text)) return onwards(user);
+
+  // a sentence still works mid-walkthrough, and wins: "не люблю класику" at the
+  // follow step is a dislike, not the name of a band to watch for
+  const edit = applyPrefsCommand(text, user.prefs);
+  if (edit.understood && edit.changes.length > 0) {
+    const changed = await saveUserPrefs(ctx.store, user, edit.prefs);
+    await reply(`✅ Записав:\n${edit.changes.map((c) => `· ${escapeHtml(c)}`).join('\n')}`);
+    return show(tasteScreen(changed, step, 'wizard'));
+  }
+
+  if (step === 'follow') {
+    const names = text.split(/[,;\n]+/).map((n) => n.trim()).filter((n) => n.length >= 2);
+    if (names.length === 0) return show(tasteScreen(user, step, 'wizard'));
+    const follow = [...user.prefs.follow];
+    const added = names.filter((n) => !follow.some((f) => normText(f) === normText(n)));
+    const next = await saveUserPrefs(ctx.store, user, { ...user.prefs, follow: [...follow, ...added] });
+    await reply(added.length ? `⭐️ Стежу за: ${escapeHtml(added.join(', '))}` : 'За ними я вже стежу.');
+    return show(tasteScreen(next, step, 'wizard'));
+  }
+
+  if (step === 'budget') {
+    const digits = text.replace(/\D+/g, '');
+    if (digits && Number(digits) > 0) {
+      const next = await saveUserPrefs(ctx.store, user, { ...user.prefs, max_ticket_price: Number(digits) });
+      await reply(`💸 Максимум — ${escapeHtml(digits)} ${escapeHtml(next.prefs.currency)}.`);
+      return onwards(next);
+    }
+  }
+
+  return show(tasteScreen(user, step, 'wizard'));
 }
 
 /**
@@ -336,48 +650,42 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
       username: msg.from?.username ?? null,
       firstName: msg.from?.username ?? null,
     });
-    if (created || user.row.stage === 'city') {
-      await ctx.store.setUserStage(chatId, 'city');
-      await reply(
-        `👋 Я знаходжу концерти, стендап, театр, виставки, лекції, вечірки та фестивалі в українських містах — і нові місця, куди варто зайти.\n\nУ якому ти місті?`,
-        { keyboard: cityKeyboard() },
-      );
-    } else {
-      await reply(`З поверненням. Твоє місто — ${escapeHtml(cityLabel(user.city))}.\n\n${COMMANDS}`, {
-        inlineKeyboard: quickActions(),
-      });
+    // they are getting the walkthrough right now, so never nudge them about it
+    if (created) await ctx.store.setState(setupOfferedKey(chatId), new Date().toISOString());
+    if (created || isStep(user.row.stage)) {
+      // /start in the middle of the walkthrough resumes it, it does not restart
+      const step = isStep(user.row.stage) ? user.row.stage : 'city';
+      const lead =
+        step === 'city'
+          ? `👋 Я знаходжу концерти, стендап, театр, виставки, лекції, вечірки та фестивалі в українських містах — ` +
+            `і нові місця, куди варто зайти.\n\nСпершу налаштуємо тебе — місто й чотири коротких екрани.\n\n`
+          : '';
+      await showStep(ctx, user, step, reply, lead);
+      return;
     }
+    await reply(`З поверненням. Твоє місто — ${escapeHtml(cityLabel(user.city))}.\n\n${COMMANDS}`, {
+      inlineKeyboard: quickActions(),
+    });
     return;
   }
 
   const existing = await getUser(ctx.store, chatId, ctx.log);
   if (!existing) {
     // anyone who starts mid-conversation gets onboarded too
-    await registerUser(ctx.store, { chatId, username: msg.from?.username ?? null });
-    await ctx.store.setUserStage(chatId, 'city');
-    await reply('👋 Почнімо з головного — у якому ти місті?', { keyboard: cityKeyboard() });
+    const { user } = await registerUser(ctx.store, { chatId, username: msg.from?.username ?? null });
+    await ctx.store.setState(setupOfferedKey(chatId), new Date().toISOString());
+    await showStep(ctx, user, 'city', reply, '👋 Почнімо з головного.\n\n');
     return;
   }
   await ctx.store.touchUser(chatId);
-  let user = existing;
+  const user = existing;
 
-  if (user.row.stage === 'city') {
-    const city = resolveCity(text);
-    if (!city) {
-      await reply(`Я поки не знаю «${escapeHtml(text)}». Обери зі списку або попроси власника додати твоє місто.`, {
-        keyboard: cityKeyboard(),
-      });
-      return;
-    }
-    user = await saveUserPrefs(ctx.store, user, { ...user.prefs, home_city: city });
-    await ctx.store.setUserStage(chatId, null);
-    await reply(
-      `✅ Нехай буде ${escapeHtml(cityLabel(city))}.\n\nРозкажи, що тобі заходить — «стендап та інді-рок, без класики» — або просто спробуй /weekend.\n\n${COMMANDS}`,
-      { removeKeyboard: true },
-    );
-    await reply('Обери, з чого почати:', { inlineKeyboard: quickActions() });
+  // mid-walkthrough, plain text belongs to the open step — commands still work
+  if (!command && isStep(user.row.stage)) {
+    await handleStepText(ctx, user, user.row.stage, text, reply);
     return;
   }
+  await offerSetup(ctx, user, reply);
 
   /* --- commands --------------------------------------------------------- */
   switch (command) {
@@ -405,6 +713,10 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
       await saveUserPrefs(ctx.store, user, { ...user.prefs, home_city: city });
       return reply(`✅ Місто — ${escapeHtml(cityLabel(city))}.`);
     }
+
+    case '/setup':
+      // the city is already known, so the walkthrough starts at the taste
+      return showStep(ctx, user, 'likes', reply, 'Зберемо смаки заново.\n\n');
 
     case '/prefs':
       return reply(`<b>🎛 Що я думаю про твої смаки</b>\n<code>${escapeHtml(describePrefs(user.prefs))}</code>`);
@@ -495,6 +807,10 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
  *   set:<optin>   toggle one digest, then redraw the panel in place
  *   set:city · set:prefs · set:back · set:stop · set:stop!
  *   city:<key>    pick a city from the panel
+ *   onb:…         the taste screens, shared by the walkthrough and /settings:
+ *                 onb:like:<cat> · onb:dis:<tag> · onb:budget:<n|none>
+ *                 onb:unfollow:<index> · onb:next · onb:skip
+ *                 onb:step:<step> · onb:taste · onb:start · onb:later
  *
  * Everything that changes a setting rewrites the panel it was tapped from, so
  * the chat keeps one settings screen rather than a stack of confirmations.
@@ -546,9 +862,66 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
   if (kind === 'city') {
     if (!loadConfig().cities[arg]) return drawPanel();
     await saveUserPrefs(ctx.store, user, { ...user.prefs, home_city: arg });
-    // tapping a city finishes onboarding too, if that is where they were
-    if (user.row.stage === 'city') await ctx.store.setUserStage(chatId, null);
+    // someone still on the first step came here instead of using the keyboard,
+    // so answer the step rather than ending the walkthrough early
+    if (user.row.stage === 'city') return advanceInPlace(ctx, chatId, 'city', draw);
     return drawPanel();
+  }
+
+  if (kind === 'onb') {
+    const cut = arg.indexOf(':');
+    const verb = cut < 0 ? arg : arg.slice(0, cut);
+    const payload = cut < 0 ? '' : arg.slice(cut + 1);
+    const step = isStep(user.row.stage) ? user.row.stage : null;
+    const mode = modeOf(user);
+
+    /** Redraw one step in place, with whatever is in the database now. */
+    const drawStep = async (which: TasteStep, m = mode) => {
+      const fresh = (await getUser(ctx.store, chatId, ctx.log)) ?? user;
+      return draw(tasteScreen(fresh, which, m));
+    };
+
+    switch (verb) {
+      // the nudge: accepting opens the editing screens, so nothing is wiped
+      case 'start':
+        return draw(tasteMenu(user));
+      case 'later':
+        return draw({ text: 'Гаразд, нічого не змінюю. /setup — коли захочеш.', inlineKeyboard: [] });
+
+      case 'taste':
+        return draw(tasteMenu((await getUser(ctx.store, chatId, ctx.log)) ?? user));
+      case 'step':
+        if (isTasteStep(payload)) return drawStep(payload, 'settings');
+        return;
+
+      case 'like':
+      case 'dis': {
+        if (!payload) return;
+        await toggleTaste(ctx, user, verb === 'like' ? 'like' : 'dislike', payload);
+        return drawStep(verb === 'like' ? 'likes' : 'dislikes');
+      }
+
+      case 'budget': {
+        const price = payload === 'none' ? null : Number(payload);
+        if (price !== null && !(Number.isFinite(price) && price > 0)) return;
+        await saveUserPrefs(ctx.store, user, { ...user.prefs, max_ticket_price: price });
+        if (mode === 'wizard') return advanceInPlace(ctx, chatId, 'budget', draw);
+        return drawStep('budget', 'settings');
+      }
+
+      case 'unfollow': {
+        const i = Number(payload);
+        if (!Number.isInteger(i)) return;
+        await saveUserPrefs(ctx.store, user, { ...user.prefs, follow: user.prefs.follow.filter((_, n) => n !== i) });
+        return drawStep('follow');
+      }
+
+      case 'next':
+      case 'skip':
+        if (!step) return;
+        return advanceInPlace(ctx, chatId, step, draw);
+    }
+    return;
   }
 
   if (kind !== 'set') return;
@@ -567,10 +940,7 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
       });
 
     case 'prefs':
-      return draw({
-        text: `<b>🎛 Що я думаю про твої смаки</b>\n<code>${escapeHtml(describePrefs(user.prefs))}</code>\n\nЩоб змінити — просто напиши: «додай джаз до улюблених», «максимум 800 грн».`,
-        inlineKeyboard: [[{ text: '⬅️ Назад', callback_data: 'set:back' }]],
-      });
+      return draw(tasteMenu(user));
 
     case 'stop':
       return draw({

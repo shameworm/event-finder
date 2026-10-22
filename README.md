@@ -217,7 +217,7 @@ npx tsx scripts/telegram.ts --channel @some_channel --dump   # see raw posts
 ```bash
 npx tsx scripts/doctor.ts            # config, secrets, db, users, bot policy
 npx tsx scripts/doctor.ts --network  # also probe every source site
-npm test                             # 87 offline checks (~3s, no network)
+npm test                             # 107 offline checks (~3s, no network)
 ```
 
 ## 8. Automate the digests

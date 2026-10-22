@@ -845,7 +845,7 @@ describe('bot handlers', () => {
     return chunks.join('');
   }
 
-  it('onboards a new user by asking for a city, then remembers it', async () => {
+  it('onboards a new user by asking for a city, then moves on to their taste', async () => {
     await withTestStore(async (store) => {
       const hello = await say(store, '3001', '/start');
       assert.ok(hello.includes('У якому ти місті'), hello.slice(0, 200));
@@ -853,9 +853,126 @@ describe('bot handlers', () => {
 
       const picked = await say(store, '3001', 'Львів');
       assert.ok(picked.includes('Львів'), picked.slice(0, 200));
+      assert.ok(picked.includes('Що тобі заходить'), 'the city answer leads straight into the taste step');
       const row = await store.getUser('3001');
-      assert.equal(row?.stage, null);
+      assert.equal(row?.stage, 'likes');
       assert.equal(row?.city, 'lviv');
+    });
+  });
+
+  it('builds a profile out of taps and finishes the walkthrough', async () => {
+    await withTestStore(async (store) => {
+      await say(store, '3020', '/start');
+      await say(store, '3020', 'Харків');
+
+      await tap(store, '3020', 'onb:like:standup');
+      const likes = await tap(store, '3020', 'onb:like:exhibition');
+      assert.ok(likes.includes('✅ 🎤 стендап'), 'a chosen category is ticked');
+      assert.ok(likes.includes('▫️ 🎭 театр'), 'an unchosen one is not');
+
+      await tap(store, '3020', 'onb:next');
+      assert.equal((await store.getUser('3020'))?.stage, 'dislikes');
+      await tap(store, '3020', 'onb:dis:classical');
+
+      await tap(store, '3020', 'onb:next');
+      const budget = await tap(store, '3020', 'onb:budget:1000');
+      // a budget tap advances on its own — there is nothing else to say
+      assert.equal((await store.getUser('3020'))?.stage, 'follow');
+      assert.ok(budget.includes('За ким стежити'), budget.slice(0, 200));
+
+      await say(store, '3020', 'Антон Тимошенко, Latexfauna');
+      const done = await tap(store, '3020', 'onb:next');
+      assert.ok(done.includes('Готово'), done.slice(0, 200));
+
+      const row = await store.getUser('3020');
+      assert.equal(row?.stage, null);
+      const user = (await getUser(store, '3020'))!;
+      assert.deepEqual(user.prefs.favourite_categories, ['standup', 'exhibition']);
+      assert.deepEqual(user.prefs.disliked_categories, ['classical']);
+      assert.equal(user.prefs.max_ticket_price, 1000);
+      assert.deepEqual(user.prefs.follow, ['Антон Тимошенко', 'Latexfauna']);
+    });
+  });
+
+  it('keeps liking and disliking the same thing mutually exclusive', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3021', city: 'kharkiv' });
+      await tap(store, '3021', 'onb:like:theatre');
+      await tap(store, '3021', 'onb:dis:theatre');
+      const user = (await getUser(store, '3021'))!;
+      assert.deepEqual(user.prefs.favourite_categories, []);
+      assert.deepEqual(user.prefs.disliked_categories, ['theatre']);
+    });
+  });
+
+  it('sends digests to someone who walked away mid-walkthrough, but not before a city', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3022', city: 'kharkiv' });
+      await store.setUserStage('3022', 'budget');
+      await registerUser(store, { chatId: '3023' });
+      const listed = (await store.listUsers()).map((u) => u.chat_id);
+      assert.ok(listed.includes('3022'), 'someone who stopped at the budget step still gets digests');
+      assert.ok(!listed.includes('3023'), 'someone who never picked a city does not');
+    });
+  });
+
+  it('adds a typed name to the follow list instead of searching for it', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3024', city: 'kharkiv' });
+      await store.setUserStage('3024', 'follow');
+      const reply = await say(store, '3024', 'Жадан і Собаки');
+      assert.ok(reply.includes('Стежу за'), reply.slice(0, 200));
+      assert.ok(!reply.includes('Шукаю'), 'a name is not a search');
+      assert.deepEqual((await getUser(store, '3024'))!.prefs.follow, ['Жадан і Собаки']);
+    });
+  });
+
+  it('reads a sentence at the follow step as a sentence, not as a name', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3028', city: 'kharkiv' });
+      await store.setUserStage('3028', 'follow');
+      await say(store, '3028', 'не люблю класику');
+      const user = (await getUser(store, '3028'))!;
+      assert.deepEqual(user.prefs.follow, [], 'a dislike is not somebody to watch for');
+      assert.deepEqual(user.prefs.disliked_categories, ['classical']);
+    });
+  });
+
+  it('offers the walkthrough to an older user exactly once', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3025', city: 'kharkiv' });
+      const first = await say(store, '3025', '/reminders');
+      assert.ok(first.includes('налаштувати кнопками'), first.slice(0, 300));
+      assert.ok(first.includes('(onb:start)'), 'the offer needs a button');
+      const second = await say(store, '3025', '/reminders');
+      assert.ok(!second.includes('налаштувати кнопками'), 'and it never comes back');
+    });
+  });
+
+  it('never nudges someone who just walked through it', async () => {
+    await withTestStore(async (store) => {
+      await say(store, '3026', '/start');
+      await say(store, '3026', 'Харків');
+      await tap(store, '3026', 'onb:skip');
+      await tap(store, '3026', 'onb:skip');
+      await tap(store, '3026', 'onb:skip');
+      await tap(store, '3026', 'onb:skip');
+      assert.equal((await store.getUser('3026'))?.stage, null);
+      const next = await say(store, '3026', '/reminders');
+      assert.ok(!next.includes('налаштувати кнопками'), next.slice(0, 300));
+    });
+  });
+
+  it('reopens the same taste screens from /settings, without touching the stage', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3027', city: 'kharkiv' });
+      const menu = await tap(store, '3027', 'set:prefs');
+      assert.ok(menu.includes('Мої смаки'), menu.slice(0, 300));
+      assert.ok(menu.includes('(onb:step:budget)'), menu.slice(0, 400));
+      const screen = await tap(store, '3027', 'onb:step:likes');
+      assert.ok(screen.includes('(onb:taste)'), 'in /settings a step goes back, not forward');
+      assert.ok(!screen.includes('(onb:next)'), 'and never advances a walkthrough that is not open');
+      assert.equal((await store.getUser('3027'))?.stage, null);
     });
   });
 

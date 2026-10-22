@@ -173,6 +173,14 @@ async function bootstrap(d: Driver): Promise<void> {
 
 const nowIso = () => new Date().toISOString();
 
+/**
+ * Onboarded enough to be sent something. The /start walkthrough parks its step
+ * in `stage`, but only the city is actually required to build a digest — so
+ * someone who walked away at "what's your budget?" still gets one, and only
+ * someone who never picked a city does not.
+ */
+const ONBOARDED = sql`(stage IS NULL OR stage <> 'city')`;
+
 export const UserRowSchema = z.object({
   chat_id: z.coerce.string(),
   username: z.string().nullable().default(null),
@@ -331,7 +339,7 @@ export class Store {
       : sql``;
     const city = opts.city ? sql` AND city = ${opts.city}` : sql``;
     const rows = await this.d.all(
-      sql`SELECT * FROM ${t.users} WHERE blocked = 0 AND stage IS NULL${optIn}${city} ORDER BY created_at`,
+      sql`SELECT * FROM ${t.users} WHERE blocked = 0 AND ${ONBOARDED}${optIn}${city} ORDER BY created_at`,
     );
     return rows.flatMap((r) => {
       const parsed = UserRowSchema.safeParse(r);
@@ -342,7 +350,7 @@ export class Store {
   async countUsers(): Promise<{ total: number; active: number }> {
     const t = this.d.schema;
     const all = await this.d.all(sql`SELECT COUNT(*) AS n FROM ${t.users}`);
-    const active = await this.d.all(sql`SELECT COUNT(*) AS n FROM ${t.users} WHERE blocked = 0 AND stage IS NULL`);
+    const active = await this.d.all(sql`SELECT COUNT(*) AS n FROM ${t.users} WHERE blocked = 0 AND ${ONBOARDED}`);
     return { total: Number(all[0]?.['n'] ?? 0), active: Number(active[0]?.['n'] ?? 0) };
   }
 
@@ -574,7 +582,7 @@ export class Store {
     };
     return {
       users: await count(t.users),
-      activeUsers: await count(t.users, sql`blocked = 0 AND stage IS NULL`),
+      activeUsers: await count(t.users, sql`blocked = 0 AND ${ONBOARDED}`),
       deliveries: await count(t.deliveries),
       reminders: await count(t.reminders, sql`cancelled = 0`),
       messages: await count(t.messages),

@@ -14,18 +14,20 @@ cd ~/.hermes/skills/events-finder
 ## 0. Automated suite (start here)
 
 ```bash
-npm test          # 87 offline checks: parsing, classification, dedupe, ranking,
+npm test          # 107 offline checks: parsing, classification, dedupe, ranking,
                   # rendering, per-user store, users, fan-out, bot handlers
 npm run typecheck # tsc --noEmit
 ```
 
 Uses a temporary database and the committed example config, so it is safe at any
-time and needs no secrets. Expect `87/87 passed` and exit code 0.
+time and needs no secrets. Expect `107/107 passed` and exit code 0.
 
 Notable cases it covers, so you do not have to by hand: a city is scraped once
 and ranked per user; a muted user is skipped; an already-delivered item is not
-repeated; onboarding sets and clears the city stage; `🔔 2` resolves to the
-second line of a digest; one user's "already sent" does not affect another's.
+repeated; a new user inherits no taste at all; the walkthrough turns taps into
+a stored profile and clears the stage at the end; abandoning it after the city
+still leaves someone in the digest list; `🔔 2` resolves to the second line of
+a digest; one user's "already sent" does not affect another's.
 
 ## 1. Health check
 
@@ -78,7 +80,13 @@ npx tsx scripts/bot.ts
 
 In Telegram, as yourself:
 
-1. `/start` → a greeting and a city keyboard. Pick a city → it confirms.
+1. `/start` → a greeting and a city keyboard. Pick a city → it confirms, then
+   the walkthrough carries on by itself: tap two categories → **Далі →** →
+   dislikes → **Далі →** → a budget → the follow step → type
+   `Антон Тимошенко, Latexfauna` → **Готово ✅** → a summary of exactly what you
+   tapped, and nothing you did not. `npx tsx scripts/prefs.ts --chat <your id>`
+   should agree with it, and show no favourites you never chose.
+   Then `/setup` → the same screens again, pre-ticked.
 2. `/weekend` → "⏳ Шукаю…" then a numbered digest grouped by day, in Ukrainian.
 3. Reply `🔔 2` to it → "⏰ Нагадування поставив — …".
 4. `npx tsx scripts/reminders.ts --list` → the reminder is there with your chat id.
@@ -91,7 +99,9 @@ In Telegram, as yourself:
 9. `/settings` → a panel with a button per digest. Tap **Вихідні** → the
    same message redraws with ❌ and no new message appears; tap it again → ✅.
 10. In the panel: **Change city** → city buttons → pick one → back to the panel
-    with the new city. **My taste** → the preference summary with ⬅️ Back.
+    with the new city. **🎛 Мої смаки** → the summary plus a button per screen;
+    open **💸 Бюджет**, change it, and ⬅️ Назад returns to the summary rather
+    than marching you through a walkthrough.
 11. `/mute weekend`, then `/settings` → the panel shows the weekend flag ❌ too.
 12. `/city` → keyboard; pick another city; `/today` → events from the new city.
 13. `/nonsense` → the help text.
