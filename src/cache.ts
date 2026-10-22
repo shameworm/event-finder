@@ -80,6 +80,9 @@ export async function collectCity(opts: CollectOptions): Promise<CollectResult> 
     maxPages: opts.maxPages,
     keepDisliked: true,
     keepExpensive: true,
+    // one scrape serves everyone in the city; whose taste it fits is decided
+    // per person afterwards, so nothing may be filtered out on the way in
+    keepOffTaste: true,
   });
 
   // only cache a run where something worked, so one bad night does not pin an

@@ -1,5 +1,5 @@
 import type { Item, Preferences, Query } from './types.ts';
-import { categoryFromWord, containsTerm, expandTag } from './categories.ts';
+import { PLACE_CATEGORIES, categoryKeyOf, containsTerm, expandTag } from './categories.ts';
 import { localDate, normText, stemText } from './util.ts';
 import { loadConfig } from './config.ts';
 
@@ -15,16 +15,19 @@ function headline(i: Item): string {
 /**
  * Does this item match a taste tag?
  *
- * A tag that names a category ("standup", "concert", "indie") matches on the
- * item's category, or on its title — never on its description, because long
- * blurbs mention every genre under the sun ("романтична комедія" in a drama
- * would otherwise read as stand-up).
+ * A tag that *names* a category ("standup", "concert") matches on the item's
+ * category, or on its title — never on its description, because long blurbs
+ * mention every genre under the sun ("романтична комедія" in a drama would
+ * otherwise read as stand-up).
  *
- * A free-text tag ("classical", "шансон", "vinyl") has no category to lean on,
- * so it matches anywhere, description included.
+ * A genre or free-text tag ("indie", "classical", "шансон", "vinyl") has no
+ * category to lean on, so it matches anywhere, description included. It must
+ * not borrow one either: "інді" belongs to the concert keyword list, and
+ * treating it as `concert` made a single indie interest match every gig in
+ * town — and then told the user the reason was "indie".
  */
 export function matchesTag(item: Item, tag: string): boolean {
-  const cat = categoryFromWord(tag);
+  const cat = categoryKeyOf(tag);
   const terms = [...new Set(expandTag(tag).map(stemText))].filter((t) => t.length >= 4);
   if (cat) {
     if (item.category === cat) return true;
@@ -49,26 +52,71 @@ export interface RankOptions {
   keepDisliked?: boolean;
   /** Keep items above max_ticket_price instead of dropping them. */
   keepExpensive?: boolean;
+  /** Keep items that match nothing this person likes (the shared cache does). */
+  keepOffTaste?: boolean;
+  /** Let off-taste items back in until at least this many remain. */
+  tasteFloor?: number;
   tz?: string;
 }
 
 export interface Ranked {
   items: Item[];
   dropped: { item: Item; why: string }[];
+  /**
+   * How many off-taste items had to be let back in to fill the list. Non-zero
+   * means "there was not enough of your thing on" — worth telling the person,
+   * or they will think the filter is broken.
+   */
+  toppedUp: number;
 }
+
+/** A favourite is worth this, plus one more per ❤️ it has collected. */
+const FAVOURITE = 3;
+const INTEREST = 1.5;
+/** Hearts stop adding weight here, so one obsession cannot drown everything. */
+const HEART_CAP = 5;
 
 /**
  * Score every item against preferences + this request, then sort.
- * Disliked and over-budget items are dropped by default (reported in `dropped`).
+ *
+ * Disliked and over-budget items are dropped by default, and so is anything
+ * that matches nothing this person likes — a taste model that only nudges the
+ * order is invisible, because a free event on two ticket sites outscores a
+ * category someone chose by hand. What survives the filter is reported in
+ * `items`, the rest in `dropped`.
+ *
+ * The filter needs something to filter *by*, so it is off for anyone with an
+ * empty profile, and off for the shared city cache (`keepOffTaste`), which is
+ * written once for everybody and ranked per person afterwards.
  */
 export function rank(items: Item[], opts: RankOptions): Ranked {
-  const tz = opts.tz ?? loadConfig().timezone;
+  const cfg = loadConfig();
+  const tz = opts.tz ?? cfg.timezone;
   const { query, prefs } = opts;
-  const likes = [...new Set([...query.like, ...prefs.favourite_categories, ...(prefs.interests ?? [])])];
   const dislikes = [...new Set([...query.dislike, ...prefs.disliked_categories])];
   const maxPrice = query.maxPrice ?? prefs.max_ticket_price ?? undefined;
+  const hearts = (tag: string) => Math.min(prefs.taste?.[tag] ?? 0, HEART_CAP);
 
-  const kept: Item[] = [];
+  /**
+   * What counts as "their thing" for this search. An explicit request wins
+   * over the stored profile: someone who asks for stand-up wants stand-up, not
+   * everything they have ever liked.
+   *
+   * Tags for the wrong kind of thing are left out, or /places would filter a
+   * concert-lover's café suggestions down to nothing and then pad them all
+   * back with an apology. Free-text tags ("speciality coffee") fit both.
+   */
+  const placesOnly = query.kinds.includes('place') && !query.kinds.includes('event');
+  const forThisKind = (tag: string) => {
+    const cat = categoryKeyOf(tag);
+    return !cat || PLACE_CATEGORIES.includes(cat) === placesOnly;
+  };
+  const asked = (
+    query.like.length > 0 ? query.like : [...prefs.favourite_categories, ...(prefs.interests ?? [])]
+  ).filter(forThisKind);
+  const filtering = !opts.keepOffTaste && asked.length > 0;
+
+  const kept: { item: Item; onTaste: boolean }[] = [];
   const dropped: { item: Item; why: string }[] = [];
 
   for (const item of items) {
@@ -77,11 +125,22 @@ export function rank(items: Item[], opts: RankOptions): Ranked {
 
     // request-level likes count double: that is what the user asked for right now
     for (const tag of query.like) if (matchesTag(item, tag)) { score += 6; reasons.push(`asked for "${tag}"`); }
-    for (const tag of prefs.favourite_categories) if (matchesTag(item, tag)) { score += 3; reasons.push(`favourite "${tag}"`); }
-    for (const tag of prefs.interests ?? []) if (matchesTag(item, tag)) { score += 1.5; reasons.push(`interest "${tag}"`); }
+    for (const tag of prefs.favourite_categories) {
+      if (!matchesTag(item, tag)) continue;
+      // every ❤️ on this category is another vote for it
+      score += FAVOURITE + hearts(tag);
+      reasons.push(hearts(tag) ? `favourite "${tag}" (❤️ ${prefs.taste?.[tag]})` : `favourite "${tag}"`);
+    }
+    for (const tag of prefs.interests ?? []) {
+      if (!matchesTag(item, tag)) continue;
+      score += INTEREST + hearts(tag) / 2;
+      reasons.push(`interest "${tag}"`);
+    }
 
     const follows = (prefs.follow ?? []).filter((f) => matchesFollow(item, f));
     if (follows.length) { score += 10; reasons.push(`you follow ${follows.join(', ')}`); }
+
+    const onTaste = follows.length > 0 || asked.some((tag) => matchesTag(item, tag));
 
     const hitDislike = dislikes.find((tag) => matchesTag(item, tag));
     if (hitDislike && !follows.length) {
@@ -113,11 +172,21 @@ export function rank(items: Item[], opts: RankOptions): Ranked {
       score += Math.max(0, 1 - offset / (span + 1));
     }
 
-    kept.push({ ...item, score: Math.round(score * 100) / 100, reasons });
+    kept.push({ item: { ...item, score: Math.round(score * 100) / 100, reasons }, onTaste });
   }
 
-  kept.sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || (a.startsAt ?? '').localeCompare(b.startsAt ?? ''));
-  return { items: kept, dropped };
+  const byScore = (a: Item, b: Item) =>
+    (b.score ?? 0) - (a.score ?? 0) || (a.startsAt ?? '').localeCompare(b.startsAt ?? '');
+  const ordered = kept.sort((a, b) => byScore(a.item, b.item));
+  if (!filtering) return { items: ordered.map((k) => k.item), dropped, toppedUp: 0 };
+
+  const floor = opts.tasteFloor ?? cfg.bot.taste_floor;
+  const mine = ordered.filter((k) => k.onTaste).map((k) => k.item);
+  const rest = ordered.filter((k) => !k.onTaste).map((k) => k.item);
+  // nothing of theirs is on: a short list of the next best beats an empty one
+  const fill = mine.length >= floor ? [] : rest.slice(0, floor - mine.length);
+  for (const item of rest.slice(fill.length)) dropped.push({ item, why: 'not in their taste' });
+  return { items: [...mine, ...fill].sort(byScore), dropped, toppedUp: fill.length };
 }
 
 /** Group ranked items by local day, days ascending, best item first inside a day. */
