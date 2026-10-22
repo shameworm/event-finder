@@ -6,7 +6,7 @@
 
 timezone: Europe/Kyiv      # all schedules, digests and day grouping use this
 default_city: kharkiv      # used when a request names no city and preferences are empty
-locale: en-GB              # affects day labels ("Fri 24 Oct")
+locale: uk-UA              # affects day labels ("пт, 24 жовт.")
 
 http:
   delay_ms: 1500           # minimum gap between two requests to the same host — be polite
@@ -35,6 +35,10 @@ bot:
   max_results: 10          # items in an on-demand answer
   interactive_pages: 2     # pages per source when someone is waiting on a reply
   send_delay_ms: 60        # pause between users when fanning out a digest
+  message_delay_ms: 400    # pause between the messages of ONE digest — every
+                           # event is its own message, so a ten-event week is
+                           # eleven sends to the same chat and Telegram throttles
+                           # a sustained burst at roughly one per second
 
 cache:
   # One scrape of a city/window serves every user in it for this long.
@@ -56,7 +60,7 @@ cache:
 cities:
 
   kharkiv:
-    label: Kharkiv
+    label: Харків
     aliases: [kharkiv, kharkov, харків, харкові, харкова, харьков, харькове, хрк, kh]
     concertua:
       slug: kharkiv
@@ -75,7 +79,7 @@ cities:
       - "незвичайні місця Харків куди піти"
 
   kyiv:
-    label: Kyiv
+    label: Київ
     aliases: [kyiv, kiev, київ, києві, києва, киев, киеве, kyyiv]
     concertua:
       slug: kyiv
@@ -93,7 +97,7 @@ cities:
       - "нова галерея Київ виставка"
 
   lviv:
-    label: Lviv
+    label: Львів
     aliases: [lviv, lvov, львів, львові, львова, львов, львове]
     concertua:
       slug: lviv
@@ -111,7 +115,7 @@ cities:
       - "галерея Львів виставка"
 
   dnipro:
-    label: Dnipro
+    label: Дніпро
     aliases: [dnipro, дніпро, дніпрі, дніпра, днепр, днепре, dnepr]
     concertua:
       slug: dnipro
@@ -128,7 +132,7 @@ cities:
       - "бар з живою музикою Дніпро"
 
   odesa:
-    label: Odesa
+    label: Одеса
     aliases: [odesa, odessa, одеса, одесі, одеси, одесса, одессе]
     concertua:
       slug: odesa
@@ -149,7 +153,7 @@ cities:
   #   curl -sI https://<sub>.karabas.com/ | head -1
   #   curl -sI https://<sub>.kontramarka.ua/uk/concert | head -1
   ivano-frankivsk:
-    label: Ivano-Frankivsk
+    label: Івано-Франківськ
     aliases: [ivano-frankivsk, івано-франківськ, франківськ, франик, ифр]
     concertua:
       slug: ivano-frankivsk

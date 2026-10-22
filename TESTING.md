@@ -20,12 +20,15 @@ npm run typecheck # tsc --noEmit
 ```
 
 Uses a temporary database and the committed example config, so it is safe at any
-time and needs no secrets. Expect `87/87 passed` and exit code 0.
+time and needs no secrets. Expect `124/124 passed` and exit code 0.
 
 Notable cases it covers, so you do not have to by hand: a city is scraped once
 and ranked per user; a muted user is skipped; an already-delivered item is not
-repeated; onboarding sets and clears the city stage; `🔔 2` resolves to the
-second line of a digest; one user's "already sent" does not affect another's.
+repeated; onboarding walks city → taste → done; a digest goes out as a header
+plus one message per event; a ❤️ on an event message sets a reminder and teaches
+the taste model, and taking it off cancels the reminder; the Ukrainian
+preference phrasings ("люблю джаз", "не люблю класичну музику") are understood;
+one user's "already sent" does not affect another's.
 
 ## 1. Health check
 
@@ -78,18 +81,45 @@ npx tsx scripts/bot.ts
 
 In Telegram, as yourself:
 
-1. `/start` → a greeting and a city keyboard. Pick a city → it confirms.
-2. `/weekend` → "⏳ Looking…" then a numbered digest grouped by day.
-3. Reply `🔔 2` to it → "Reminder set for …".
-4. `npx tsx scripts/reminders.ts --list` → the reminder is there with your chat id.
-5. `add jazz to favourites` → "✅ Noted: favourites + jazz".
-6. `/prefs` → jazz is listed.
-7. `stand-up this weekend` → a search, not a preference change.
-8. `/settings`, `/mute weekend`, `/settings` → the weekend flag flips to ❌.
-9. `/city` → keyboard; pick another city; `/today` → events from the new city.
-10. `/nonsense` → the help text.
-11. `/stop` → unsubscribed. `npx tsx scripts/prefs.ts --list` shows them gone
+Everything it says should be in Ukrainian. Anything in English is a bug — the
+string is missing from `src/copy.ts`.
+
+1. `/start` → a greeting and a city keyboard. Pick a city → it confirms, then
+   asks «А тепер — що тобі подобається?».
+2. Answer `стендап, джаз, виставки` → «✅ Записав: улюблене + стендап …» and the
+   help text. (`Пропустити` should also get you out of this step.)
+3. `/prefs` → улюблене lists стендап, джаз, виставки — in Ukrainian, not
+   `standup, jazz`.
+4. `/weekend` → «⏳ Шукаю…», then a header («🎉 На вихідних · Харків · … · 5
+   подій») followed by **one message per event**. Check the dates read like
+   «пт, 24 жовт. 19:00» and the price like «400–800 ₴».
+5. **Tap ❤️ on one of those event messages** → «❤️ Нагадування для … » as a
+   reply to that message, plus «(додав … до улюбленого)» the first time.
+6. `npx tsx scripts/reminders.ts --list` → the reminder is there with your chat id.
+7. **Take the ❤️ off** → «🤍 Знято нагадування …» and `--list` no longer shows it.
+   If nothing happens at all, the bot is not receiving reaction updates — see
+   §Gotchas below.
+8. `люблю інді-рок` → «✅ Записав: улюблене + інді».
+9. `не люблю класичну музику` → «✅ Записав: не люблю + класика».
+10. `максимум 700 грн` → «максимальна ціна → 700 ₴».
+11. `стендап на вихідних` → a search, not a preference change.
+12. `/settings`, `/mute weekend`, `/settings` → the weekend flag flips to ❌.
+13. `/city` → keyboard; pick another city; `/today` → events from the new city.
+14. `/nonsense` → «Я не знаю /nonsense» and the help text.
+15. `/stop` → unsubscribed. `npx tsx scripts/prefs.ts --list` shows them gone
     from the active list. `/start` brings them back.
+
+### If ❤️ does nothing
+
+Reactions arrive only because `getUpdates` asks for `message_reaction`
+(`src/telegram-api.ts`). Check that first, then that you are reacting to an
+**event** message and not the header: the header carries no event, so a heart on
+it is ignored in silence — as is a heart on anything else in the chat, which is
+deliberate, because Telegram sends an update for every reaction and a bot that
+answers all of them gets muted.
+
+The one case that does answer is a heart on a digest sent *before* this change,
+when one message covered a whole list: that gets «Тапни ❤️ на самій події».
 
 Then **as a second person** (another Telegram account, or a friend): `/start`,
 pick a different city, set a different taste. Both of you should now be in

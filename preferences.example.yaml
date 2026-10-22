@@ -12,8 +12,10 @@
 #   npx tsx scripts/prefs.ts --list                 # who is registered
 #   npx tsx scripts/prefs.ts --defaults "..."       # edit THIS file
 #
-# Two fields are deliberately NOT inherited by new users, because they are
-# personal to whoever set this file up: `follow` and `watch_cities`.
+# Three fields are deliberately NOT inherited by new users, because they are
+# personal to whoever set this file up: `follow`, `watch_cities` and
+# `favourite_categories` — onboarding asks each person what they like and fills
+# their favourites in from their own answer.
 # ─────────────────────────────────────────────────────────────────────────────
 
 home_city: kharkiv
@@ -27,6 +29,8 @@ watch_cities:
 # Categories you like. Known keys:
 #   concert standup theatre exhibition lecture party festival workshop cinema kids sport
 #   cafe bar gallery spot
+# NOT copied to new users — the bot asks them directly. This list is the
+# operator's own taste, used by the CLI (scripts/search.ts) when no --chat is given.
 favourite_categories:
   - standup
   - concert
