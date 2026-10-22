@@ -241,5 +241,18 @@ export function canonicalTag(word: string): string {
   for (const [key, syns] of Object.entries(TAG_SYNONYMS)) {
     if ([key, ...syns].some((s) => normText(s) === n)) return key;
   }
-  return categoryFromWord(word) ?? word.trim();
+  const exact = categoryFromWord(word);
+  if (exact) return exact;
+
+  // Ukrainian is inflected and people write what they say: "люблю виставки",
+  // "не люблю класичну". Stem both sides so those land on the same key the
+  // exact match would have found for "виставка" and "класична".
+  const stemmed = stemText(n);
+  for (const [key, syns] of Object.entries(TAG_SYNONYMS)) {
+    if ([key, ...syns].some((s) => containsTerm(stemmed, stemText(s)))) return key;
+  }
+  for (const cat of CLASSIFY_ORDER) {
+    if (STEMMED[cat].some((term) => containsTerm(stemmed, term))) return cat;
+  }
+  return word.trim();
 }
