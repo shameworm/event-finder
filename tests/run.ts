@@ -48,9 +48,12 @@ const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange
 const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom } = await import('../src/normalize.ts');
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
-const { buildDigest } = await import('../src/render.ts');
+const { buildDigest, buildMessages } = await import('../src/render.ts');
+const copyRange = await import('../src/copy.ts');
 const { loadConfig, loadPrefs, resolveCity, cityLocalName } = await import('../src/config.ts');
-const { applyPrefsCommand } = await import('../src/prefs-engine.ts');
+const { applyPrefsCommand, describePrefs } = await import('../src/prefs-engine.ts');
+const { tagLabel } = await import('../src/copy.ts');
+const { PreferencesSchema } = await import('../src/types.ts');
 const { parsePost, findDate, findTime, findVenue } = await import('../scripts/telegram.ts');
 const { resultToItem, buildQueries } = await import('../scripts/websearch.ts');
 const { collect: collectKontramarka } = await import('../scripts/kontramarka.ts');
@@ -59,7 +62,8 @@ const { splitForTelegram } = await import('../src/telegram-api.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs } = await import('../src/users.ts');
 const { cacheKey } = await import('../src/cache.ts');
 const { fanout } = await import('../src/fanout.ts');
-const { handleMessage, parseBell, isAllowed } = await import('../src/bot-handlers.ts');
+const { handleMessage, handleReaction, parseBell, isHeart, isAllowed } = await import('../src/bot-handlers.ts');
+const { deliver } = await import('../src/deliver.ts');
 const { makeLogger } = await import('../src/log.ts');
 const { ALL_SOURCE_NAMES } = await import('../src/pipeline.ts');
 
@@ -117,6 +121,15 @@ describe('categories', () => {
   it('stores a genre as itself, not as its parent category', () => {
     assert.equal(canonicalTag('jazz'), 'jazz');
     assert.equal(canonicalTag('stand-up'), 'standup');
+  });
+
+  it('canonicalises an inflected Ukrainian taste word', () => {
+    assert.equal(canonicalTag('виставки'), 'exhibition');
+    assert.equal(canonicalTag('класичну'), 'classical');
+    assert.equal(canonicalTag('театри'), 'theatre');
+    assert.equal(canonicalTag('вечірки'), 'party');
+    // free text that names nothing we know is left exactly as written
+    assert.equal(canonicalTag('сучасне мистецтво'), 'сучасне мистецтво');
   });
 
   it('expands a tag across languages', () => {
@@ -226,7 +239,7 @@ describe('normalization', () => {
     assert.ok(item);
     assert.equal(item.status, 'soldout');
     assert.equal(item.category, 'standup');
-    assert.equal(priceText(item), 'from 450 ₴');
+    assert.equal(priceText(item), 'від 450 ₴');
   });
 
   it('rejects junk instead of throwing', () => {
@@ -244,9 +257,9 @@ describe('normalization', () => {
 
   it('never advertises a placeholder price as free', () => {
     const placeholder = makeItem({ city: 'kyiv', title: 'Музей', url: 'https://x/m', source: 'kontramarka', priceMin: 0.01, priceMax: 390 })!;
-    assert.equal(priceText(placeholder), 'up to 390 ₴');
+    assert.equal(priceText(placeholder), 'до 390 ₴');
     const reallyFree = makeItem({ city: 'kyiv', title: 'Лекція', url: 'https://x/l', source: 'websearch', priceMin: 0 })!;
-    assert.equal(priceText(reallyFree), 'free');
+    assert.equal(priceText(reallyFree), 'безкоштовно');
   });
 
   it('reads prices out of free text', () => {
@@ -367,9 +380,19 @@ describe('render', () => {
     assert.ok(text.indexOf('Earlier') < text.indexOf('Later but better'));
   });
 
-  it('badges sold-out and cancelled events', () => {
+  it('badges sold-out events in Ukrainian', () => {
     const items = [makeItem({ city: 'kharkiv', title: 'Gone', url: 'https://x/c', source: 's', startsAt: '2026-10-24T19:00:00+03:00', status: 'soldout' })!];
-    assert.ok(buildDigest({ title: 'T', query, items, format: 'text' }).text.includes('SOLD OUT'));
+    assert.ok(buildDigest({ title: 'T', query, items, format: 'text' }).text.includes('НЕМАЄ КВИТКІВ'));
+  });
+
+  it('labels the ticket link in Ukrainian when there are tickets', () => {
+    const items = [makeItem({ city: 'kharkiv', title: 'Gig', url: 'https://x/c2', source: 's', startsAt: '2026-10-24T19:00:00+03:00', priceMin: 300 })!];
+    assert.ok(buildDigest({ title: 'T', query, items, format: 'text' }).text.includes('квитки →'));
+  });
+
+  it('says the date is unknown in Ukrainian', () => {
+    const items = [makeItem({ city: 'kharkiv', title: 'Someday', url: 'https://x/c3', source: 's' })!];
+    assert.ok(buildDigest({ title: 'T', query, items, format: 'text' }).text.includes('дата невідома'));
   });
 
   it('escapes HTML coming from a site', () => {
@@ -390,6 +413,83 @@ describe('render', () => {
     const chunks = splitForTelegram(Array.from({ length: 200 }, (_, i) => `block ${i}`).join('\n\n'), 500);
     assert.ok(chunks.length > 1);
     assert.ok(chunks.every((c) => c.length <= 500));
+  });
+});
+
+/* -------------------------------------------------- one message per event --- */
+
+describe('messages', () => {
+  const query = parseRequest('', { prefs, base: '2026-10-20', from: '2026-10-23', to: '2026-10-25' });
+  const earlier = makeItem({ city: 'kharkiv', title: 'Earlier', url: 'https://m/a', source: 's', startsAt: '2026-10-23T19:00:00+03:00', score: 1 })!;
+  const later = makeItem({ city: 'kharkiv', title: 'Later but better', url: 'https://m/b', source: 's', startsAt: '2026-10-25T19:00:00+03:00', score: 99 })!;
+
+  it('is a header plus one message per event, each carrying exactly that event', () => {
+    const msgs = buildMessages({ title: 'T', query, items: [later, earlier], format: 'text' });
+    assert.equal(msgs.length, 3);
+    assert.deepEqual(msgs[0]!.items, []);
+    assert.deepEqual(msgs.slice(1).map((m) => m.items.map((i) => i.title)), [['Earlier'], ['Later but better']]);
+  });
+
+  it('puts the day in every event message, since there are no day headings left', () => {
+    const msgs = buildMessages({ title: 'T', query, items: [earlier], format: 'text' });
+    assert.ok(msgs[1]!.text.includes('23 жовт.'), msgs[1]!.text);
+  });
+
+  it('never numbers an event, because its own message identifies it', () => {
+    const msgs = buildMessages({ title: 'T', query, items: [later, earlier], format: 'text' });
+    for (const m of msgs.slice(1)) assert.ok(!/^\d+\.\s/m.test(m.text), m.text);
+  });
+
+  it('counts the events in the header, with Ukrainian plurals', () => {
+    const one = buildMessages({ title: 'T', query, items: [earlier], format: 'text' });
+    assert.ok(one[0]!.text.includes('1 подія'), one[0]!.text);
+    const two = buildMessages({ title: 'T', query, items: [earlier, later], format: 'text' });
+    assert.ok(two[0]!.text.includes('2 події'), two[0]!.text);
+  });
+
+  it('does not repeat the window name the title already carries', () => {
+    const msgs = buildMessages({ title: copyRange.TITLE_WEEK, query, items: [earlier], format: 'text' });
+    assert.ok(!msgs[0]!.text.includes('('), msgs[0]!.text);
+    assert.ok(msgs[0]!.text.includes('23 жовт.'), msgs[0]!.text);
+  });
+
+  it('calls the link "детальніше" when there is nothing to buy', () => {
+    const free = makeItem({ city: 'kharkiv', title: 'Вхід вільний', url: 'https://m/f', source: 's', startsAt: '2026-10-23T19:00:00+03:00', free: true })!;
+    const msgs = buildMessages({ title: 'T', query, items: [free], format: 'text' });
+    assert.ok(msgs[1]!.text.includes('детальніше →'), msgs[1]!.text);
+    assert.ok(!msgs[1]!.text.includes('квитки →'), msgs[1]!.text);
+  });
+
+  it('says in Ukrainian why an event is being shown again', () => {
+    const changeNotes = new Map([[earlier.id, 'sold out']]);
+    const msgs = buildMessages({ title: 'T', query, items: [earlier], format: 'text', changeNotes });
+    assert.ok(msgs[1]!.text.includes('🔁 квитки скінчилися'), msgs[1]!.text);
+  });
+
+  it('is a single message, carrying nothing, when nothing matched', () => {
+    const msgs = buildMessages({ title: 'T', query, items: [], format: 'text' });
+    assert.equal(msgs.length, 1);
+    assert.deepEqual(msgs[0]!.items, []);
+  });
+
+  it('tells people in the header how to set a reminder', () => {
+    const msgs = buildMessages({ title: 'T', query, items: [earlier], format: 'text' });
+    assert.ok(msgs[0]!.text.includes('❤️'), msgs[0]!.text);
+  });
+
+  it('caps each day but still sends the kept events separately', () => {
+    const sameDay = [1, 2, 3].map(
+      (n) => makeItem({ city: 'kharkiv', title: `Gig ${n}`, url: `https://m/d${n}`, source: 's', startsAt: '2026-10-23T19:00:00+03:00' })!,
+    );
+    const msgs = buildMessages({ title: 'T', query, items: sameDay, format: 'text', maxPerDay: 2 });
+    assert.equal(msgs.length, 3);
+  });
+
+  it('sends one message per place too', () => {
+    const place = makeItem({ city: 'kharkiv', kind: 'place', title: 'Kofein Lab', url: 'https://m/e', source: 'websearch', category: 'cafe', address: 'вул. Сумська, 11' })!;
+    const msgs = buildMessages({ title: 'Місця', query, items: [place], format: 'text' });
+    assert.equal(msgs.length, 2);
+    assert.ok(msgs[1]!.text.includes('вул. Сумська, 11'));
   });
 });
 
@@ -461,6 +561,42 @@ describe('web search ingest', () => {
 
 /* ------------------------------------------------------------ preferences --- */
 
+describe('taste words, as people read them', () => {
+  it('shows a storage key under its Ukrainian name', () => {
+    assert.equal(tagLabel('standup'), 'стендап');
+    assert.equal(tagLabel('jazz'), 'джаз');
+    assert.equal(tagLabel('exhibition'), 'виставки');
+    // free-text tags have no translation and pass through untouched
+    assert.equal(tagLabel('сучасне мистецтво'), 'сучасне мистецтво');
+  });
+
+  it('describes preferences in Ukrainian, with a hryvnia sign', () => {
+    const described = describePrefs(
+      PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['standup', 'jazz'], max_ticket_price: 700 }),
+    );
+    assert.ok(described.includes('улюблене: стендап, джаз'), described);
+    assert.ok(described.includes('максимальна ціна: 700 ₴'), described);
+  });
+});
+
+describe('date range labels', () => {
+  const base = '2026-10-20';
+
+  it('names every window in Ukrainian, because the label is shown to people', () => {
+    assert.equal(thisWeekRange(base).label, 'цього тижня');
+    assert.equal(weekendRange(base).label, 'на вихідних');
+    assert.equal(nextWeekRange(base).label, 'наступного тижня');
+    assert.equal(parseDateRange('сьогодні', base).label, 'сьогодні');
+    assert.equal(parseDateRange('завтра', base).label, 'завтра');
+    assert.equal(parseDateRange('цього місяця', base).label, 'цього місяця');
+  });
+
+  it('counts days in Ukrainian for "next N days"', () => {
+    assert.equal(parseDateRange('next 3 days', base).label, 'наступні 3 дні');
+    assert.equal(parseDateRange('next 7 days', base).label, 'наступні 7 днів');
+  });
+});
+
 describe('preference commands', () => {
   const current = loadPrefs();
   const check = (text: string, expect: Partial<{ understood: boolean; changed: boolean; contains: string }>) => {
@@ -472,19 +608,19 @@ describe('preference commands', () => {
   };
 
   it('adds and removes favourites', () => {
-    check('add jazz to favourites', { understood: true, changed: true, contains: 'favourites + jazz' });
-    check('remove concert from favourites', { understood: true, changed: true, contains: 'favourites − concert' });
+    check('add jazz to favourites', { understood: true, changed: true, contains: 'улюблене + джаз' });
+    check('remove concert from favourites', { understood: true, changed: true, contains: 'улюблене − концерти' });
     check('add stand-up to favourites', { understood: true, changed: false });
   });
 
   it('records dislikes and drops them from favourites', () => {
-    const edit = check("I don't like opera", { understood: true, changed: true, contains: 'dislikes + opera' });
+    const edit = check("I don't like opera", { understood: true, changed: true, contains: 'не люблю + опера' });
     assert.ok(!edit.prefs.favourite_categories.includes('opera'));
   });
 
   it('follows and unfollows people', () => {
-    check('follow Latexfauna', { understood: true, changed: true, contains: 'following "Latexfauna"' });
-    check('unfollow Курган і Agregat', { understood: true, changed: true, contains: 'unfollowed' });
+    check('follow Latexfauna', { understood: true, changed: true, contains: 'слідкую за «Latexfauna»' });
+    check('unfollow Курган і Agregat', { understood: true, changed: true, contains: 'більше не слідкую' });
   });
 
   it('sets a budget and clears it', () => {
@@ -505,6 +641,31 @@ describe('preference commands', () => {
 
   it('ignores things that are not preference changes', () => {
     check("what's on tonight in Kharkiv?", { understood: false, changed: false });
+  });
+
+  // JavaScript's \b is ASCII-only, so every Cyrillic phrasing below used to be
+  // dead code: the words were in the patterns but could never match.
+  it('understands the same commands written in Ukrainian', () => {
+    check('люблю джаз', { understood: true, changed: true, contains: 'улюблене + джаз' });
+    check('не люблю шансон', { understood: true, changed: true, contains: 'не люблю + шансон' });
+    check('слідкуй за Latexfauna', { understood: true, changed: true, contains: 'слідкую за «Latexfauna»' });
+    check('мені подобається театр', { understood: true, changed: true, contains: 'улюблене + театр' });
+  });
+
+  it('reads a Ukrainian budget', () => {
+    assert.equal(applyPrefsCommand('максимум 800 грн', current).prefs.max_ticket_price, 800);
+    assert.equal(applyPrefsCommand('не дорожче 500 грн', current).prefs.max_ticket_price, 500);
+  });
+
+  it('reads a Ukrainian trip and a Ukrainian home city', () => {
+    const trip = applyPrefsCommand('наступного тижня буду у Львові', current);
+    assert.equal(trip.prefs.trip?.city, 'lviv');
+    assert.equal(applyPrefsCommand('моє місто Київ', current).prefs.home_city, 'kyiv');
+  });
+
+  it('adds and removes a Ukrainian watch city', () => {
+    const added = applyPrefsCommand('слідкуй за містом Одеса', current);
+    assert.ok(added.prefs.watch_cities.includes('odesa'), JSON.stringify(added.changes));
   });
 });
 
@@ -637,8 +798,11 @@ describe('users', () => {
     assert.deepEqual(defaults.follow, []);
     assert.deepEqual(defaults.watch_cities, []);
     assert.equal(defaults.home_city, 'lviv');
-    // taste defaults are still inherited from preferences.yaml
-    assert.ok(defaults.favourite_categories.includes('standup'));
+    // onboarding asks what they like, so the operator's favourites are not inherited either
+    assert.deepEqual(defaults.favourite_categories, []);
+    // the rest of the seed file is still a sensible cold start
+    assert.ok(defaults.disliked_categories.includes('classical'));
+    assert.equal(defaults.max_ticket_price, 1200);
   });
 
   it('keeps the users row and the stored prefs agreeing about the city', async () => {
@@ -759,40 +923,45 @@ describe('fanout', () => {
 
 /* ----------------------------------------------------------- bot handlers --- */
 
-describe('bot handlers', () => {
-  /** Capture what the bot would say (dry-run sends print to stdout). */
-  async function say(store: StoreType, chatId: string, text: string, extra: Record<string, unknown> = {}): Promise<string> {
-    const chunks: string[] = [];
-    const original = process.stdout.write.bind(process.stdout);
-    (process.stdout as { write: unknown }).write = (chunk: unknown) => {
-      chunks.push(String(chunk));
-      return true;
-    };
-    try {
-      await handleMessage({ store, log, dryRun: true }, {
-        message_id: Math.floor(Math.random() * 100000),
-        date: Math.floor(Date.now() / 1000),
-        chat: { id: chatId, type: 'private' },
-        text,
-        ...extra,
-      } as never);
-    } finally {
-      (process.stdout as { write: unknown }).write = original;
-    }
-    return chunks.join('');
+/** Everything the bot writes to stdout while `body` runs (dry-run prints instead of sending). */
+async function captureOutput(body: () => Promise<unknown>): Promise<string> {
+  const chunks: string[] = [];
+  const original = process.stdout.write.bind(process.stdout);
+  (process.stdout as { write: unknown }).write = (chunk: unknown) => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await body();
+  } finally {
+    (process.stdout as { write: unknown }).write = original;
   }
+  return chunks.join('');
+}
 
+/** Capture what the bot would say to one message. */
+async function say(store: StoreType, chatId: string, text: string, extra: Record<string, unknown> = {}): Promise<string> {
+  return captureOutput(() =>
+    handleMessage({ store, log, dryRun: true }, {
+      message_id: Math.floor(Math.random() * 100000),
+      date: Math.floor(Date.now() / 1000),
+      chat: { id: chatId, type: 'private' },
+      text,
+      ...extra,
+    } as never),
+  );
+}
+
+describe('bot handlers', () => {
   it('onboards a new user by asking for a city, then remembers it', async () => {
     await withTestStore(async (store) => {
       const hello = await say(store, '3001', '/start');
-      assert.ok(hello.includes('Which city'), hello.slice(0, 200));
+      assert.ok(hello.includes('У якому ти місті'), hello.slice(0, 200));
       assert.equal((await store.getUser('3001'))?.stage, 'city');
 
       const picked = await say(store, '3001', 'Львів');
-      assert.ok(picked.includes('Lviv'), picked.slice(0, 200));
-      const row = await store.getUser('3001');
-      assert.equal(row?.stage, null);
-      assert.equal(row?.city, 'lviv');
+      assert.ok(picked.includes('Львів'), picked.slice(0, 200));
+      assert.equal((await store.getUser('3001'))?.city, 'lviv');
     });
   });
 
@@ -800,7 +969,7 @@ describe('bot handlers', () => {
     await withTestStore(async (store) => {
       await say(store, '3002', '/start');
       const reply = await say(store, '3002', 'Atlantis');
-      assert.ok(reply.includes('do not know'), reply.slice(0, 200));
+      assert.ok(reply.includes('не знаю'), reply.slice(0, 200));
       assert.equal((await store.getUser('3002'))?.stage, 'city');
     });
   });
@@ -809,7 +978,7 @@ describe('bot handlers', () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3003', city: 'kharkiv' });
       const reply = await say(store, '3003', 'add jazz to favourites');
-      assert.ok(reply.includes('favourites + jazz'), reply.slice(0, 200));
+      assert.ok(reply.includes('улюблене + джаз'), reply.slice(0, 200));
       const user = await getUser(store, '3003');
       assert.ok(user?.prefs.favourite_categories.includes('jazz'));
     });
@@ -839,7 +1008,7 @@ describe('bot handlers', () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3006', city: 'kharkiv' });
       assert.ok((await say(store, '3006', '/help')).includes('/weekend'));
-      assert.ok((await say(store, '3006', '/nonsense')).includes('do not know'));
+      assert.ok((await say(store, '3006', '/nonsense')).includes('не знаю'));
     });
   });
 
@@ -851,21 +1020,216 @@ describe('bot handlers', () => {
       await store.recordMessage('3007', 555, [a, b]);
 
       const ambiguous = await say(store, '3007', '🔔', { reply_to_message: { message_id: 555 } });
-      assert.ok(ambiguous.includes('Which one'), ambiguous.slice(0, 200));
+      assert.ok(ambiguous.includes('Яка саме'), ambiguous.slice(0, 200));
 
       const chosen = await say(store, '3007', '🔔 2', { reply_to_message: { message_id: 555 } });
       assert.ok(chosen.includes('Second'), chosen.slice(0, 200));
     });
   });
 
-  it('reads the bell with and without an index', () => {
-    assert.deepEqual(parseBell('🔔'), { bell: true, index: undefined });
+  it('reads a typed reminder request, hearts and Ukrainian included', () => {
+    assert.deepEqual(parseBell('❤️'), { bell: true, index: undefined });
     assert.deepEqual(parseBell('🔔 3'), { bell: true, index: 3 });
-    assert.equal(parseBell('what is on').bell, false);
+    assert.deepEqual(parseBell('нагадай'), { bell: true, index: undefined });
+    assert.deepEqual(parseBell('нагадай 2'), { bell: true, index: 2 });
+    assert.equal(parseBell('що там цікавого').bell, false);
   });
 
   it('is open to everyone unless an allowlist is configured', () => {
     assert.equal(isAllowed('999'), true);
+  });
+});
+
+/* ------------------------------------------------------------------ onboarding --- */
+
+describe('onboarding', () => {
+  it('asks what the person likes once their city is known', async () => {
+    await withTestStore(async (store) => {
+      await say(store, '3101', '/start');
+      const picked = await say(store, '3101', 'Львів');
+      assert.ok(picked.includes('що тобі подобається'), picked.slice(0, 300));
+      assert.equal((await store.getUser('3101'))?.stage, 'taste');
+    });
+  });
+
+  it('turns a comma-separated list into favourites', async () => {
+    await withTestStore(async (store) => {
+      await say(store, '3102', '/start');
+      await say(store, '3102', 'Львів');
+      const noted = await say(store, '3102', 'стендап, джаз, театр');
+      const user = await getUser(store, '3102');
+      assert.deepEqual(user?.prefs.favourite_categories, ['standup', 'jazz', 'theatre']);
+      assert.equal((await store.getUser('3102'))?.stage, null);
+      assert.ok(noted.includes('улюблене'), noted.slice(0, 300));
+    });
+  });
+
+  it('still understands a full sentence at the taste step', async () => {
+    await withTestStore(async (store) => {
+      await say(store, '3103', '/start');
+      await say(store, '3103', 'Львів');
+      assert.equal((await store.getUser('3103'))?.stage, 'taste');
+      await say(store, '3103', 'не люблю класичну музику');
+      const user = await getUser(store, '3103');
+      assert.ok(user?.prefs.disliked_categories.includes('classical'));
+      assert.equal((await store.getUser('3103'))?.stage, null);
+    });
+  });
+
+  it('lets someone skip the taste step', async () => {
+    await withTestStore(async (store) => {
+      await say(store, '3104', '/start');
+      await say(store, '3104', 'Львів');
+      await say(store, '3104', 'Пропустити');
+      assert.equal((await store.getUser('3104'))?.stage, null);
+      const user = await getUser(store, '3104');
+      assert.deepEqual(user?.prefs.favourite_categories, []);
+    });
+  });
+
+  it('does not treat the taste answer as a search', async () => {
+    await withTestStore(async (store) => {
+      await say(store, '3105', '/start');
+      await say(store, '3105', 'Львів');
+      const answer = await say(store, '3105', 'стендап');
+      assert.ok(!answer.includes('Шукаю'), answer.slice(0, 300));
+      const user = await getUser(store, '3105');
+      assert.deepEqual(user?.prefs.favourite_categories, ['standup']);
+    });
+  });
+});
+
+/* ----------------------------------------------------------------- the heart --- */
+
+describe('the heart', () => {
+  /** Capture what the bot would say when someone changes a reaction. */
+  async function react(
+    store: StoreType,
+    chatId: string,
+    messageId: number,
+    { from = [], to = ['❤️'] }: { from?: string[]; to?: string[] } = {},
+  ): Promise<string> {
+    return captureOutput(() =>
+      handleReaction({ store, log, dryRun: true }, {
+        chat: { id: chatId, type: 'private' },
+        message_id: messageId,
+        user: { id: Number(chatId) },
+        old_reaction: from.map((emoji) => ({ type: 'emoji', emoji })),
+        new_reaction: to.map((emoji) => ({ type: 'emoji', emoji })),
+      } as never),
+    );
+  }
+
+  const gig = () =>
+    makeItem({ city: 'kharkiv', title: 'Вечір імпровізації', url: 'https://h/1', source: 's', category: 'standup', startsAt: '2026-11-01T19:00:00+02:00' })!;
+
+  it('knows a heart from any other reaction', () => {
+    for (const e of ['❤️', '❤', '🧡', '💙', '💖', '🩷']) assert.equal(isHeart(e), true, e);
+    for (const e of ['👍', '🔥', '😂', '👎']) assert.equal(isHeart(e), false, e);
+  });
+
+  it('sets a reminder for the one event that message was about', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3201', city: 'kharkiv' });
+      await store.recordMessage('3201', 777, [gig()]);
+      const reply = await react(store, '3201', 777);
+      assert.ok(reply.includes('Вечір імпровізації'), reply.slice(0, 300));
+      const rows = await store.listReminders('3201');
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.title, 'Вечір імпровізації');
+    });
+  });
+
+  it('learns the taste behind the heart', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3202', city: 'kharkiv' });
+      await store.recordMessage('3202', 778, [gig()]);
+      await react(store, '3202', 778);
+      const user = await getUser(store, '3202');
+      assert.ok(user?.prefs.favourite_categories.includes('standup'), JSON.stringify(user?.prefs.favourite_categories));
+    });
+  });
+
+  it('takes the reminder away again when the heart is removed', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3203', city: 'kharkiv' });
+      await store.recordMessage('3203', 779, [gig()]);
+      await react(store, '3203', 779);
+      assert.equal((await store.listReminders('3203')).length, 1);
+
+      const reply = await react(store, '3203', 779, { from: ['❤️'], to: [] });
+      assert.equal((await store.listReminders('3203')).length, 0);
+      assert.ok(reply.includes('Знято'), reply.slice(0, 300));
+    });
+  });
+
+  it('keeps the learned taste when the heart is removed', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3204', city: 'kharkiv' });
+      await store.recordMessage('3204', 780, [gig()]);
+      await react(store, '3204', 780);
+      await react(store, '3204', 780, { from: ['❤️'], to: [] });
+      const user = await getUser(store, '3204');
+      assert.ok(user?.prefs.favourite_categories.includes('standup'));
+    });
+  });
+
+  it('ignores a reaction that is not a heart', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3205', city: 'kharkiv' });
+      await store.recordMessage('3205', 781, [gig()]);
+      const reply = await react(store, '3205', 781, { to: ['👍'] });
+      assert.equal(await store.listReminders('3205').then((r) => r.length), 0);
+      assert.equal(reply.trim(), '');
+    });
+  });
+
+  it('says nothing at all about a message it no longer remembers', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3206', city: 'kharkiv' });
+      const reply = await react(store, '3206', 9999);
+      assert.equal(reply.trim(), '');
+    });
+  });
+
+  it('asks for the event itself when the message covered several', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3207', city: 'kharkiv' });
+      const other = makeItem({ city: 'kharkiv', title: 'Інше', url: 'https://h/2', source: 's', startsAt: '2026-11-02T19:00:00+02:00' })!;
+      await store.recordMessage('3207', 782, [gig(), other]);
+      const reply = await react(store, '3207', 782);
+      assert.ok(reply.includes('на самій події'), reply.slice(0, 300));
+      assert.equal((await store.listReminders('3207')).length, 0);
+    });
+  });
+
+  it('will not promise a reminder for an event with no start time', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3208', city: 'kharkiv' });
+      const someday = makeItem({ city: 'kharkiv', title: 'Колись', url: 'https://h/3', source: 's' })!;
+      await store.recordMessage('3208', 783, [someday]);
+      const reply = await react(store, '3208', 783);
+      assert.ok(reply.includes('немає часу початку'), reply.slice(0, 300));
+      assert.equal((await store.listReminders('3208')).length, 0);
+    });
+  });
+});
+
+/* -------------------------------------------------------------------- deliver --- */
+
+describe('deliver', () => {
+  const query = parseRequest('', { prefs, base: '2026-10-20', from: '2026-10-23', to: '2026-10-25' });
+
+  it('sends the header and every event as its own Telegram message', async () => {
+    await withTestStore(async (store) => {
+      const items = [1, 2, 3].map(
+        (n) => makeItem({ city: 'kharkiv', title: `Подія ${n}`, url: `https://d/${n}`, source: 's', startsAt: `2026-10-2${2 + n}T19:00:00+03:00` })!,
+      );
+      const printed = await captureOutput(() =>
+        deliver({ title: 'T', query, items, log, store, chatId: '3301', dryRun: true }),
+      );
+      assert.equal(printed.split('──────── to chat 3301').length - 1, 4, printed);
+    });
   });
 });
 
