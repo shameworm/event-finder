@@ -1,8 +1,8 @@
 import type { Item, Query } from './types.ts';
-import { EMOJI } from './categories.ts';
+import { EMOJI, classify } from './categories.ts';
 import { cityLabel, loadConfig } from './config.ts';
 import { priceText } from './normalize.ts';
-import { dayLabel, localTime, truncate } from './util.ts';
+import { dayLabel, localDate, localTime, truncate } from './util.ts';
 import { groupByDay } from './rank.ts';
 import { escapeHtml } from './telegram-api.ts';
 
@@ -21,7 +21,11 @@ function plural(n: number, [one, few, many]: [string, string, string]): string {
 export const countEvents = (n: number): string => `${n} ${plural(n, ['подія', 'події', 'подій'])}`;
 export const countPlaces = (n: number): string => `${n} ${plural(n, ['місце', 'місця', 'місць'])}`;
 
+export const countReminders = (n: number): string => `${n} ${plural(n, ['нагадування', 'нагадування', 'нагадувань'])}`;
+
 export const REMINDER_HINT = 'Тапни ❤️ на події — нагадаю за день і за 3 години до початку.';
+export const NO_REMINDERS = 'Нагадувань поки немає. Тапни ❤️ на події — і я поставлю.';
+export const CANCEL_HINT = 'Знімеш ❤️ з повідомлення про подію — скасую нагадування.';
 export const PLACES_HINT = 'Скажи, як тобі — і я підлаштую підказки.';
 export const NOTHING_FOUND = 'Цього разу нічого не знайшлося. Спробуй ширший період або інше місто.';
 
@@ -103,6 +107,64 @@ export function renderItem(item: Item, opts: RenderItemOptions = {}): string {
     lines.push(plain(`· ${item.reasons.slice(0, 4).join(', ')} (бали ${item.score})`, format));
   }
   return lines.filter(Boolean).join('\n');
+}
+
+/** What `renderReminders` needs of a reminder row, and nothing more. */
+export interface ReminderLine {
+  title: string;
+  starts_at: string;
+  venue?: string | null;
+  url?: string | null;
+}
+
+/**
+ * The reminder list: day-grouped like a digest, because that is the shape
+ * people already read in this chat.
+ *
+ * Reminders are stored without a category — the table predates one and there
+ * are no migrations — so the emoji is classified from the title. A wrong guess
+ * costs one wrong pictogram, and ✨ covers whatever does not classify.
+ *
+ * Anything that has already started is left out: the reminder has done its job,
+ * and `listReminders` keeps rows until they are cancelled.
+ */
+export function renderReminders(
+  rows: ReminderLine[],
+  opts: { format?: Format; tz?: string; now?: Date } = {},
+): string {
+  const cfg = loadConfig();
+  const format = opts.format ?? 'html';
+  const tz = opts.tz ?? cfg.timezone;
+  const cutoff = (opts.now ?? new Date()).getTime();
+
+  const upcoming = rows
+    .filter((r) => Date.parse(r.starts_at) >= cutoff)
+    .sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+  if (upcoming.length === 0) return plain(NO_REMINDERS, format);
+
+  const byDay = new Map<string, ReminderLine[]>();
+  for (const r of upcoming) {
+    const day = localDate(r.starts_at, tz);
+    byDay.set(day, [...(byDay.get(day) ?? []), r]);
+  }
+
+  const blocks = [`${bold('⏰ Твої нагадування', format)}\n${plain(countReminders(upcoming.length), format)}`];
+  for (const [day, list] of byDay) {
+    const lines = list.map((r) => {
+      const emoji = EMOJI[classify(r.title) ?? 'other'];
+      const facts = [localTime(r.starts_at, tz), r.venue].filter((x): x is string => Boolean(x?.trim()));
+      return [
+        `${emoji} ${bold(r.title, format)}`,
+        plain(facts.join(' · '), format),
+        r.url ? link('детальніше →', r.url, format) : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    });
+    blocks.push([`${format === 'text' ? '' : '— '}${bold(dayLabel(day, cfg.locale), format)}`, ...lines].join('\n\n'));
+  }
+  blocks.push(plain(CANCEL_HINT, format));
+  return blocks.join('\n\n');
 }
 
 export interface DigestOptions {

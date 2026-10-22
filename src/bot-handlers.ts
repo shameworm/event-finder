@@ -17,7 +17,7 @@ import { parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
-import { countEvents } from './render.ts';
+import { countEvents, renderReminders } from './render.ts';
 import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
 import { WORD_END, addDays, normText, today } from './util.ts';
 
@@ -787,16 +787,8 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
       await ctx.store.setBlocked(chatId, true);
       return reply('🔕 Відписано — більше нічого не надсилаю. Напиши /start, коли захочеш повернутися.');
 
-    case '/reminders': {
-      const rows = await ctx.store.listReminders(chatId);
-      if (rows.length === 0) return reply('Нагадувань поки немає. Тапни ❤️ на події — і я поставлю.');
-      return reply(
-        `<b>⏰ Твої нагадування</b>\n` +
-          rows
-            .map((r) => `· ${escapeHtml(r.title)} — ${escapeHtml(r.starts_at.slice(0, 16).replace('T', ' '))}`)
-            .join('\n'),
-      );
-    }
+    case '/reminders':
+      return reply(renderReminders(await ctx.store.listReminders(chatId)));
 
     case '/follow':
     case '/unfollow': {
