@@ -1,14 +1,18 @@
 /**
  * "Render it, send it, remember it" for one person.
  *
- * Everything recorded here is per chat id: what they were shown, and which
- * items each message was about, so their "🔔" replies resolve correctly.
+ * A digest goes out as a short header followed by **one message per event**,
+ * and each of those messages is recorded against the single event it showed.
+ * That is what lets a ❤️ reaction resolve to one event with no ambiguity —
+ * and it is why `buildMessages`, not `buildDigest`, is used here.
  */
 import type { Item, Query } from './types.ts';
 import type { Logger } from './log.ts';
 import type { Store } from './db.ts';
-import { buildDigest, summarize, type Format } from './render.ts';
+import { buildMessages, summarize, type Format } from './render.ts';
 import { TelegramError, botToken, sendMessage } from './telegram-api.ts';
+import { loadConfig } from './config.ts';
+import { sleep } from './util.ts';
 
 export interface DeliverOptions {
   title: string;
@@ -38,7 +42,8 @@ export interface DeliverResult {
 }
 
 export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
-  const { text, ordered } = buildDigest({
+  const cfg = loadConfig();
+  const messages = buildMessages({
     title: opts.title,
     query: opts.query,
     items: opts.items,
@@ -48,30 +53,42 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
     footer: opts.footer,
     changeNotes: opts.changeNotes,
   });
+  const text = messages.map((m) => m.text).join('\n\n');
+  const shouldRecord = opts.record ?? !opts.dryRun;
+  const messageIds: number[] = [];
 
-  let messageIds: number[] = [];
-  try {
-    messageIds = await sendMessage(text, {
-      chatId: opts.chatId,
-      dryRun: opts.dryRun,
-      log: opts.log,
-      replyTo: opts.replyTo,
-    });
-  } catch (err) {
-    if (err instanceof TelegramError && err.chatGone) {
-      opts.log.warn(`chat ${opts.chatId} is unreachable (${err.description ?? 'blocked'})`);
-      if (opts.store && opts.chatId) await opts.store.setBlocked(opts.chatId, true);
-      return { messageIds: [], text, chatGone: true };
+  for (const [i, message] of messages.entries()) {
+    // Telegram tolerates a burst but throttles a sustained one; a short pause
+    // between a digest's messages keeps a ten-event week under its limit
+    if (i > 0 && !opts.dryRun && cfg.bot.message_delay_ms) await sleep(cfg.bot.message_delay_ms);
+
+    let ids: number[];
+    try {
+      ids = await sendMessage(message.text, {
+        chatId: opts.chatId,
+        dryRun: opts.dryRun,
+        log: opts.log,
+        // only the header answers the request; the events stand on their own
+        replyTo: i === 0 ? opts.replyTo : undefined,
+      });
+    } catch (err) {
+      if (err instanceof TelegramError && err.chatGone) {
+        opts.log.warn(`chat ${opts.chatId} is unreachable (${err.description ?? 'blocked'})`);
+        if (opts.store && opts.chatId) await opts.store.setBlocked(opts.chatId, true);
+        return { messageIds, text, chatGone: true };
+      }
+      throw err;
     }
-    throw err;
+    messageIds.push(...ids);
+
+    // one event per message, so a ❤️ on this message means exactly this event
+    if (opts.store && opts.chatId && shouldRecord && message.items.length > 0) {
+      for (const id of ids) await opts.store.recordMessage(opts.chatId, id, message.items);
+    }
   }
 
-  const shouldRecord = opts.record ?? !opts.dryRun;
   if (opts.store && opts.chatId && shouldRecord && opts.items.length > 0) {
     await opts.store.recordSent(opts.chatId, opts.items);
-    // map each message to the items it covered, in the order they were
-    // numbered, so a "🔔 3" reply resolves to the third line shown
-    for (const id of messageIds) await opts.store.recordMessage(opts.chatId, id, ordered);
   }
 
   opts.log.info(`${opts.dryRun ? 'dry-run' : `sent to ${opts.chatId}`}: ${opts.title} — ${summarize(opts.items)}`);

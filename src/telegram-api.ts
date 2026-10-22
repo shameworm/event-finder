@@ -6,12 +6,16 @@ import type { Logger } from './log.ts';
 import { TgMessageSchema, TgResponseSchema, TgUpdateSchema, type TgMessage, type TgUpdate } from './schemas.ts';
 import { formatZodError } from './types.ts';
 
-export type { TgMessage, TgUpdate } from './schemas.ts';
+export type { TgMessage, TgReactionUpdate, TgUpdate } from './schemas.ts';
 
 /**
  * Telegram Bot API over plain fetch — used for *sending* digests, alerts and
- * reminders, and for reading replies ("🔔"). Reading public channels is a
- * different job and uses GramJS (see src/gramjs.ts).
+ * reminders, and for reading what comes back: ❤️ reactions on event messages,
+ * and plain replies. Reading public channels is a different job and uses
+ * GramJS (see scripts/telegram.ts).
+ *
+ * Reactions only arrive because `getUpdates` asks for `message_reaction`
+ * explicitly; without it Telegram silently drops them.
  */
 
 export function botToken(): string | undefined {
@@ -150,7 +154,11 @@ export function splitForTelegram(text: string, limit = 3800): string[] {
 
 /** Long-poll new updates; the caller stores the offset (see scripts/bot.ts). */
 export async function getUpdates(offset: number, timeout = 0): Promise<TgUpdate[]> {
-  return call('getUpdates', { offset, timeout, allowed_updates: ['message', 'edited_message'] }, z.array(TgUpdateSchema));
+  return call(
+    'getUpdates',
+    { offset, timeout, allowed_updates: ['message', 'edited_message', 'message_reaction'] },
+    z.array(TgUpdateSchema),
+  );
 }
 
 export async function getMe(): Promise<{ id: number; username?: string; first_name?: string }> {

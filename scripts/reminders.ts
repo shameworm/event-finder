@@ -1,7 +1,7 @@
 #!/usr/bin/env -S npx tsx
 /**
  * Reminder tick: fires the 1-day and 3-hour reminders every user asked for
- * with "🔔". Run it on a short schedule (every 15 minutes).
+ * with a ❤️. Run it on a short schedule (every 15 minutes).
  *
  *   npx tsx scripts/reminders.ts                 # fire whatever is due
  *   npx tsx scripts/reminders.ts --dry-run       # show what would fire
@@ -9,8 +9,8 @@
  *   npx tsx scripts/reminders.ts --list --chat 123456789
  *   npx tsx scripts/reminders.ts --cancel <item-id> --chat 123456789
  *
- * Reminders are created by replying "🔔" in Telegram (scripts/bot.ts) — this
- * script only delivers them.
+ * Reminders are created by reacting ❤️ to an event message in Telegram
+ * (scripts/bot.ts) — this script only delivers them.
  */
 import { loadConfig } from '../src/config.ts';
 import { makeLogger } from '../src/log.ts';
@@ -19,6 +19,7 @@ import { withStore } from '../src/db.ts';
 import { TelegramError, escapeHtml, sendMessage } from '../src/telegram-api.ts';
 import { canSend } from '../src/deliver.ts';
 import { dayLabel, localDate, localTime, sleep } from '../src/util.ts';
+import * as copy from '../src/copy.ts';
 
 const args = parseArgs();
 const log = makeLogger('reminders');
@@ -58,13 +59,13 @@ await withStore(async (store) => {
 
   let fired = 0;
   for (const { row, which } of due) {
-    const when = which === '1d' ? 'Tomorrow' : 'In ~3 hours';
+    const when = which === '1d' ? copy.REMIND_TOMORROW : copy.REMIND_SOON;
     const day = dayLabel(localDate(row.starts_at, cfg.timezone), cfg.locale);
     const time = localTime(row.starts_at, cfg.timezone);
     const text =
-      `⏰ <b>${escapeHtml(when)}</b>: ${escapeHtml(row.title)}\n` +
+      `❤️ <b>${escapeHtml(when)}</b>: ${escapeHtml(row.title)}\n` +
       `${escapeHtml(day)} ${escapeHtml(time)}${row.venue ? ` · ${escapeHtml(row.venue)}` : ''}\n` +
-      (row.url ? `<a href="${escapeHtml(row.url)}">details →</a>` : '');
+      (row.url ? `<a href="${escapeHtml(row.url)}">${copy.DETAILS_LINK}</a>` : '');
 
     try {
       await sendMessage(text, { chatId: row.chat_id, dryRun, log });
