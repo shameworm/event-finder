@@ -18,8 +18,8 @@ import { loadConfig } from '../src/config.ts';
 import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore, type Store } from '../src/db.ts';
-import { botToken, getMe, getUpdates } from '../src/telegram-api.ts';
-import { handleMessage, type HandlerContext } from '../src/bot-handlers.ts';
+import { botToken, getMe, getUpdates, setMyCommands } from '../src/telegram-api.ts';
+import { BOT_COMMANDS, handleMessage, type HandlerContext } from '../src/bot-handlers.ts';
 import { sleep } from '../src/util.ts';
 
 const args = parseArgs();
@@ -67,6 +67,17 @@ await withStore(async (store) => {
   );
   const counts = await store.countUsers();
   log.info(`${counts.active} active user(s) of ${counts.total} registered`);
+
+  // what Telegram autocompletes after "/" and shows behind the ☰ menu button;
+  // cosmetic, so a failure here is logged and the bot carries on serving people
+  if (!dryRun) {
+    try {
+      await setMyCommands(BOT_COMMANDS);
+      log.info(`published ${BOT_COMMANDS.length} commands to the Telegram menu`);
+    } catch (err) {
+      log.warn(`could not publish the command menu: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   if (args.has('once')) {
     const n = await drain(store, args.num('timeout') ?? 0);

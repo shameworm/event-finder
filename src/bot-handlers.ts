@@ -24,6 +24,27 @@ export interface HandlerContext {
   dryRun?: boolean;
 }
 
+/**
+ * The published command list: what Telegram autocompletes as you type "/" and
+ * what sits behind the ☰ menu button. `scripts/bot.ts` uploads it on start-up.
+ *
+ * Commands that only make sense with an argument (/mute, /follow) or that
+ * belong to the operator (/stats) stay out of the menu — they still work.
+ */
+export const BOT_COMMANDS: { command: string; description: string }[] = [
+  { command: 'week', description: '🗓 Everything on this week' },
+  { command: 'weekend', description: '🎉 Friday to Sunday' },
+  { command: 'today', description: '📅 On today' },
+  { command: 'tomorrow', description: '📅 On tomorrow' },
+  { command: 'places', description: '📍 New cafés, bars and galleries' },
+  { command: 'settings', description: '⚙️ Digests, city and taste' },
+  { command: 'city', description: '🏙 Change your city' },
+  { command: 'prefs', description: '🎛 What I think you like' },
+  { command: 'reminders', description: '⏰ Your 🔔 list' },
+  { command: 'help', description: '❔ What I can do' },
+  { command: 'stop', description: '🔕 Unsubscribe' },
+];
+
 const COMMANDS = `<b>What I can do</b>
 
 /week — everything on this week

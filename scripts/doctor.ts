@@ -14,9 +14,10 @@ import { DATA_DIR, DB_FILE, LOG_FILE, SKILL_DIR, TG_SESSION_FILE, WEBSEARCH_INBO
 import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore } from '../src/db.ts';
-import { botToken, defaultChatId, getMe } from '../src/telegram-api.ts';
+import { botToken, defaultChatId, getMe, getMyCommands } from '../src/telegram-api.ts';
 import { politeFetch } from '../src/http.ts';
 import { credentials } from './telegram.ts';
+import { BOT_COMMANDS } from '../src/bot-handlers.ts';
 import { describePrefs } from '../src/prefs-engine.ts';
 import { cityLabel } from '../src/config.ts';
 import { today } from '../src/util.ts';
@@ -140,6 +141,15 @@ else {
   }
   if (!defaultChatId()) warn('TELEGRAM_CHAT_ID missing — set it to your own chat id for /stats and the CLI');
   else ok(`owner chat id ${defaultChatId()}`);
+  try {
+    const published = await getMyCommands();
+    const missing = BOT_COMMANDS.filter((c) => !published.some((p) => p.command === c.command));
+    if (published.length === 0) warn('no command menu published — start the bot once and it will upload BOT_COMMANDS');
+    else if (missing.length) warn(`command menu is stale, missing ${missing.map((c) => `/${c.command}`).join(' ')} — restart the bot`);
+    else ok(`command menu: ${published.length} command(s), "/" autocompletes`);
+  } catch (err) {
+    warn(`could not read the command menu: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 section('bot policy');

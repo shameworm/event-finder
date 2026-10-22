@@ -59,7 +59,7 @@ const { splitForTelegram } = await import('../src/telegram-api.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs } = await import('../src/users.ts');
 const { cacheKey } = await import('../src/cache.ts');
 const { fanout } = await import('../src/fanout.ts');
-const { handleMessage, parseBell, isAllowed } = await import('../src/bot-handlers.ts');
+const { handleMessage, parseBell, isAllowed, BOT_COMMANDS } = await import('../src/bot-handlers.ts');
 const { makeLogger } = await import('../src/log.ts');
 const { ALL_SOURCE_NAMES } = await import('../src/pipeline.ts');
 
@@ -856,6 +856,16 @@ describe('bot handlers', () => {
       const chosen = await say(store, '3007', '🔔 2', { reply_to_message: { message_id: 555 } });
       assert.ok(chosen.includes('Second'), chosen.slice(0, 200));
     });
+  });
+
+  it('publishes a command menu that the router actually answers', () => {
+    const source = readFileSync(new URL('../src/bot-handlers.ts', import.meta.url), 'utf8');
+    assert.ok(BOT_COMMANDS.length > 0);
+    for (const { command, description } of BOT_COMMANDS) {
+      assert.ok(source.includes(`case '/${command}'`), `/${command} is in the menu but the router ignores it`);
+      assert.ok(/^[a-z0-9_]{1,32}$/.test(command), `"${command}" is not a valid Telegram command name`);
+      assert.ok(description.length <= 256, `the description of /${command} is too long for Telegram`);
+    }
   });
 
   it('reads the bell with and without an index', () => {
