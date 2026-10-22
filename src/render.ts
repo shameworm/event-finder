@@ -9,10 +9,10 @@ import { escapeHtml } from './telegram-api.ts';
 export type Format = 'html' | 'text';
 
 const STATUS_BADGE: Record<string, string> = {
-  soldout: ' — 🚫 SOLD OUT',
-  cancelled: ' — ❌ CANCELLED',
-  postponed: ' — ⏳ POSTPONED',
-  limited: ' — ⚠️ few tickets left',
+  soldout: ' — 🚫 КВИТКІВ НЕМАЄ',
+  cancelled: ' — ❌ СКАСОВАНО',
+  postponed: ' — ⏳ ПЕРЕНЕСЕНО',
+  limited: ' — ⚠️ лишилось мало квитків',
 };
 
 function link(label: string, url: string, format: Format): string {
@@ -51,8 +51,8 @@ export function renderItem(item: Item, opts: RenderItemOptions = {}): string {
   // Telegram posts often give a date but no time; 00:00 means "unknown", not midnight
   const timeKnown = item.startsAt ? !(item.confidence === 'low' && localTime(item.startsAt, tz) === '00:00') : false;
   const when = item.startsAt
-    ? `${opts.withDay ? dayLabel(item.startsAt.slice(0, 10), cfg.locale) + ' ' : ''}${timeKnown ? localTime(item.startsAt, tz) : 'time TBA'}`
-    : 'date TBA';
+    ? `${opts.withDay ? dayLabel(item.startsAt.slice(0, 10), cfg.locale) + ' ' : ''}${timeKnown ? localTime(item.startsAt, tz) : 'час уточнюється'}`
+    : 'дата уточнюється';
 
   const facts = (item.kind === 'place'
     ? [item.address, item.venue]
@@ -66,9 +66,9 @@ export function renderItem(item: Item, opts: RenderItemOptions = {}): string {
     facts,
   ];
   if (item.description) lines.push(plain(truncate(item.description, 140), format));
-  lines.push(link(item.kind === 'place' ? 'details →' : 'tickets →', item.url, format));
+  lines.push(link(item.kind === 'place' ? 'детальніше →' : 'квитки →', item.url, format));
   if (opts.explain && item.reasons?.length) {
-    lines.push(plain(`· ${item.reasons.slice(0, 4).join(', ')} (score ${item.score})`, format));
+    lines.push(plain(`· ${item.reasons.slice(0, 4).join(', ')} (бали ${item.score})`, format));
   }
   return lines.filter(Boolean).join('\n');
 }
@@ -106,7 +106,7 @@ export function buildDigest(opts: DigestOptions): { text: string; ordered: Item[
     ? `${bold(opts.title, format)}\n${plain(cities, format)}`
     : `${bold(opts.title, format)}\n${plain(`${cities} · ${rangeText(opts.query)}`, format)}`;
   if (opts.items.length === 0) {
-    const empty = opts.footer ?? 'Nothing matched this time. Try a wider date range or another city.';
+    const empty = opts.footer ?? 'Цього разу нічого не знайшлося. Спробуй ширший період або інше місто.';
     return { text: `${head}\n\n${plain(empty, format)}`, ordered: [] };
   }
 
@@ -121,12 +121,12 @@ export function buildDigest(opts: DigestOptions): { text: string; ordered: Item[
         .map((it) => renderItem(it, { format, index: opts.numbered === false ? undefined : n++, explain: opts.explain }))
         .join('\n\n'),
     );
-    blocks.push(plain(opts.footer ?? 'Tell me what you think and I will tune the suggestions.', format));
+    blocks.push(plain(opts.footer ?? 'Скажи, як тобі — і я підлаштую підказки.', format));
     return { text: blocks.join('\n\n'), ordered };
   }
 
   for (const group of groupByDay(opts.items, cfg.timezone)) {
-    const dayHead = group.day === 'tbd' ? 'Date to be announced' : dayLabel(group.day, cfg.locale);
+    const dayHead = group.day === 'tbd' ? 'Дата уточнюється' : dayLabel(group.day, cfg.locale);
     const shown = maxPerDay > 0 ? group.items.slice(0, maxPerDay) : group.items;
     ordered.push(...shown);
     const rendered = shown.map((it) =>
@@ -139,12 +139,12 @@ export function buildDigest(opts: DigestOptions): { text: string; ordered: Item[
     );
     const more = group.items.length - shown.length;
     blocks.push(
-      [`${format === 'text' ? '' : '— '}${bold(dayHead, format)}`, ...rendered, more > 0 ? plain(`…and ${more} more`, format) : '']
+      [`${format === 'text' ? '' : '— '}${bold(dayHead, format)}`, ...rendered, more > 0 ? plain(`…і ще ${more}`, format) : '']
         .filter(Boolean)
         .join('\n\n'),
     );
   }
-  blocks.push(plain(opts.footer ?? 'Reply 🔔 (or "🔔 3") to get a reminder 1 day and 3 hours before it starts.', format));
+  blocks.push(plain(opts.footer ?? 'Відповідай 🔔 (або «🔔 3»), щоб отримати нагадування за добу та за 3 години до початку.', format));
   return { text: blocks.join('\n\n'), ordered };
 }
 

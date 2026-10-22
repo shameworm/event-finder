@@ -11,7 +11,7 @@
 import type { Preferences } from './types.ts';
 import { PreferencesSchema } from './types.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
-import { canonicalTag } from './categories.ts';
+import { canonicalTag, tagLabel } from './categories.ts';
 import { normText, today } from './util.ts';
 import { nextWeekRange, parseDateRange, thisWeekRange } from './request.ts';
 
@@ -70,14 +70,14 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
 
   /* --- show ------------------------------------------------------------- */
   if (/^(show|list|які|what are)?\s*(my )?(prefs|preferences|налаштування|уподобання|смаки)\b/i.test(t) && !/add|remove/i.test(t)) {
-    return ok([], 'nothing to change');
+    return ok([], 'нічого міняти');
   }
 
   /* --- budget ----------------------------------------------------------- */
   if (/\b(no|без)\s*(price\s*)?(limit|ліміт|обмежень|budget)\b|unlimited/i.test(t)) {
     const changed = prefs.max_ticket_price !== null;
     prefs.max_ticket_price = null;
-    return ok(changed ? ['max ticket price → no limit'] : [], changed ? undefined : 'already unlimited');
+    return ok(changed ? ['максимальна ціна квитка → без обмежень'] : [], changed ? undefined : 'і так без обмежень');
   }
   const budget = t.match(
     /\b(?:max(?:imum)?|budget|limit|ліміт|бюджет|не більше|не дорожче|cheaper than|under|до)\b[^\d]{0,15}(\d{2,5})/i,
@@ -86,14 +86,14 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
     const value = Number(budget[1]);
     const changed = prefs.max_ticket_price !== value;
     prefs.max_ticket_price = value;
-    return ok(changed ? [`max ticket price → ${value} ${prefs.currency}`] : [], changed ? undefined : 'already set');
+    return ok(changed ? [`максимальна ціна квитка → ${value} ${prefs.currency}`] : [], changed ? undefined : 'уже так і стоїть');
   }
 
   /* --- trip ------------------------------------------------------------- */
   if (/\b(cancel|скасуй|скасувати)\b.*\b(trip|поїздк)|back home|повернувся додому|i'?m home/i.test(t)) {
     const changed = prefs.trip !== null;
     prefs.trip = null;
-    return ok(changed ? ['trip → cleared'] : [], changed ? undefined : 'no trip was set');
+    return ok(changed ? ['поїздку скасовано'] : [], changed ? undefined : 'поїздки й не було');
   }
   const trip = t.match(new RegExp(String.raw`\b(?:i'?m|i am|я|ill be|i'?ll be|буду|їду|поїду|going)\b\s*(?:in|to|у|в|до)?\s*${CITY}\b`, 'i'));
   if (trip) {
@@ -105,7 +105,7 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
           ? thisWeekRange(base)
           : parseDateRange(t, base);
       prefs.trip = { city, from: range.from, to: range.to };
-      return ok([`trip → ${cityLabel(city)} ${range.from} → ${range.to} (${range.label})`]);
+      return ok([`поїздка → ${cityLabel(city)} ${range.from} → ${range.to} (${range.label})`]);
     }
   }
 
@@ -116,7 +116,7 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
     if (city) {
       const changed = prefs.home_city !== city;
       prefs.home_city = city;
-      return ok(changed ? [`home city → ${cityLabel(city)}`] : [], changed ? undefined : 'already your home city');
+      return ok(changed ? [`домашнє місто → ${cityLabel(city)}`] : [], changed ? undefined : 'це вже твоє домашнє місто');
     }
   }
   const unwatch = t.match(new RegExp(String.raw`\b(?:unwatch|stop watching|не слідкуй за|прибери місто)\s*${CITY}\b`, 'i'));
@@ -124,7 +124,7 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
     const city = resolveCity(unwatch[1] as string);
     if (city) {
       const changed = drop(prefs.watch_cities, city);
-      return ok(changed ? [`watch cities − ${cityLabel(city)}`] : [], changed ? undefined : 'was not watched');
+      return ok(changed ? [`міста на оці − ${cityLabel(city)}`] : [], changed ? undefined : 'за ним і не стежив');
     }
   }
   const watch = t.match(new RegExp(String.raw`\b(?:watch|also watch|слідкуй за|додай місто)\s*${CITY}\b`, 'i'));
@@ -132,7 +132,7 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
     const city = resolveCity(watch[1] as string);
     if (city) {
       const changed = add(prefs.watch_cities, city);
-      return ok(changed ? [`watch cities + ${cityLabel(city)}`] : [], changed ? undefined : 'already watched');
+      return ok(changed ? [`міста на оці + ${cityLabel(city)}`] : [], changed ? undefined : 'уже стежу за ним');
     }
   }
 
@@ -141,13 +141,13 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   if (unfollow) {
     const who = cleanTag(unfollow[1] as string);
     const changed = drop(prefs.follow, who);
-    return ok(changed ? [`unfollowed "${who}"`] : [], changed ? undefined : `"${who}" was not on the follow list`);
+    return ok(changed ? [`більше не стежу за «${who}»`] : [], changed ? undefined : `за «${who}» я і не стежив`);
   }
   const follow = t.match(/\b(?:follow|слідкуй за|стеж за|підпишись на)\s+(.+)$/i);
   if (follow) {
     const who = cleanTag(follow[1] as string);
     const changed = add(prefs.follow, who);
-    return ok(changed ? [`following "${who}"`] : [], changed ? undefined : `already following "${who}"`);
+    return ok(changed ? [`стежу за «${who}»`] : [], changed ? undefined : `за «${who}» уже стежу`);
   }
 
   /* --- interests -------------------------------------------------------- */
@@ -155,7 +155,7 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   if (interest) {
     const tag = asTag(interest[1] as string);
     const changed = add(prefs.interests, tag);
-    return ok(changed ? [`interests + ${tag}`] : [], changed ? undefined : 'already an interest');
+    return ok(changed ? [`інтереси + ${tagLabel(tag)}`] : [], changed ? undefined : 'це вже в інтересах');
   }
 
   /* --- dislikes --------------------------------------------------------- */
@@ -163,7 +163,7 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   if (undislike) {
     const tag = asTag(undislike[1] as string);
     const changed = drop(prefs.disliked_categories, tag);
-    return ok(changed ? [`dislikes − ${tag}`] : [], changed ? undefined : 'was not disliked');
+    return ok(changed ? [`небажане − ${tagLabel(tag)}`] : [], changed ? undefined : 'цього й не було в небажаному');
   }
   const dislike = t.match(/\b(?:i\s+)?(?:don'?t like|do not like|dislike|hate|не люблю|не цікавить|ненавиджу|не хочу)\s+(.+)$/i)
     ?? t.match(/^\s*(?:no|без|ніякого|никакого)\s+(.+)$/i)
@@ -173,8 +173,8 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
     if (tag) {
       const changed = add(prefs.disliked_categories, tag);
       const alsoDropped = drop(prefs.favourite_categories, tag);
-      const changes = [...(changed ? [`dislikes + ${tag}`] : []), ...(alsoDropped ? [`favourites − ${tag}`] : [])];
-      return ok(changes, changes.length ? undefined : `already disliked`);
+      const changes = [...(changed ? [`небажане + ${tagLabel(tag)}`] : []), ...(alsoDropped ? [`улюблене − ${tagLabel(tag)}`] : [])];
+      return ok(changes, changes.length ? undefined : 'це вже в небажаному');
     }
   }
 
@@ -183,7 +183,7 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   if (unfav) {
     const tag = asTag(unfav[1] as string);
     const changed = drop(prefs.favourite_categories, tag);
-    return ok(changed ? [`favourites − ${tag}`] : [], changed ? undefined : 'was not a favourite');
+    return ok(changed ? [`улюблене − ${tagLabel(tag)}`] : [], changed ? undefined : 'цього й не було в улюбленому');
   }
   const fav =
     t.match(/\b(?:add|додай|додати)\s+(.+?)\s+(?:to|в|до)\s+(?:favourites?|favorites?|улюблен\w*|любимих)\b/i) ??
@@ -193,8 +193,8 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
     if (tag) {
       const changed = add(prefs.favourite_categories, tag);
       const alsoDropped = drop(prefs.disliked_categories, tag);
-      const changes = [...(changed ? [`favourites + ${tag}`] : []), ...(alsoDropped ? [`dislikes − ${tag}`] : [])];
-      return ok(changes, changes.length ? undefined : 'already a favourite');
+      const changes = [...(changed ? [`улюблене + ${tagLabel(tag)}`] : []), ...(alsoDropped ? [`небажане − ${tagLabel(tag)}`] : [])];
+      return ok(changes, changes.length ? undefined : 'це вже в улюбленому');
     }
   }
 
@@ -204,14 +204,14 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
 /** One-screen summary of the current preferences, for the bot and the CLI. */
 export function describePrefs(prefs: Preferences): string {
   const lines = [
-    `home city: ${cityLabel(prefs.home_city)}`,
-    `watch cities: ${prefs.watch_cities.map((c) => cityLabel(c)).join(', ') || '—'}`,
-    `favourites: ${prefs.favourite_categories.join(', ') || '—'}`,
-    `dislikes: ${prefs.disliked_categories.join(', ') || '—'}`,
-    `following: ${prefs.follow.join(', ') || '—'}`,
-    `max ticket price: ${prefs.max_ticket_price ? `${prefs.max_ticket_price} ${prefs.currency}` : 'no limit'}`,
-    `interests: ${(prefs.interests ?? []).join(', ') || '—'}`,
+    `домашнє місто: ${cityLabel(prefs.home_city)}`,
+    `міста на оці: ${prefs.watch_cities.map((c) => cityLabel(c)).join(', ') || '—'}`,
+    `улюблене: ${prefs.favourite_categories.map(tagLabel).join(', ') || '—'}`,
+    `небажане: ${prefs.disliked_categories.map(tagLabel).join(', ') || '—'}`,
+    `стежу за: ${prefs.follow.join(', ') || '—'}`,
+    `максимум за квиток: ${prefs.max_ticket_price ? `${prefs.max_ticket_price} ${prefs.currency}` : 'без обмежень'}`,
+    `інтереси: ${(prefs.interests ?? []).map(tagLabel).join(', ') || '—'}`,
   ];
-  if (prefs.trip) lines.push(`trip: ${cityLabel(prefs.trip.city)} ${prefs.trip.from} → ${prefs.trip.to}`);
+  if (prefs.trip) lines.push(`поїздка: ${cityLabel(prefs.trip.city)} ${prefs.trip.from} → ${prefs.trip.to}`);
   return lines.join('\n');
 }

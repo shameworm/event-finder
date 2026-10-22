@@ -37,7 +37,7 @@ await withStore(async (store) => {
     store,
     log,
     optIn: 'follow_alerts',
-    window: { from: base, to: addDays(base, days), label: `next ${days} days` },
+    window: { from: base, to: addDays(base, days), label: `найближчі ${days} дн.` },
     // a follow alert covers the user's own city and everything they watch
     includeWatch: true,
     maxPages: args.num('pages'),
@@ -47,11 +47,8 @@ await withStore(async (store) => {
     // only when something about the show changed
     newOnly: !args.has('all'),
     oneMessagePerItem: true,
-    footer: 'Reply 🔔 and I will remind you 1 day and 3 hours before.',
-    title: (user, city) => {
-      const names = user.prefs.follow.join(', ');
-      return `🔔 Someone you follow is playing ${cityLabel(city)}${names ? '' : ''}`;
-    },
+    footer: 'Відповідай 🔔 — і я нагадаю за добу та за 3 години до початку.',
+    title: (_user, city) => `⭐️ Хтось, за ким ти стежиш, виступає — ${cityLabel(city)}`,
     // keep only the shows by people this user follows
     select: (user, ranked) => ranked.filter((item) => user.prefs.follow.some((f) => matchesFollow(item, f))),
   });

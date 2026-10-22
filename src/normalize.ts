@@ -145,19 +145,19 @@ function validate(candidate: unknown, opts: { onReject?: (reason: string) => voi
   return parsed.data;
 }
 
-/** Price text for output: "350–900 ₴", "from 500 ₴", "up to 390 ₴", "free". */
+/** Price text for output: "350–900 ₴", "від 500 ₴", "до 390 ₴", "безкоштовно". */
 export function priceText(item: Item): string {
   const sym = !item.currency || item.currency === 'UAH' ? '₴' : item.currency;
-  if (item.free || item.priceMin === 0) return 'free';
+  if (item.free || item.priceMin === 0) return 'безкоштовно';
   const min = item.priceMin;
   const max = item.priceMax;
   // some sites use 0.01 as a placeholder "price on request" floor; rounding it
   // to 0 would advertise a free ticket that does not exist
-  if (min !== undefined && min < 1 && max !== undefined && max >= 1) return `up to ${Math.round(max)} ${sym}`;
+  if (min !== undefined && min < 1 && max !== undefined && max >= 1) return `до ${Math.round(max)} ${sym}`;
   if (min !== undefined && max !== undefined && max > min) return `${Math.round(min)}–${Math.round(max)} ${sym}`;
   const one = min ?? max;
-  if (one !== undefined) return one < 1 ? 'price n/a' : `from ${Math.round(one)} ${sym}`;
-  return 'price n/a';
+  if (one !== undefined) return one < 1 ? 'ціна невідома' : `від ${Math.round(one)} ${sym}`;
+  return 'ціна невідома';
 }
 
 /** Parse "вхід вільний", "300 грн", "від 250 грн", "150-400 uah" out of free text. */

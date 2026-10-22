@@ -43,14 +43,14 @@ await withStore(async (store) => {
     log,
     optIn: weekend ? 'weekend_digest' : 'weekly_digest',
     window,
-    title: (_user, city) => (weekend ? `🎉 Weekend picks — ${cityLabel(city)}` : `🗓 This week in ${cityLabel(city)}`),
+    title: (_user, city) => (weekend ? `🎉 Вихідні — ${cityLabel(city)}` : `🗓 Цього тижня — ${cityLabel(city)}`),
     top,
     maxPerDay: weekend ? 0 : cfg.digest.max_items_per_day,
     newOnly: !args.has('all'),
     dryRun: args.has('dry-run'),
     maxPages: args.num('pages'),
     onlyChats: args.list('chat'),
-    footer: 'Reply 🔔 (or "🔔 3") for a reminder 1 day and 3 hours before. /settings to change what you get.',
+    footer: 'Відповідай 🔔 (або «🔔 3»), щоб нагадати за добу та за 3 години. /settings — змінити, що тобі приходить.',
   });
 
   process.stdout.write(

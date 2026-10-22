@@ -32,17 +32,17 @@ export interface HandlerContext {
  * belong to the operator (/stats) stay out of the menu — they still work.
  */
 export const BOT_COMMANDS: { command: string; description: string }[] = [
-  { command: 'week', description: '🗓 Everything on this week' },
-  { command: 'weekend', description: '🎉 Friday to Sunday' },
-  { command: 'today', description: '📅 On today' },
-  { command: 'tomorrow', description: '📅 On tomorrow' },
-  { command: 'places', description: '📍 New cafés, bars and galleries' },
-  { command: 'settings', description: '⚙️ Digests, city and taste' },
-  { command: 'city', description: '🏙 Change your city' },
-  { command: 'prefs', description: '🎛 What I think you like' },
-  { command: 'reminders', description: '⏰ Your 🔔 list' },
-  { command: 'help', description: '❔ What I can do' },
-  { command: 'stop', description: '🔕 Unsubscribe' },
+  { command: 'week', description: '🗓 Усе на цьому тижні' },
+  { command: 'weekend', description: '🎉 З пʼятниці по неділю' },
+  { command: 'today', description: '📅 Що сьогодні' },
+  { command: 'tomorrow', description: '📅 Що завтра' },
+  { command: 'places', description: '📍 Нові кавʼярні, бари та галереї' },
+  { command: 'settings', description: '⚙️ Розсилки, місто і смаки' },
+  { command: 'city', description: '🏙 Змінити місто' },
+  { command: 'prefs', description: '🎛 Що я думаю про твої смаки' },
+  { command: 'reminders', description: '⏰ Твої нагадування' },
+  { command: 'help', description: '❔ Що я вмію' },
+  { command: 'stop', description: '🔕 Відписатися' },
 ];
 
 /**
@@ -50,38 +50,38 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
  * /settings text, its buttons and the /mute command all read from this list.
  */
 const OPT_INS: { key: OptIn; emoji: string; label: string; hint: string; names: string[] }[] = [
-  { key: 'weekly_digest', emoji: '🗓', label: 'Weekly digest', hint: 'Monday — what is on this week', names: ['week', 'weekly'] },
-  { key: 'weekend_digest', emoji: '🎉', label: 'Weekend picks', hint: 'Thursday — Friday to Sunday', names: ['weekend'] },
-  { key: 'follow_alerts', emoji: '⭐️', label: 'Follow alerts', hint: 'new shows by people you follow', names: ['follows', 'follow'] },
-  { key: 'place_tips', emoji: '📍', label: 'Place tips', hint: 'weekly cafés, bars and galleries', names: ['places', 'place'] },
+  { key: 'weekly_digest', emoji: '🗓', label: 'Тиждень', hint: 'у понеділок — що буде цього тижня', names: ['week', 'weekly', 'тиждень'] },
+  { key: 'weekend_digest', emoji: '🎉', label: 'Вихідні', hint: 'у четвер — пʼятниця–неділя', names: ['weekend', 'вихідні'] },
+  { key: 'follow_alerts', emoji: '⭐️', label: 'Стежу за', hint: 'нові події тих, за ким ти стежиш', names: ['follows', 'follow', 'стежу'] },
+  { key: 'place_tips', emoji: '📍', label: 'Місця', hint: 'щотижня кавʼярні, бари та галереї', names: ['places', 'place', 'місця'] },
 ];
 
-const COMMANDS = `<b>What I can do</b>
+const COMMANDS = `<b>Що я вмію</b>
 
-/week — everything on this week
-/weekend — Friday to Sunday
-/today · /tomorrow — right now
-/places — new cafés, bars, galleries worth a visit
-/settings — digests, city and taste, with buttons
-/city — change your city
-/prefs — what I think you like
-/reminders — your 🔔 list
-/stop — unsubscribe
+/week — усе на цьому тижні
+/weekend — з пʼятниці по неділю
+/today · /tomorrow — просто зараз
+/places — нові кавʼярні, бари й галереї, куди варто зайти
+/settings — розсилки, місто і смаки, кнопками
+/city — змінити місто
+/prefs — що я думаю про твої смаки
+/reminders — твої нагадування 🔔
+/stop — відписатися
 
-Or just tell me what you want:
-· <i>stand-up this weekend</i>
+Або просто скажи, чого хочеться:
+· <i>стендап на вихідних</i>
 · <i>щось цікаве у Львові на вихідних</i>
-· <i>exhibitions next week, nothing classical</i>
+· <i>виставки наступного тижня, тільки не класика</i>
 
-To teach me your taste:
-· <i>add stand-up to favourites</i>
-· <i>I don't like classical music</i>
-· <i>follow Latexfauna</i>
-· <i>max price 800</i>
-· <i>I'm in Lviv next week</i>
+Щоб я вивчив твої смаки:
+· <i>додай стендап до улюблених</i>
+· <i>не люблю класичну музику</i>
+· <i>слідкуй за Latexfauna</i>
+· <i>максимум 800 грн</i>
+· <i>я у Львові наступного тижня</i>
 
-Reply 🔔 to any event (or "🔔 3" for the third in a list) and I will remind you
-one day and three hours before it starts.`;
+Відповідай 🔔 на будь-яку подію (або «🔔 3» — на третю зі списку), і я нагадаю
+за добу та за три години до початку.`;
 
 /* ------------------------------------------------------------- utilities --- */
 
@@ -103,7 +103,7 @@ function cityButtons(current: string): InlineButton[][] {
       cities.map((c) => ({ text: `${c === current ? '✅ ' : ''}${cityLabel(c)}`, callback_data: `city:${c}` })),
       2,
     ),
-    [{ text: '⬅️ Back', callback_data: 'set:back' }],
+    [{ text: '⬅️ Назад', callback_data: 'set:back' }],
   ];
 }
 
@@ -111,12 +111,12 @@ function cityButtons(current: string): InlineButton[][] {
 function quickActions(): InlineButton[][] {
   return [
     [
-      { text: '🗓 This week', callback_data: 'go:week' },
-      { text: '🎉 Weekend', callback_data: 'go:weekend' },
+      { text: '🗓 Цей тиждень', callback_data: 'go:week' },
+      { text: '🎉 Вихідні', callback_data: 'go:weekend' },
     ],
     [
-      { text: '📍 Places', callback_data: 'go:places' },
-      { text: '⚙️ Settings', callback_data: 'go:settings' },
+      { text: '📍 Місця', callback_data: 'go:places' },
+      { text: '⚙️ Налаштування', callback_data: 'go:settings' },
     ],
   ];
 }
@@ -128,11 +128,11 @@ function quickActions(): InlineButton[][] {
 function settingsPanel(user: BotUser): { text: string; inlineKeyboard: InlineButton[][] } {
   const on = (key: OptIn) => Boolean(user.row[key]);
   const text =
-    `<b>⚙️ Settings</b>\n\n` +
-    `🏙 City — <b>${escapeHtml(cityLabel(user.city))}</b>\n\n` +
-    `<b>Digests</b>\n` +
+    `<b>⚙️ Налаштування</b>\n\n` +
+    `🏙 Місто — <b>${escapeHtml(cityLabel(user.city))}</b>\n\n` +
+    `<b>Розсилки</b>\n` +
     OPT_INS.map((o) => `${on(o.key) ? '✅' : '❌'} ${o.emoji} ${o.label} — <i>${o.hint}</i>`).join('\n') +
-    `\n\nTap a button to change it.`;
+    `\n\nТисни кнопку, щоб змінити.`;
   return {
     text,
     inlineKeyboard: [
@@ -141,10 +141,10 @@ function settingsPanel(user: BotUser): { text: string; inlineKeyboard: InlineBut
         2,
       ),
       [
-        { text: '🏙 Change city', callback_data: 'set:city' },
-        { text: '🎛 My taste', callback_data: 'set:prefs' },
+        { text: '🏙 Змінити місто', callback_data: 'set:city' },
+        { text: '🎛 Мої смаки', callback_data: 'set:prefs' },
       ],
-      [{ text: '🔕 Unsubscribe', callback_data: 'set:stop' }],
+      [{ text: '🔕 Відписатися', callback_data: 'set:stop' }],
     ],
   };
 }
@@ -214,13 +214,13 @@ export async function answerSearch(
   const limit = await ctx.store.hitRateLimit(user.chatId, cfg.bot.searches_per_hour);
   if (!limit.allowed) {
     await opts.reply(
-      `You have used ${limit.used} searches this hour, which is my limit per person — ` +
-        `the ticket sites have to be treated politely. Your scheduled digests still arrive; try again shortly.`,
+      `Ти зробив(ла) ${limit.used} пошуків за цю годину — це мій ліміт на людину, ` +
+        `бо квиткові сайти треба навантажувати чемно. Розсилки за розкладом приходитимуть як завжди; спробуй трохи пізніше.`,
     );
     return 0;
   }
 
-  await opts.reply('⏳ Looking…');
+  await opts.reply('⏳ Шукаю…');
 
   const collected: Item[] = [];
   const failed: string[] = [];
@@ -243,7 +243,7 @@ export async function answerSearch(
 
   const title =
     kinds.includes('place')
-      ? `📍 Places in ${query.cities.map((c) => cityLabel(c)).join(', ')}`
+      ? `📍 Місця — ${query.cities.map((c) => cityLabel(c)).join(', ')}`
       : `🗓 ${query.cities.map((c) => cityLabel(c)).join(', ')}`;
 
   const outcome = await deliver({
@@ -259,11 +259,11 @@ export async function answerSearch(
     record: !ctx.dryRun,
     footer:
       items.length === 0
-        ? 'Nothing matched. Try a wider window ("next week"), another city, or /prefs to check what I am filtering out.'
+        ? 'Нічого не знайшлося. Спробуй ширший період («наступного тижня»), інше місто, або глянь /prefs — можливо, я щось відфільтровую.'
         : undefined,
   });
   if (failed.length && !outcome.chatGone) {
-    await opts.reply(`(heads up: ${failed.join(', ')} did not respond, so this list may be incomplete)`);
+    await opts.reply(`(до речі: ${failed.join(', ')} не відповіли, тож список може бути неповним)`);
   }
   return items.length;
 }
@@ -286,16 +286,16 @@ async function runPreset(ctx: HandlerContext, user: BotUser, preset: Preset, rep
       return;
     }
     case 'today':
-      await answerSearch(ctx, user, '', { from: base, to: base, label: 'today', reply });
+      await answerSearch(ctx, user, '', { from: base, to: base, label: 'сьогодні', reply });
       return;
     case 'tomorrow':
-      await answerSearch(ctx, user, '', { from: addDays(base, 1), to: addDays(base, 1), label: 'tomorrow', reply });
+      await answerSearch(ctx, user, '', { from: addDays(base, 1), to: addDays(base, 1), label: 'завтра', reply });
       return;
     case 'places':
       await answerSearch(ctx, user, '', {
         from: base,
         to: addDays(base, 30),
-        label: 'open now',
+        label: 'зараз відкрито',
         kinds: ['place'],
         top: cfg.digest.places_top,
         reply,
@@ -315,7 +315,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
 
   if (!isAllowed(chatId)) {
     ctx.log.warn(`rejected chat ${chatId} (not on the allowlist)`);
-    await reply('This bot is private at the moment. Ask its owner to add you.');
+    await reply('Наразі цей бот приватний. Попроси власника додати тебе.');
     return;
   }
 
@@ -332,11 +332,11 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
     if (created || user.row.stage === 'city') {
       await ctx.store.setUserStage(chatId, 'city');
       await reply(
-        `👋 I find concerts, stand-up, theatre, exhibitions, lectures, parties and festivals in Ukrainian cities — and new places worth a visit.\n\nWhich city are you in?`,
+        `👋 Я знаходжу концерти, стендап, театр, виставки, лекції, вечірки та фестивалі в українських містах — і нові місця, куди варто зайти.\n\nУ якому ти місті?`,
         { keyboard: cityKeyboard() },
       );
     } else {
-      await reply(`Welcome back. Your city is ${escapeHtml(cityLabel(user.city))}.\n\n${COMMANDS}`, {
+      await reply(`З поверненням. Твоє місто — ${escapeHtml(cityLabel(user.city))}.\n\n${COMMANDS}`, {
         inlineKeyboard: quickActions(),
       });
     }
@@ -348,7 +348,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
     // anyone who starts mid-conversation gets onboarded too
     await registerUser(ctx.store, { chatId, username: msg.from?.username ?? null });
     await ctx.store.setUserStage(chatId, 'city');
-    await reply('👋 First things first — which city are you in?', { keyboard: cityKeyboard() });
+    await reply('👋 Почнімо з головного — у якому ти місті?', { keyboard: cityKeyboard() });
     return;
   }
   await ctx.store.touchUser(chatId);
@@ -357,7 +357,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
   if (user.row.stage === 'city') {
     const city = resolveCity(text);
     if (!city) {
-      await reply(`I do not know "${escapeHtml(text)}" yet. Pick one of these, or ask the owner to add your city.`, {
+      await reply(`Я поки не знаю «${escapeHtml(text)}». Обери зі списку або попроси власника додати твоє місто.`, {
         keyboard: cityKeyboard(),
       });
       return;
@@ -365,10 +365,10 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
     user = await saveUserPrefs(ctx.store, user, { ...user.prefs, home_city: city });
     await ctx.store.setUserStage(chatId, null);
     await reply(
-      `✅ ${escapeHtml(cityLabel(city))} it is.\n\nTell me what you are into — "stand-up and indie rock, no classical" — or just try /weekend.\n\n${COMMANDS}`,
+      `✅ Нехай буде ${escapeHtml(cityLabel(city))}.\n\nРозкажи, що тобі заходить — «стендап та інді-рок, без класики» — або просто спробуй /weekend.\n\n${COMMANDS}`,
       { removeKeyboard: true },
     );
-    await reply('Pick something to start with:', { inlineKeyboard: quickActions() });
+    await reply('Обери, з чого почати:', { inlineKeyboard: quickActions() });
     return;
   }
 
@@ -389,18 +389,18 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
     case '/city': {
       const rest = text.slice(command.length).trim();
       if (!rest) {
-        await reply(`You are in ${escapeHtml(cityLabel(user.city))}. Pick another:`, { keyboard: cityKeyboard() });
+        await reply(`Зараз у тебе ${escapeHtml(cityLabel(user.city))}. Обери інше:`, { keyboard: cityKeyboard() });
         await ctx.store.setUserStage(chatId, 'city');
         return;
       }
       const city = resolveCity(rest);
-      if (!city) return reply(`I do not know "${escapeHtml(rest)}". Try /city with no name to see the list.`);
+      if (!city) return reply(`Я не знаю «${escapeHtml(rest)}». Напиши /city без назви, щоб побачити список.`);
       await saveUserPrefs(ctx.store, user, { ...user.prefs, home_city: city });
-      return reply(`✅ City set to ${escapeHtml(cityLabel(city))}.`);
+      return reply(`✅ Місто — ${escapeHtml(cityLabel(city))}.`);
     }
 
     case '/prefs':
-      return reply(`<b>What I think you like</b>\n<code>${escapeHtml(describePrefs(user.prefs))}</code>`);
+      return reply(`<b>🎛 Що я думаю про твої смаки</b>\n<code>${escapeHtml(describePrefs(user.prefs))}</code>`);
 
     case '/settings': {
       const panel = settingsPanel(user);
@@ -412,20 +412,20 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
       const on = command === '/unmute';
       const which = text.slice(command.length).trim().toLowerCase();
       const key = OPT_INS.find((o) => o.names.includes(which))?.key;
-      if (!key) return reply('Which one? week, weekend, follows or places. See /settings.');
+      if (!key) return reply('Яку саме? week, weekend, follows або places. Простіше — кнопками в /settings.');
       await ctx.store.setOptIn(chatId, key, on);
-      return reply(`${on ? '🔔' : '🔕'} ${escapeHtml(which)} digests ${on ? 'on' : 'off'}.`);
+      return reply(`${on ? '🔔' : '🔕'} Розсилка «${escapeHtml(which)}» ${on ? 'увімкнена' : 'вимкнена'}.`);
     }
 
     case '/stop':
       await ctx.store.setBlocked(chatId, true);
-      return reply('🔕 Unsubscribed — no more digests. Send /start whenever you want them back.');
+      return reply('🔕 Відписано — більше нічого не надсилаю. Напиши /start, коли захочеш повернутися.');
 
     case '/reminders': {
       const rows = await ctx.store.listReminders(chatId);
-      if (rows.length === 0) return reply('No reminders yet. Reply 🔔 to an event and I will set one.');
+      if (rows.length === 0) return reply('Нагадувань поки немає. Відповідай 🔔 на подію — і я поставлю.');
       return reply(
-        `<b>Your reminders</b>\n` +
+        `<b>⏰ Твої нагадування</b>\n` +
           rows
             .map((r) => `· ${escapeHtml(r.title)} — ${escapeHtml(r.starts_at.slice(0, 16).replace('T', ' '))}`)
             .join('\n'),
@@ -435,15 +435,15 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
     case '/follow':
     case '/unfollow': {
       const who = text.slice(command.length).trim();
-      if (!who) return reply(`Who? e.g. <code>${command} Latexfauna</code>`);
+      if (!who) return reply(`За ким? Наприклад: <code>${command} Latexfauna</code>`);
       const edit = applyPrefsCommand(`${command === '/follow' ? 'follow' : 'unfollow'} ${who}`, user.prefs);
-      if (edit.changes.length === 0) return reply(`Nothing to change — ${escapeHtml(edit.note ?? 'already set')}.`);
+      if (edit.changes.length === 0) return reply(`Нічого міняти — ${escapeHtml(edit.note ?? 'вже так і є')}.`);
       await saveUserPrefs(ctx.store, user, edit.prefs);
       return reply(`✅ ${escapeHtml(edit.changes.join('; '))}`);
     }
 
     case '/stats': {
-      if (!isOwner(chatId)) return reply('That one is for the bot owner.');
+      if (!isOwner(chatId)) return reply('Ця команда — для власника бота.');
       const s = await ctx.store.stats();
       return reply(
         `<b>Bot stats</b>\n<code>` +
@@ -455,7 +455,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
     }
   }
 
-  if (command) return reply(`I do not know ${escapeHtml(command)}.\n\n${COMMANDS}`);
+  if (command) return reply(`Не знаю команди ${escapeHtml(command)}.\n\n${COMMANDS}`);
 
   /* --- 🔔 reminder ------------------------------------------------------ */
   const { bell, index } = parseBell(text);
@@ -466,9 +466,9 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
   if (edit.understood && edit.changes.length > 0) {
     await saveUserPrefs(ctx.store, user, edit.prefs);
     ctx.log.info(`chat ${chatId}: ${edit.changes.join('; ')}`);
-    return reply(`✅ Noted:\n${edit.changes.map((c) => `· ${escapeHtml(c)}`).join('\n')}`);
+    return reply(`✅ Записав:\n${edit.changes.map((c) => `· ${escapeHtml(c)}`).join('\n')}`);
   }
-  if (edit.understood) return reply(`Nothing to change — ${escapeHtml(edit.note ?? 'already set')}.`);
+  if (edit.understood) return reply(`Нічого міняти — ${escapeHtml(edit.note ?? 'вже так і є')}.`);
 
   await answerSearch(ctx, user, text, { reply });
 }
@@ -495,10 +495,10 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
   if (!chatId || !data) return;
 
   const reply = makeReply(ctx, chatId);
-  if (!isAllowed(chatId)) return reply('This bot is private at the moment. Ask its owner to add you.');
+  if (!isAllowed(chatId)) return reply('Наразі цей бот приватний. Попроси власника додати тебе.');
 
   const user = await getUser(ctx.store, chatId, ctx.log);
-  if (!user) return reply('Send /start and I will set you up.');
+  if (!user) return reply('Напиши /start — і я все налаштую.');
   await ctx.store.touchUser(chatId);
 
   const sep = data.indexOf(':');
@@ -549,23 +549,23 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
   switch (arg) {
     case 'city':
       return draw({
-        text: `<b>🏙 Change city</b>\n\nYou are in <b>${escapeHtml(cityLabel(user.city))}</b>. Pick another:`,
+        text: `<b>🏙 Змінити місто</b>\n\nЗараз у тебе <b>${escapeHtml(cityLabel(user.city))}</b>. Обери інше:`,
         inlineKeyboard: cityButtons(user.city),
       });
 
     case 'prefs':
       return draw({
-        text: `<b>🎛 What I think you like</b>\n<code>${escapeHtml(describePrefs(user.prefs))}</code>\n\nTell me in words to change it — "add jazz to favourites", "max price 800".`,
-        inlineKeyboard: [[{ text: '⬅️ Back', callback_data: 'set:back' }]],
+        text: `<b>🎛 Що я думаю про твої смаки</b>\n<code>${escapeHtml(describePrefs(user.prefs))}</code>\n\nЩоб змінити — просто напиши: «додай джаз до улюблених», «максимум 800 грн».`,
+        inlineKeyboard: [[{ text: '⬅️ Назад', callback_data: 'set:back' }]],
       });
 
     case 'stop':
       return draw({
-        text: `<b>🔕 Unsubscribe?</b>\n\nNo more digests, alerts or reminders. Your city and taste are kept, so /start brings everything back.`,
+        text: `<b>🔕 Відписатися?</b>\n\nБільше жодних розсилок, сповіщень і нагадувань. Місто й смаки збережуться, тож /start поверне все назад.`,
         inlineKeyboard: [
           [
-            { text: '✅ Yes, unsubscribe', callback_data: 'set:stop!' },
-            { text: '⬅️ Keep them', callback_data: 'set:back' },
+            { text: '✅ Так, відписатися', callback_data: 'set:stop!' },
+            { text: '⬅️ Залишити', callback_data: 'set:back' },
           ],
         ],
       });
@@ -573,7 +573,7 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
     case 'stop!':
       await ctx.store.setBlocked(chatId, true);
       return draw({
-        text: '🔕 Unsubscribed — no more digests. Send /start whenever you want them back.',
+        text: '🔕 Відписано — більше нічого не надсилаю. Напиши /start, коли захочеш повернутися.',
         inlineKeyboard: [],
       });
 
@@ -588,17 +588,17 @@ async function handleBell(ctx: HandlerContext, msg: TgMessage, chatId: string, i
 
   if (items.length === 0) {
     return replyTo
-      ? 'I no longer remember which event that message was about — ask for a fresh list and reply to that.'
-      : 'Reply 🔔 to an event message, or ask me for something first.';
+      ? 'Я вже не памʼятаю, про яку подію було те повідомлення — попроси свіжий список і відповідай на нього.'
+      : 'Відповідай 🔔 на повідомлення з подією, або спершу попроси щось знайти.';
   }
   const chosen = items.length === 1 ? items[0] : index ? items[index - 1] : undefined;
   if (!chosen) {
     const list = items.slice(0, 20).map((it, i) => `${i + 1}. ${it.title}`).join('\n');
-    return `That list had ${items.length} events. Which one? Reply "🔔 N".\n\n${escapeHtml(list)}`;
+    return `У тому списку було ${items.length} подій. Яка саме? Відповідай «🔔 N».\n\n${escapeHtml(list)}`;
   }
-  if (!chosen.startsAt) return `"${escapeHtml(chosen.title)}" has no start time yet, so I cannot schedule a reminder.`;
+  if (!chosen.startsAt) return `У «${escapeHtml(chosen.title)}» ще немає часу початку, тож нагадування не поставлю.`;
 
   const outcome = ctx.dryRun ? 'added' : await ctx.store.addReminder(chatId, chosen);
-  if (outcome === 'no-date') return `"${escapeHtml(chosen.title)}" has no start time yet.`;
-  return `⏰ Reminder ${outcome === 'exists' ? 'already set' : 'set'} for <b>${escapeHtml(chosen.title)}</b> — I will ping you 1 day and 3 hours before.`;
+  if (outcome === 'no-date') return `У «${escapeHtml(chosen.title)}» ще немає часу початку.`;
+  return `⏰ Нагадування ${outcome === 'exists' ? 'вже стоїть' : 'поставив'} — <b>${escapeHtml(chosen.title)}</b>. Нагадаю за добу та за 3 години до початку.`;
 }

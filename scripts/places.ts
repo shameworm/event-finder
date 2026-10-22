@@ -30,7 +30,7 @@ const args = parseArgs();
 const log = makeLogger('places');
 const cfg = loadConfig();
 const base = today(cfg.timezone);
-const window = { from: base, to: addDays(base, 30), label: 'open now' };
+const window = { from: base, to: addDays(base, 30), label: 'зараз відкрито' };
 
 if (!canSend(log, args.has('dry-run') || args.has('queries'))) process.exit(1);
 
@@ -65,8 +65,8 @@ await withStore(async (store) => {
     newOnly: !args.has('all'),
     dryRun: args.has('dry-run'),
     onlyChats: args.list('chat'),
-    title: (_user, city) => `📍 Worth a visit in ${cityLabel(city)}`,
-    footer: 'Tell me what you think and I will tune the suggestions. /mute places to stop these.',
+    title: (_user, city) => `📍 Варто зайти — ${cityLabel(city)}`,
+    footer: 'Скажи, як тобі — і я підлаштую підказки. /settings, щоб вимкнути ці пропозиції.',
   });
 
   if (result.items === 0) {
