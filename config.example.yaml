@@ -35,6 +35,10 @@ bot:
   max_results: 10          # items in an on-demand answer
   interactive_pages: 2     # pages per source when someone is waiting on a reply
   send_delay_ms: 60        # pause between users when fanning out a digest
+  message_delay_ms: 400    # pause between the messages of ONE digest — every
+                           # event is its own message, so a ten-event week is
+                           # eleven sends to the same chat and Telegram throttles
+                           # a sustained burst at roughly one per second
 
 cache:
   # One scrape of a city/window serves every user in it for this long.

@@ -41,7 +41,7 @@ export const CityConfigSchema = z.object({
 export const ConfigSchema = z.object({
   timezone: z.string().default('Europe/Kyiv'),
   default_city: z.string().default('kharkiv'),
-  locale: z.string().default('en-GB'),
+  locale: z.string().default('uk-UA'),
   http: z
     .object({
       delay_ms: z.number().int().nonnegative().default(1500),
@@ -78,6 +78,8 @@ export const ConfigSchema = z.object({
       max_results: z.number().int().positive().default(10),
       /** Pause between users when fanning a digest out, to stay under Telegram's rate limit. */
       send_delay_ms: z.number().int().nonnegative().default(60),
+      /** Pause between the messages of one digest — each event is its own message. */
+      message_delay_ms: z.number().int().nonnegative().default(400),
       /** Pages per source for on-demand searches — keep it small, people are waiting. */
       interactive_pages: z.number().int().positive().default(2),
     })
@@ -169,6 +171,27 @@ export const TgMessageSchema = z
   })
   .loose();
 
+/** One entry of a reaction list: `{ type: 'emoji', emoji: '❤️' }`. */
+export const TgReactionTypeSchema = z
+  .object({ type: z.string(), emoji: z.string().optional() })
+  .loose();
+
+/**
+ * A `message_reaction` update: someone added or removed a reaction on one of
+ * our messages. Telegram sends the whole before/after list rather than a diff,
+ * so "did a heart appear?" is a comparison of the two.
+ */
+export const TgReactionUpdateSchema = z
+  .object({
+    chat: z.object({ id: z.union([z.number(), z.string()]), type: z.string().optional() }).loose(),
+    message_id: z.number().int(),
+    date: z.number().int().optional(),
+    user: z.object({ id: z.number(), username: z.string().optional() }).loose().optional(),
+    old_reaction: z.array(TgReactionTypeSchema).default([]),
+    new_reaction: z.array(TgReactionTypeSchema).default([]),
+  })
+  .loose();
+
 /** A tap on an inline button, e.g. one of the toggles in /settings. */
 export const TgCallbackQuerySchema = z
   .object({
@@ -185,6 +208,7 @@ export const TgUpdateSchema = z
     message: TgMessageSchema.optional(),
     edited_message: TgMessageSchema.optional(),
     callback_query: TgCallbackQuerySchema.optional(),
+    message_reaction: TgReactionUpdateSchema.optional(),
   })
   .loose();
 
@@ -194,6 +218,7 @@ export const TgResponseSchema = <T extends z.ZodTypeAny>(result: T) =>
 export type TgMessage = z.infer<typeof TgMessageSchema>;
 export type TgUpdate = z.infer<typeof TgUpdateSchema>;
 export type TgCallbackQuery = z.infer<typeof TgCallbackQuerySchema>;
+export type TgReactionUpdate = z.infer<typeof TgReactionUpdateSchema>;
 
 /* -------------------------------------------------- web-search hand-off --- */
 

@@ -31,6 +31,8 @@ watch_cities:
 # Categories you like. Known keys:
 #   concert standup theatre exhibition lecture party festival workshop cinema kids sport
 #   cafe bar gallery spot
+# NOT copied to new users — the walkthrough asks them directly. This list is the
+# operator's own taste, used by the CLI (scripts/search.ts) when no --chat is given.
 favourite_categories:
   - standup
   - concert

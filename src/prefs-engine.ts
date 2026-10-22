@@ -98,7 +98,7 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
     const value = Number(budget[1]);
     const changed = prefs.max_ticket_price !== value;
     prefs.max_ticket_price = value;
-    return ok(changed ? [`максимальна ціна квитка → ${value} ${prefs.currency}`] : [], changed ? undefined : 'уже так і стоїть');
+    return ok(changed ? [`максимальна ціна квитка → ${value} ${money(prefs.currency)}`] : [], changed ? undefined : 'уже так і стоїть');
   }
 
   /* --- trip ------------------------------------------------------------- */
@@ -137,7 +137,9 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
       return ok(changed ? [`домашнє місто → ${cityLabel(city)}`] : [], changed ? undefined : 'це вже твоє домашнє місто');
     }
   }
-  const unwatch = t.match(new RegExp(String.raw`${B}(?:unwatch|stop watching|не слідкуй за|прибери місто)\s*${CITY}${E}`, 'iu'));
+  const unwatch = t.match(
+    new RegExp(String.raw`${B}(?:unwatch|stop watching|не слідкуй за містом|не слідкуй за|прибери місто)\s*${CITY}${E}`, 'iu'),
+  );
   if (unwatch) {
     const city = resolveCity(unwatch[1] as string);
     if (city) {
@@ -145,7 +147,9 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
       return ok(changed ? [`міста на оці − ${cityLabel(city)}`] : [], changed ? undefined : 'за ним і не стежив');
     }
   }
-  const watch = t.match(new RegExp(String.raw`${B}(?:watch|also watch|слідкуй за|додай місто)\s*${CITY}${E}`, 'iu'));
+  const watch = t.match(
+    new RegExp(String.raw`${B}(?:watch|also watch|слідкуй за містом|слідкуй за|додай місто)\s*${CITY}${E}`, 'iu'),
+  );
   if (watch) {
     const city = resolveCity(watch[1] as string);
     if (city) {
@@ -232,6 +236,9 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   return { changes: [], prefs: current, understood: false };
 }
 
+/** The hryvnia has a sign; everything else is shown as its code. */
+const money = (currency: string): string => (currency === 'UAH' ? '₴' : currency);
+
 /** One-screen summary of the current preferences, for the bot and the CLI. */
 export function describePrefs(prefs: Preferences): string {
   const lines = [
@@ -240,9 +247,43 @@ export function describePrefs(prefs: Preferences): string {
     `улюблене: ${prefs.favourite_categories.map(tagLabel).join(', ') || '—'}`,
     `небажане: ${prefs.disliked_categories.map(tagLabel).join(', ') || '—'}`,
     `стежу за: ${prefs.follow.join(', ') || '—'}`,
-    `максимум за квиток: ${prefs.max_ticket_price ? `${prefs.max_ticket_price} ${prefs.currency}` : 'без обмежень'}`,
+    `максимум за квиток: ${prefs.max_ticket_price ? `${prefs.max_ticket_price} ${money(prefs.currency)}` : 'без обмежень'}`,
     `інтереси: ${(prefs.interests ?? []).map(tagLabel).join(', ') || '—'}`,
   ];
   if (prefs.trip) lines.push(`поїздка: ${cityLabel(prefs.trip.city)} ${prefs.trip.from} → ${prefs.trip.to}`);
   return lines.join('\n');
+}
+
+/**
+ * A bare list of tastes, as typed at the walkthrough's "Що тобі заходить?".
+ *
+ * applyPrefsCommand needs a verb — "люблю джаз" — but a person who was just
+ * asked what they like answers with a bare list: "стендап, джаз, театр". The
+ * question supplied the verb, so each part is taken as a favourite provided it
+ * is either a genre we recognise or short enough to be a taste word rather
+ * than a sentence.
+ *
+ * The edit it returns *replaces* the favourites rather than adding to them: we
+ * asked, so what they said is the whole answer, not an addition to somebody
+ * else's. The likes screen then merges that over whatever is already ticked,
+ * because there the taps are answers too.
+ */
+export function favouritesFromList(text: string, current: Preferences): PrefsEdit {
+  const prefs = PreferencesSchema.parse(JSON.parse(JSON.stringify(current)));
+  prefs.favourite_categories = [];
+  const changes: string[] = [];
+
+  for (const part of text.split(/[,;/\n·•]+|\s+(?:та|і|й|and)\s+/iu)) {
+    const cleaned = cleanTag(part);
+    if (cleaned.length < 2) continue;
+    const tag = canonicalTag(cleaned);
+    // canonicalTag only rewrites what it knows; an unchanged long phrase is a
+    // sentence, not a taste word, and guessing on it would poison the model
+    const recognised = normText(tag) !== normText(cleaned);
+    if (!recognised && cleaned.split(/\s+/).length > 2) continue;
+    if (prefs.disliked_categories.some((d) => normText(d) === normText(tag))) continue;
+    if (add(prefs.favourite_categories, tag)) changes.push(`улюблене + ${tagLabel(tag)}`);
+  }
+
+  return { changes, prefs, understood: changes.length > 0 };
 }

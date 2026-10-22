@@ -1,5 +1,6 @@
 /**
- * The conversation: everything the bot does when someone sends it a message.
+ * The conversation: everything the bot does when someone sends it a message,
+ * taps one of its buttons, or puts a ❤️ on one of its event messages.
  *
  * Used by `scripts/bot.ts`, both as a long-polling service and in --once
  * cron mode, so the behaviour is identical either way.
@@ -7,15 +8,16 @@
 import type { Item, Kind } from './types.ts';
 import type { OptIn, Store } from './db.ts';
 import type { Logger } from './log.ts';
-import type { TgCallbackQuery, TgMessage } from './schemas.ts';
+import type { TgCallbackQuery, TgMessage, TgReactionUpdate } from './schemas.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
 import { answerCallbackQuery, editMessageText, escapeHtml, sendMessage, type InlineButton } from './telegram-api.ts';
-import { applyPrefsCommand, describePrefs } from './prefs-engine.ts';
-import { CATEGORY_LABEL, DISLIKE_SUGGESTIONS, EMOJI, EVENT_CATEGORIES, tagLabel } from './categories.ts';
+import { applyPrefsCommand, describePrefs, favouritesFromList } from './prefs-engine.ts';
+import { CATEGORY_LABEL, DISLIKE_SUGGESTIONS, EMOJI, EVENT_CATEGORIES, canonicalTag, tagLabel } from './categories.ts';
 import { parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
+import { countEvents } from './render.ts';
 import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
 import { WORD_END, addDays, normText, today } from './util.ts';
 
@@ -142,12 +144,23 @@ type TasteStep = Exclude<Step, 'city'>;
 
 const BUDGETS = [500, 1000, 2000];
 
-export function isStep(stage: string | null): stage is Step {
+function isStep(stage: string | null): stage is Step {
   return Boolean(stage && (STEPS as readonly string[]).includes(stage));
 }
 
 function isTasteStep(value: string): value is TasteStep {
   return isStep(value) && value !== 'city';
+}
+
+/**
+ * The step someone is parked on, or null if they are not mid-walkthrough.
+ *
+ * `taste` was the one-question version of all this; anyone still sitting on it
+ * when the screens arrived is simply at the first of them.
+ */
+function stepOf(stage: string | null): Step | null {
+  if (stage === 'taste') return 'likes';
+  return isStep(stage) ? stage : null;
 }
 
 function nextStep(step: Step): Step | undefined {
@@ -164,7 +177,7 @@ interface Screen {
  * someone with a step in `stage` is mid-walkthrough, anyone else is editing.
  */
 function modeOf(user: BotUser): 'wizard' | 'settings' {
-  return isStep(user.row.stage) ? 'wizard' : 'settings';
+  return stepOf(user.row.stage) ? 'wizard' : 'settings';
 }
 
 /** The row under a step: onwards in the walkthrough, back in /settings. */
@@ -293,7 +306,7 @@ const setupOfferedKey = (chatId: string) => `setup_offered:${chatId}`;
  * never reach a database that already exists.
  */
 async function offerSetup(ctx: HandlerContext, user: BotUser, reply: Reply): Promise<void> {
-  if (isStep(user.row.stage)) return;
+  if (stepOf(user.row.stage)) return;
   const key = setupOfferedKey(user.chatId);
   if (await ctx.store.getState(key)) return;
   // written before the send, so a flaky send can never turn into a nag
@@ -413,6 +426,19 @@ async function handleStepText(
     return show(tasteScreen(changed, step, 'wizard'));
   }
 
+  // a bare list at the likes screen is an answer too — "стендап, джаз" — and it
+  // adds to whatever is already ticked rather than replacing it
+  if (step === 'likes') {
+    const listed = favouritesFromList(text, user.prefs);
+    if (listed.understood) {
+      const merged = [...user.prefs.favourite_categories];
+      for (const tag of listed.prefs.favourite_categories) if (!hasTag(merged, tag)) merged.push(tag);
+      const next = await saveUserPrefs(ctx.store, user, { ...user.prefs, favourite_categories: merged });
+      await reply(`✅ Записав: ${escapeHtml(merged.map(tagLabel).join(', '))}`);
+      return show(tasteScreen(next, step, 'wizard'));
+    }
+  }
+
   if (step === 'follow') {
     const names = text.split(/[,;\n]+/).map((n) => n.trim()).filter((n) => n.length >= 2);
     if (names.length === 0) return show(tasteScreen(user, step, 'wizard'));
@@ -463,6 +489,23 @@ function settingsPanel(user: BotUser): { text: string; inlineKeyboard: InlineBut
   };
 }
 
+/* ------------------------------------------------------------- the heart --- */
+
+/**
+ * Every heart Telegram offers, including the uncoloured ❤ and the variation
+ * selector it usually arrives with. Only hearts count: 👍 or 🔥 is applause,
+ * not "remind me".
+ */
+const HEARTS = new Set([
+  '❤', '🧡', '💛', '💚', '💙', '💜', '🤎', '🖤', '🤍', '🩷', '🩵', '🩶',
+  '💖', '💗', '💓', '💞', '💕', '💘', '💝', '❣', '♥',
+]);
+
+export function isHeart(emoji: string | undefined): boolean {
+  if (!emoji) return false;
+  return HEARTS.has(emoji.replace(/️/gu, ''));
+}
+
 /**
  * "покажи налаштування", "мої смаки", "show my settings" — asking to see the
  * panel, which must not turn into a twenty-second scrape for "налаштування".
@@ -470,9 +513,11 @@ function settingsPanel(user: BotUser): { text: string; inlineKeyboard: InlineBut
 const SHOW_SETTINGS =
   /^\s*(?:покажи|показати|show|list|які|яке)?\s*(?:my |мої |моє )?(?:налаштування|settings|смаки|уподобання|prefs|preferences)\s*\??\s*$/iu;
 
-/** "🔔", "🔔3", "🔔 3", "remind me 2" */
+/** "❤️", "🔔", "нагадай 3" — the typed fallback for people who do not react. */
 export function parseBell(text: string): { bell: boolean; index?: number } {
-  const bell = /🔔|🛎|⏰/u.test(text) || new RegExp(`^\\s*(bell|remind me|нагадай)${WORD_END}`, 'iu').test(text);
+  const bell =
+    /🔔|🛎|⏰|❤|🧡|💛|💚|💙|💜|🤍|🖤|💖|💗|💓|💞|💕|💘|💝|♥/u.test(text) ||
+    new RegExp(`^\\s*(bell|remind me|нагадай)${WORD_END}`, 'iu').test(text);
   if (!bell) return { bell: false };
   const m = text.match(/(\d{1,2})/);
   return { bell: true, index: m ? Number(m[1]) : undefined };
@@ -652,9 +697,10 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
     });
     // they are getting the walkthrough right now, so never nudge them about it
     if (created) await ctx.store.setState(setupOfferedKey(chatId), new Date().toISOString());
-    if (created || isStep(user.row.stage)) {
+    const parked = stepOf(user.row.stage);
+    if (created || parked) {
       // /start in the middle of the walkthrough resumes it, it does not restart
-      const step = isStep(user.row.stage) ? user.row.stage : 'city';
+      const step = parked ?? 'city';
       const lead =
         step === 'city'
           ? `👋 Я знаходжу концерти, стендап, театр, виставки, лекції, вечірки та фестивалі в українських містах — ` +
@@ -679,10 +725,11 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
   }
   await ctx.store.touchUser(chatId);
   const user = existing;
+  const step = stepOf(user.row.stage);
 
   // mid-walkthrough, plain text belongs to the open step — commands still work
-  if (!command && isStep(user.row.stage)) {
-    await handleStepText(ctx, user, user.row.stage, text, reply);
+  if (!command && step) {
+    await handleStepText(ctx, user, step, text, reply);
     return;
   }
   await offerSetup(ctx, user, reply);
@@ -742,7 +789,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
 
     case '/reminders': {
       const rows = await ctx.store.listReminders(chatId);
-      if (rows.length === 0) return reply('Нагадувань поки немає. Відповідай 🔔 на подію — і я поставлю.');
+      if (rows.length === 0) return reply('Нагадувань поки немає. Тапни ❤️ на події — і я поставлю.');
       return reply(
         `<b>⏰ Твої нагадування</b>\n` +
           rows
@@ -864,7 +911,7 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
     await saveUserPrefs(ctx.store, user, { ...user.prefs, home_city: arg });
     // someone still on the first step came here instead of using the keyboard,
     // so answer the step rather than ending the walkthrough early
-    if (user.row.stage === 'city') return advanceInPlace(ctx, chatId, 'city', draw);
+    if (stepOf(user.row.stage) === 'city') return advanceInPlace(ctx, chatId, 'city', draw);
     return drawPanel();
   }
 
@@ -872,7 +919,7 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
     const cut = arg.indexOf(':');
     const verb = cut < 0 ? arg : arg.slice(0, cut);
     const payload = cut < 0 ? '' : arg.slice(cut + 1);
-    const step = isStep(user.row.stage) ? user.row.stage : null;
+    const step = stepOf(user.row.stage);
     const mode = modeOf(user);
 
     /** Redraw one step in place, with whatever is in the database now. */
@@ -971,17 +1018,98 @@ async function handleBell(ctx: HandlerContext, msg: TgMessage, chatId: string, i
 
   if (items.length === 0) {
     return replyTo
-      ? 'Я вже не памʼятаю, про яку подію було те повідомлення — попроси свіжий список і відповідай на нього.'
-      : 'Відповідай 🔔 на повідомлення з подією, або спершу попроси щось знайти.';
+      ? 'Я вже не памʼятаю, про яку подію було те повідомлення — попроси свіжий список і тапни ❤️ на потрібній.'
+      : 'Тапни ❤️ на повідомленні з подією, або спершу попроси щось знайти.';
   }
   const chosen = items.length === 1 ? items[0] : index ? items[index - 1] : undefined;
   if (!chosen) {
     const list = items.slice(0, 20).map((it, i) => `${i + 1}. ${it.title}`).join('\n');
-    return `У тому списку було ${items.length} подій. Яка саме? Відповідай «🔔 N».\n\n${escapeHtml(list)}`;
+    return `У тому списку було ${countEvents(items.length)}. Яка саме? Тапни ❤️ на потрібній.\n\n${escapeHtml(list)}`;
   }
   if (!chosen.startsAt) return `У «${escapeHtml(chosen.title)}» ще немає часу початку, тож нагадування не поставлю.`;
 
-  const outcome = ctx.dryRun ? 'added' : await ctx.store.addReminder(chatId, chosen);
+  const outcome = await ctx.store.addReminder(chatId, chosen);
   if (outcome === 'no-date') return `У «${escapeHtml(chosen.title)}» ще немає часу початку.`;
-  return `⏰ Нагадування ${outcome === 'exists' ? 'вже стоїть' : 'поставив'} — <b>${escapeHtml(chosen.title)}</b>. Нагадаю за добу та за 3 години до початку.`;
+
+  const user = await getUser(ctx.store, chatId, ctx.log);
+  const learned = user ? await learnFromHeart(ctx, user, chosen) : null;
+  return reminderSaid(outcome, chosen.title, learned);
+}
+
+/* --------------------------------------------------------- the reactions --- */
+
+function reminderSaid(outcome: string, title: string, learned: string | null): string {
+  const said = `⏰ Нагадування ${outcome === 'exists' ? 'вже стоїть' : 'поставив'} — <b>${escapeHtml(title)}</b>. Нагадаю за добу та за 3 години до початку.`;
+  return learned ? `${said}\n(додав «${escapeHtml(tagLabel(learned))}» до улюбленого)` : said;
+}
+
+/**
+ * Someone put a ❤️ on one of our messages, or took one off.
+ *
+ * Every event goes out as its own message (src/deliver.ts), so the message id
+ * names exactly one event and there is nothing to disambiguate. A heart sets
+ * the reminder and teaches the taste model; removing it cancels the reminder
+ * but keeps what was learned — they were interested, plans just changed.
+ *
+ * Reactions on anything we do not recognise are met with silence: Telegram
+ * sends an update for every reaction in the chat, and a bot that answers all
+ * of them is a bot people mute.
+ */
+export async function handleReaction(ctx: HandlerContext, update: TgReactionUpdate): Promise<void> {
+  const chatId = String(update.chat.id);
+  if (!isAllowed(chatId)) return;
+
+  const had = update.old_reaction.some((r) => isHeart(r.emoji));
+  const has = update.new_reaction.some((r) => isHeart(r.emoji));
+  if (had === has) return;
+
+  const user = await getUser(ctx.store, chatId, ctx.log);
+  if (!user) return;
+
+  const items = await ctx.store.itemsForMessage(chatId, update.message_id);
+  if (items.length === 0) return;
+
+  const reply = makeReply(ctx, chatId, update.message_id);
+  // a digest header, or an old-style message that covered a whole list
+  if (items.length > 1) return reply('Тапни ❤️ на самій події — на цьому повідомленні їх багато.');
+  const item = items[0]!;
+
+  if (!has) {
+    await ctx.store.cancelReminder(chatId, item.id);
+    ctx.log.info(`chat ${chatId} un-hearted "${item.title}"`);
+    return reply(`Прибрав нагадування — <b>${escapeHtml(item.title)}</b>.`);
+  }
+
+  if (!item.startsAt) return reply(`У «${escapeHtml(item.title)}» ще немає часу початку, тож нагадування не поставлю.`);
+
+  const outcome = await ctx.store.addReminder(chatId, item);
+  if (outcome === 'no-date') return reply(`У «${escapeHtml(item.title)}» ще немає часу початку.`);
+
+  const learned = await learnFromHeart(ctx, user, item);
+  ctx.log.info(`chat ${chatId} hearted "${item.title}" (reminder ${outcome}${learned ? `, learned ${learned}` : ''})`);
+  return reply(reminderSaid(outcome, item.title, learned));
+}
+
+/**
+ * A heart is a free sample of someone's taste, so take it: the event's category
+ * joins their favourites (an interesting place joins their interests).
+ * Returns the tag that was learned, or null when there was nothing new.
+ */
+async function learnFromHeart(ctx: HandlerContext, user: BotUser, item: Item): Promise<string | null> {
+  const tag = canonicalTag(item.category);
+  if (!tag) return null;
+  const has = (list: string[]) => list.some((v) => normText(v) === normText(tag));
+  if (has(user.prefs.disliked_categories)) return null;
+
+  if (item.kind === 'place') {
+    if (has(user.prefs.interests)) return null;
+    await saveUserPrefs(ctx.store, user, { ...user.prefs, interests: [...user.prefs.interests, tag] });
+  } else {
+    if (has(user.prefs.favourite_categories)) return null;
+    await saveUserPrefs(ctx.store, user, {
+      ...user.prefs,
+      favourite_categories: [...user.prefs.favourite_categories, tag],
+    });
+  }
+  return tag;
 }

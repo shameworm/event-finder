@@ -69,13 +69,13 @@ function parsePrefs(json: string, city: string, log?: Logger): Preferences {
   try {
     raw = JSON.parse(json);
   } catch {
-    log?.warn('stored preferences are not valid JSON — falling back to defaults');
-    return defaultPrefs(city);
+    log?.warn('stored preferences are not valid JSON — starting their taste model over');
+    return newUserPrefs(city);
   }
   const parsed = PreferencesSchema.safeParse(raw);
   if (!parsed.success) {
-    log?.warn(`stored preferences are invalid (${formatZodError(parsed.error, 2)}) — falling back to defaults`);
-    return defaultPrefs(city);
+    log?.warn(`stored preferences are invalid (${formatZodError(parsed.error, 2)}) — starting their taste model over`);
+    return newUserPrefs(city);
   }
   // the users table is the source of truth for the city
   return { ...parsed.data, home_city: city };

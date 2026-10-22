@@ -17,7 +17,8 @@
  *   --chat ID[,ID]       restrict to these chat ids
  *   --dry-run            print instead of sending
  */
-import { cityLabel, loadConfig } from '../src/config.ts';
+import { loadConfig } from '../src/config.ts';
+import { REMINDER_HINT } from '../src/render.ts';
 import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { thisWeekRange, weekendRange } from '../src/request.ts';
@@ -43,14 +44,15 @@ await withStore(async (store) => {
     log,
     optIn: weekend ? 'weekend_digest' : 'weekly_digest',
     window,
-    title: (_user, city) => (weekend ? `🎉 Вихідні — ${cityLabel(city)}` : `🗓 Цього тижня — ${cityLabel(city)}`),
+    // the header already names the city, so the title does not repeat it
+    title: () => (weekend ? '🎉 На вихідних' : '🗓 Цього тижня'),
     top,
     maxPerDay: weekend ? 0 : cfg.digest.max_items_per_day,
     newOnly: !args.has('all'),
     dryRun: args.has('dry-run'),
     maxPages: args.num('pages'),
     onlyChats: args.list('chat'),
-    footer: 'Відповідай 🔔 (або «🔔 3»), щоб нагадати за добу та за 3 години. /settings — змінити, що тобі приходить.',
+    footer: `${REMINDER_HINT} /settings — щоб змінити, що тобі приходить.`,
   });
 
   process.stdout.write(

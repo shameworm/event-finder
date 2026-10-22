@@ -84,7 +84,7 @@ cron:
       Report only what was sent.
     description: Weekly suggestion of 2–3 new places per user.
 
-  # ── 5. Every 15 minutes — deliver 🔔 reminders ─────────────────────────────
+  # ── 5. Every 15 minutes — deliver ❤️ reminders ─────────────────────────────
   # Required for the "remind me 1 day and 3 hours before" feature.
   - name: events-finder-reminders
     schedule: "*/15 * * * *"

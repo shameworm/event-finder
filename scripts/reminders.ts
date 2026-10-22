@@ -1,7 +1,7 @@
 #!/usr/bin/env -S npx tsx
 /**
  * Reminder tick: fires the 1-day and 3-hour reminders every user asked for
- * with "🔔". Run it on a short schedule (every 15 minutes).
+ * with a ❤️. Run it on a short schedule (every 15 minutes).
  *
  *   npx tsx scripts/reminders.ts                 # fire whatever is due
  *   npx tsx scripts/reminders.ts --dry-run       # show what would fire
@@ -9,8 +9,8 @@
  *   npx tsx scripts/reminders.ts --list --chat 123456789
  *   npx tsx scripts/reminders.ts --cancel <item-id> --chat 123456789
  *
- * Reminders are created by replying "🔔" in Telegram (scripts/bot.ts) — this
- * script only delivers them.
+ * Reminders are created by reacting ❤️ to an event message in Telegram
+ * (scripts/bot.ts) — this script only delivers them.
  */
 import { loadConfig } from '../src/config.ts';
 import { makeLogger } from '../src/log.ts';
@@ -58,11 +58,11 @@ await withStore(async (store) => {
 
   let fired = 0;
   for (const { row, which } of due) {
-    const when = which === '1d' ? 'Завтра' : 'Через ~3 години';
+    const when = which === '1d' ? 'Завтра' : 'Вже за ~3 години';
     const day = dayLabel(localDate(row.starts_at, cfg.timezone), cfg.locale);
     const time = localTime(row.starts_at, cfg.timezone);
     const text =
-      `⏰ <b>${escapeHtml(when)}</b>: ${escapeHtml(row.title)}\n` +
+      `❤️ <b>${escapeHtml(when)}</b>: ${escapeHtml(row.title)}\n` +
       `${escapeHtml(day)} ${escapeHtml(time)}${row.venue ? ` · ${escapeHtml(row.venue)}` : ''}\n` +
       (row.url ? `<a href="${escapeHtml(row.url)}">детальніше →</a>` : '');
 

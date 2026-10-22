@@ -44,8 +44,6 @@ export interface FanoutJob {
    * Used by the follow-alert job to keep only matches.
    */
   select?: (user: BotUser, ranked: Item[]) => Item[];
-  /** Send each item as its own message (follow alerts) instead of one digest. */
-  oneMessagePerItem?: boolean;
   /** Only these chat ids (used by --chat for testing). */
   onlyChats?: string[];
 }
@@ -138,24 +136,23 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
 
       if (items.length === 0 && (job.skipEmpty ?? true)) continue;
 
-      const batches = job.oneMessagePerItem ? items.map((i) => [i]) : [items];
-      let delivered = false;
-      for (const batch of batches) {
-        const outcome = await deliver({
-          title: job.title(user, city),
-          query,
-          items: batch,
-          log: job.log,
-          store: job.store,
-          chatId: user.chatId,
-          dryRun: job.dryRun,
-          maxPerDay: job.maxPerDay,
-          footer: job.footer,
-          changeNotes,
-        });
-        if (outcome.chatGone) break;
-        delivered = true;
-        result.items += batch.length;
+      // deliver() already splits a digest into one message per event, so the
+      // job does not need to decide that
+      const outcome = await deliver({
+        title: job.title(user, city),
+        query,
+        items,
+        log: job.log,
+        store: job.store,
+        chatId: user.chatId,
+        dryRun: job.dryRun,
+        maxPerDay: job.maxPerDay,
+        footer: job.footer,
+        changeNotes,
+      });
+      const delivered = !outcome.chatGone;
+      if (delivered) {
+        result.items += items.length;
         if (cfg.bot.send_delay_ms) await sleep(cfg.bot.send_delay_ms);
       }
       if (delivered && !sentTo.has(user.chatId)) {

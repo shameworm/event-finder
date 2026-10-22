@@ -12,6 +12,21 @@ user, so a hundred subscribers cost one crawl.
 
 **Default city: Kharkiv.** Any other configured city works on request.
 
+**The bot speaks Ukrainian only.** Every string a user reads — the command menu,
+the settings panel, digests, reminders, prices and date labels — is Ukrainian;
+logs, CLI output and `/stats` stay English, because they are for whoever runs
+it. The copy sits next to the code that sends it, not in a catalogue: there is
+one language, so a lookup layer would buy nothing. Day names come from
+`locale: uk-UA` in config.yaml and city names from each city's `label`.
+Recognition stays multilingual — `src/categories.ts` matches Ukrainian, Russian
+and English — so "stand-up" and "стендап" are both understood, but the reply is
+always Ukrainian.
+
+**Every event is its own Telegram message.** A digest is a short header plus one
+message per event, each recorded against that single event, which is what makes
+a ❤️ reaction unambiguous. Console output (`scripts/search.ts`) still uses the
+one-block digest.
+
 ## Before anything else
 
 ```bash
@@ -43,13 +58,6 @@ What users can send it: `/start` (the walkthrough — see below), `/week`,
 Anything else is treated as a preference change if it reads like one, otherwise
 as a search.
 
-**The bot speaks Ukrainian.** Every string a user reads — the command menu, the
-settings panel, digests, reminders, prices and date labels — is Ukrainian; logs,
-CLI output and `/stats` stay English, because they are for whoever runs it. The
-copy lives next to the code that sends it, not in a catalogue: there is one
-language, so a lookup layer would buy nothing. Day names come from
-`locale: uk-UA` in config.yaml and city names from each city's `label`.
-
 Requests may be written in Ukrainian, Russian or English — that was always true
 of the parser and is unchanged.
 
@@ -66,6 +74,12 @@ CLI's defaults — never a template for strangers.
 Users who registered before the walkthrough existed are offered it once, with a
 button; declining is remembered in the `state` table under
 `setup_offered:<chat id>`.
+
+Typing still works at every screen and never falls through to a search: a
+sentence («не люблю класику») goes through the usual parser, a bare list
+(«стендап, джаз») is read as favourites and added to whatever is already ticked,
+a name at the follow step is a name, and «пропустити» moves on. Anyone left on
+the earlier one-question `taste` stage is treated as being on the first screen.
 
 Most of that is also reachable without typing. The bot publishes `BOT_COMMANDS`
 with `setMyCommands` on start-up, so Telegram autocompletes `/` and fills the ☰
@@ -158,7 +172,7 @@ npx tsx scripts/digest.ts --weekend --top 5     # Thursday 18:00 — weekend pic
 npx tsx scripts/follows.ts                      # every 6h — new shows by people they follow
 npx tsx scripts/follows.ts --queries            #   …run these first: tours are announced by name
 npx tsx scripts/places.ts                       # weekly — places to try
-npx tsx scripts/reminders.ts                    # every 15min — fire due 🔔 reminders
+npx tsx scripts/reminders.ts                    # every 15min — fire due ❤️ reminders
 ```
 
 All of them take `--dry-run` (print, send nothing, record nothing) and
@@ -212,14 +226,23 @@ and postponed events are kept but marked and pushed down.
 ## Already-sent memory
 
 Per user, in the `deliveries` table. An item is re-sent only when something
-material changed, and the line says why: `🔁 new date`, `🔁 few tickets left`,
-`🔁 sold out`, `🔁 price changed`.
+material changed, and the line says why, in Ukrainian: `🔁 нова дата`,
+`🔁 мало квитків`, `🔁 квитки скінчилися`, `🔁 змінилася ціна`. The reasons come
+out of `Store.filterUnsent` in English and are translated by `copy.CHANGE_NOTE`.
 
 ## Reminders
 
-A user replies `🔔` to an event (or `🔔 3` for the third line of a digest);
+A user taps ❤️ on an event message (or types `нагадай`);
 `scripts/bot.ts` records it and `scripts/reminders.ts` fires 1 day and 3 hours
 before the start. Reminders belong to a chat, so `--cancel` needs `--chat` too.
+
+Taking the ❤️ off cancels the reminder; the taste it taught is kept. A heart
+also adds the event's category to that person's favourites, which is why the
+model improves without anyone typing anything.
+
+Reactions only arrive because `getUpdates` asks for `message_reaction`
+(`src/telegram-api.ts`). If reminders stop appearing while replies still work,
+that is the first thing to check.
 
 ## Gotchas worth knowing
 
