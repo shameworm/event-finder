@@ -171,6 +171,10 @@ npx tsx scripts/bot.ts            # long-polls until stopped
 npx tsx scripts/bot.ts --dry-run  # prints replies instead of sending
 ```
 
+`--dry-run` stops the *sending* only. Preferences, onboarding stages, opt-ins
+and reminders are still written, so point it at a throwaway database
+(`EVENTS_FINDER_DB=/tmp/test.db`) if you do not want it touching real users.
+
 Then message it `/start`.
 
 **Only one copy may poll at a time** — Telegram gives each update to a single

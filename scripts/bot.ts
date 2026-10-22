@@ -10,6 +10,10 @@
  *   npx tsx scripts/bot.ts --once          # drain whatever is waiting, then exit (cron mode)
  *   npx tsx scripts/bot.ts --dry-run       # print replies instead of sending them
  *
+ * --dry-run only stops the sending. Preferences, onboarding stages, opt-ins and
+ * reminders are still written, so run it against a throwaway database if you do
+ * not want it touching real users.
+ *
  * Each user gets their own city, taste model, digest settings and reminders —
  * all keyed by their Telegram chat id. Searches go through the shared per-city
  * cache, so many people asking the same question cost one scrape.

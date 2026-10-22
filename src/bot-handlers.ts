@@ -26,6 +26,15 @@ import * as copy from './copy.ts';
 export interface HandlerContext {
   store: Store;
   log: Logger;
+  /**
+   * Print replies instead of sending them.
+   *
+   * This is about *sending*, not about the database: a dry run still saves
+   * preferences, advances the onboarding stage, flips opt-ins and records
+   * reminders, because otherwise half a conversation would be a lie about
+   * what the bot does. Do not point `--dry-run` at a live database and
+   * expect it to be read-only.
+   */
   dryRun?: boolean;
 }
 
