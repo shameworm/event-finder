@@ -5,9 +5,44 @@ import { priceText } from './normalize.ts';
 import { dayLabel, localTime, truncate } from './util.ts';
 import { groupByDay } from './rank.ts';
 import { escapeHtml } from './telegram-api.ts';
-import * as copy from './copy.ts';
 
 export type Format = 'html' | 'text';
+
+/** Ukrainian needs three forms: 1 подія, 2 події, 5 подій. */
+function plural(n: number, [one, few, many]: [string, string, string]): string {
+  const mod100 = n % 100;
+  const mod10 = n % 10;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
+}
+
+export const countEvents = (n: number): string => `${n} ${plural(n, ['подія', 'події', 'подій'])}`;
+export const countPlaces = (n: number): string => `${n} ${plural(n, ['місце', 'місця', 'місць'])}`;
+
+export const REMINDER_HINT = 'Тапни ❤️ на події — нагадаю за день і за 3 години до початку.';
+export const PLACES_HINT = 'Скажи, як тобі — і я підлаштую підказки.';
+export const NOTHING_FOUND = 'Цього разу нічого не знайшлося. Спробуй ширший період або інше місто.';
+
+const STATUS_BADGE: Record<string, string> = {
+  soldout: ' — 🚫 КВИТКІВ НЕМАЄ',
+  cancelled: ' — ❌ СКАСОВАНО',
+  postponed: ' — ⏳ ПЕРЕНЕСЕНО',
+  limited: ' — ⚠️ лишилось мало квитків',
+};
+
+/**
+ * `changeNote` arrives as the freshness checker's own reason — an English key
+ * from src/fresh.ts, not something a person should read.
+ */
+const CHANGE_NOTE: Record<string, string> = {
+  'new date': 'нова дата',
+  'sold out': 'квитки скінчилися',
+  'few tickets left': 'мало квитків',
+  cancelled: 'скасовано',
+  'price changed': 'змінилася ціна',
+};
 
 function link(label: string, url: string, format: Format): string {
   if (format === 'text') return `${label} ${url}`;
@@ -45,8 +80,8 @@ export function renderItem(item: Item, opts: RenderItemOptions = {}): string {
   // Telegram posts often give a date but no time; 00:00 means "unknown", not midnight
   const timeKnown = item.startsAt ? !(item.confidence === 'low' && localTime(item.startsAt, tz) === '00:00') : false;
   const when = item.startsAt
-    ? `${opts.withDay ? dayLabel(item.startsAt.slice(0, 10), cfg.locale) + ' ' : ''}${timeKnown ? localTime(item.startsAt, tz) : copy.TIME_UNKNOWN}`
-    : copy.DATE_UNKNOWN;
+    ? `${opts.withDay ? dayLabel(item.startsAt.slice(0, 10), cfg.locale) + ' ' : ''}${timeKnown ? localTime(item.startsAt, tz) : 'час уточнюється'}`
+    : 'дата уточнюється';
 
   const facts = (item.kind === 'place'
     ? [item.address, item.venue]
@@ -55,17 +90,17 @@ export function renderItem(item: Item, opts: RenderItemOptions = {}): string {
     .map((x) => plain(x, format))
     .join(' · ');
 
-  const note = opts.changeNote ? copy.CHANGE_NOTE[opts.changeNote] ?? opts.changeNote : undefined;
+  const note = opts.changeNote ? CHANGE_NOTE[opts.changeNote] ?? opts.changeNote : undefined;
   const lines = [
-    `${num}${emoji} ${bold(item.title, format)}${copy.STATUS_BADGE[item.status] ?? ''}${note ? ` — 🔁 ${note}` : ''}`,
+    `${num}${emoji} ${bold(item.title, format)}${STATUS_BADGE[item.status] ?? ''}${note ? ` — 🔁 ${note}` : ''}`,
     facts,
   ];
   if (item.description) lines.push(plain(truncate(item.description, 140), format));
   // "квитки" is a promise; a free event or one with no price has none to make
   const buyable = item.kind === 'event' && !item.free && (item.priceMin !== undefined || item.priceMax !== undefined);
-  lines.push(link(buyable ? copy.TICKETS_LINK : copy.DETAILS_LINK, item.url, format));
+  lines.push(link(buyable ? 'квитки →' : 'детальніше →', item.url, format));
   if (opts.explain && item.reasons?.length) {
-    lines.push(plain(`· ${item.reasons.slice(0, 4).join(', ')} (${item.score})`, format));
+    lines.push(plain(`· ${item.reasons.slice(0, 4).join(', ')} (бали ${item.score})`, format));
   }
   return lines.filter(Boolean).join('\n');
 }
@@ -105,7 +140,8 @@ export function buildDigest(opts: DigestOptions): { text: string; ordered: Item[
     ? `${bold(opts.title, format)}\n${plain(cities, format)}`
     : `${bold(opts.title, format)}\n${plain(`${cities} · ${rangeText(opts.query)}`, format)}`;
   if (opts.items.length === 0) {
-    return { text: `${head}\n\n${plain(opts.footer ?? copy.NOTHING_FOUND, format)}`, ordered: [] };
+    const empty = opts.footer ?? NOTHING_FOUND;
+    return { text: `${head}\n\n${plain(empty, format)}`, ordered: [] };
   }
 
   const blocks: string[] = [head];
@@ -119,12 +155,12 @@ export function buildDigest(opts: DigestOptions): { text: string; ordered: Item[
         .map((it) => renderItem(it, { format, index: opts.numbered === false ? undefined : n++, explain: opts.explain }))
         .join('\n\n'),
     );
-    blocks.push(plain(opts.footer ?? copy.PLACES_HINT, format));
+    blocks.push(plain(opts.footer ?? PLACES_HINT, format));
     return { text: blocks.join('\n\n'), ordered };
   }
 
   for (const group of groupByDay(opts.items, cfg.timezone)) {
-    const dayHead = group.day === 'tbd' ? copy.DAY_UNKNOWN : dayLabel(group.day, cfg.locale);
+    const dayHead = group.day === 'tbd' ? 'Дата уточнюється' : dayLabel(group.day, cfg.locale);
     const shown = maxPerDay > 0 ? group.items.slice(0, maxPerDay) : group.items;
     ordered.push(...shown);
     const rendered = shown.map((it) =>
@@ -137,16 +173,12 @@ export function buildDigest(opts: DigestOptions): { text: string; ordered: Item[
     );
     const more = group.items.length - shown.length;
     blocks.push(
-      [
-        `${format === 'text' ? '' : '— '}${bold(dayHead, format)}`,
-        ...rendered,
-        more > 0 ? plain(copy.andMore(more), format) : '',
-      ]
+      [`${format === 'text' ? '' : '— '}${bold(dayHead, format)}`, ...rendered, more > 0 ? plain(`…і ще ${more}`, format) : '']
         .filter(Boolean)
         .join('\n\n'),
     );
   }
-  blocks.push(plain(opts.footer ?? copy.REMINDER_HINT, format));
+  blocks.push(plain(opts.footer ?? REMINDER_HINT, format));
   return { text: blocks.join('\n\n'), ordered };
 }
 
@@ -193,14 +225,12 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
     // dates only: the title already names the window, and "(цього тижня)"
     // under a "Цього тижня" heading is just noise
     placesOnly ? '' : rangeDates(opts.query),
-    kept.length ? (placesOnly ? copy.countPlaces(kept.length) : copy.countEvents(kept.length)) : '',
+    kept.length ? (placesOnly ? countPlaces(kept.length) : countEvents(kept.length)) : '',
   ]
     .filter(Boolean)
     .join(' · ');
 
-  const tail = kept.length === 0
-    ? opts.footer ?? copy.NOTHING_FOUND
-    : opts.footer ?? (placesOnly ? copy.PLACES_HINT : copy.REMINDER_HINT);
+  const tail = kept.length === 0 ? opts.footer ?? NOTHING_FOUND : opts.footer ?? (placesOnly ? PLACES_HINT : REMINDER_HINT);
   const header = `${bold(opts.title, format)}\n${plain(facts, format)}\n\n${plain(tail, format)}`;
 
   return [

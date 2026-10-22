@@ -4,7 +4,6 @@ import { SchemaEventSchema, type SchemaEvent } from './schemas.ts';
 import { categoryFromSchemaType, classify } from './categories.ts';
 import { localDate, sha1, titleKey, truncate } from './util.ts';
 import { loadConfig } from './config.ts';
-import * as copy from './copy.ts';
 
 /** Stable id, so the same show from three sources collapses into one row. */
 export function itemId(kind: Kind, title: string, city: string, startsAt?: string, tz = loadConfig().timezone): string {
@@ -146,19 +145,19 @@ function validate(candidate: unknown, opts: { onReject?: (reason: string) => voi
   return parsed.data;
 }
 
-/** Price text for output: "350–900 ₴", "from 500 ₴", "up to 390 ₴", "free". */
+/** Price text for output: "350–900 ₴", "від 500 ₴", "до 390 ₴", "безкоштовно". */
 export function priceText(item: Item): string {
   const sym = !item.currency || item.currency === 'UAH' ? '₴' : item.currency;
-  if (item.free || item.priceMin === 0) return copy.FREE;
+  if (item.free || item.priceMin === 0) return 'безкоштовно';
   const min = item.priceMin;
   const max = item.priceMax;
   // some sites use 0.01 as a placeholder "price on request" floor; rounding it
   // to 0 would advertise a free ticket that does not exist
-  if (min !== undefined && min < 1 && max !== undefined && max >= 1) return copy.priceUpTo(Math.round(max), sym);
-  if (min !== undefined && max !== undefined && max > min) return copy.priceRange(Math.round(min), Math.round(max), sym);
+  if (min !== undefined && min < 1 && max !== undefined && max >= 1) return `до ${Math.round(max)} ${sym}`;
+  if (min !== undefined && max !== undefined && max > min) return `${Math.round(min)}–${Math.round(max)} ${sym}`;
   const one = min ?? max;
-  if (one !== undefined) return one < 1 ? copy.PRICE_UNKNOWN : copy.priceFrom(Math.round(one), sym);
-  return copy.PRICE_UNKNOWN;
+  if (one !== undefined) return one < 1 ? 'ціна невідома' : `від ${Math.round(one)} ${sym}`;
+  return 'ціна невідома';
 }
 
 /** Parse "вхід вільний", "300 грн", "від 250 грн", "150-400 uah" out of free text. */

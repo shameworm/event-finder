@@ -26,8 +26,8 @@ import { loadConfig } from '../src/config.ts';
 import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore, type Store } from '../src/db.ts';
-import { botToken, getMe, getUpdates } from '../src/telegram-api.ts';
-import { handleMessage, handleReaction, type HandlerContext } from '../src/bot-handlers.ts';
+import { botToken, getMe, getUpdates, setMyCommands } from '../src/telegram-api.ts';
+import { BOT_COMMANDS, handleCallback, handleMessage, handleReaction, type HandlerContext } from '../src/bot-handlers.ts';
 import { sleep } from '../src/util.ts';
 
 const args = parseArgs();
@@ -49,20 +49,22 @@ async function drain(store: Store, timeout: number): Promise<number> {
 
   for (const update of updates) {
     const msg = update.message ?? update.edited_message;
+    const cb = update.callback_query;
     const reaction = update.message_reaction;
-    const chat = msg?.chat.id ?? reaction?.chat.id;
-    if (msg || reaction) {
+    if (msg || cb || reaction) {
       const started = Date.now();
+      const where = msg ? msg.chat.id : (cb?.message?.chat.id ?? cb?.from?.id ?? reaction?.chat.id);
       try {
         // a ❤️ on an event message is how people set reminders, so reactions
         // are first-class updates here, not a side channel
         if (msg) await handleMessage(ctx, msg);
+        else if (cb) await handleCallback(ctx, cb);
         else if (reaction) await handleReaction(ctx, reaction);
-        log.info(`handled update ${update.update_id} from chat ${chat} in ${Date.now() - started}ms`);
+        log.info(`handled update ${update.update_id} from chat ${where} in ${Date.now() - started}ms`);
       } catch (err) {
-        // one user's bad message must never take the bot down
+        // one user's bad message or button tap must never take the bot down
         log.error(
-          `update ${update.update_id} from chat ${chat} failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
+          `update ${update.update_id} from chat ${where} failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
         );
       }
     }
@@ -80,6 +82,17 @@ await withStore(async (store) => {
   );
   const counts = await store.countUsers();
   log.info(`${counts.active} active user(s) of ${counts.total} registered`);
+
+  // what Telegram autocompletes after "/" and shows behind the ☰ menu button;
+  // cosmetic, so a failure here is logged and the bot carries on serving people
+  if (!dryRun) {
+    try {
+      await setMyCommands(BOT_COMMANDS);
+      log.info(`published ${BOT_COMMANDS.length} commands to the Telegram menu`);
+    } catch (err) {
+      log.warn(`could not publish the command menu: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   if (args.has('once')) {
     const n = await drain(store, args.num('timeout') ?? 0);

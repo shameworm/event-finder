@@ -20,6 +20,58 @@ export const EMOJI: Record<Category, string> = {
   spot: '📍',
 };
 
+/**
+ * Ukrainian names for the category keys, for anything a person reads — /prefs,
+ * mostly. Free-text tags a user invented are shown as they typed them, so this
+ * is a lookup with a fallback, not a complete map of everything in a tag list.
+ */
+export const CATEGORY_LABEL: Record<Category, string> = {
+  concert: 'концерти',
+  standup: 'стендап',
+  theatre: 'театр',
+  exhibition: 'виставки',
+  lecture: 'лекції',
+  party: 'вечірки',
+  festival: 'фестивалі',
+  workshop: 'майстеркласи',
+  cinema: 'кіно',
+  kids: 'дітям',
+  sport: 'спорт',
+  other: 'інше',
+  cafe: 'кавʼярні',
+  bar: 'бари',
+  gallery: 'галереї',
+  spot: 'місця',
+};
+
+/** The genre keys of TAG_SYNONYMS, for the same reason. */
+const GENRE_LABEL: Record<string, string> = {
+  classical: 'класика',
+  opera: 'опера',
+  ballet: 'балет',
+  jazz: 'джаз',
+  rock: 'рок',
+  indie: 'інді',
+  metal: 'метал',
+  rap: 'реп',
+  electronic: 'електроніка',
+  pop: 'поп',
+  folk: 'фолк',
+  karaoke: 'караоке',
+  tribute: 'трибют',
+  candlelight: 'при свічках',
+  chanson: 'шансон',
+  improv: 'імпровізація',
+  wine: 'вино',
+  photo: 'фотографія',
+  poetry: 'поезія',
+};
+
+/** A tag as a person should read it: a known key in Ukrainian, else as typed. */
+export function tagLabel(tag: string): string {
+  return CATEGORY_LABEL[tag as Category] ?? GENRE_LABEL[tag] ?? tag;
+}
+
 export const EVENT_CATEGORIES: Category[] = [
   'concert', 'standup', 'theatre', 'exhibition', 'lecture', 'party', 'festival', 'workshop', 'cinema', 'kids', 'sport', 'other',
 ];

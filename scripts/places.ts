@@ -16,7 +16,7 @@
  * round of searching serves everybody.
  */
 import { loadConfig } from '../src/config.ts';
-import * as copy from '../src/copy.ts';
+import { PLACES_HINT } from '../src/render.ts';
 import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore } from '../src/db.ts';
@@ -30,7 +30,7 @@ const args = parseArgs();
 const log = makeLogger('places');
 const cfg = loadConfig();
 const base = today(cfg.timezone);
-const window = { from: base, to: addDays(base, 30), label: copy.RANGE.openNow };
+const window = { from: base, to: addDays(base, 30), label: 'зараз відкрито' };
 
 if (!canSend(log, args.has('dry-run') || args.has('queries'))) process.exit(1);
 
@@ -65,8 +65,8 @@ await withStore(async (store) => {
     newOnly: !args.has('all'),
     dryRun: args.has('dry-run'),
     onlyChats: args.list('chat'),
-    title: () => copy.TITLE_PLACES,
-    footer: copy.PLACES_FOOTER,
+    title: () => '📍 Варто зайти',
+    footer: `${PLACES_HINT} /mute places — щоб не приходили.`,
   });
 
   if (result.items === 0) {

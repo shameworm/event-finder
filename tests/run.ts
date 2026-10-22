@@ -49,10 +49,9 @@ const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom } = awa
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
 const { buildDigest, buildMessages } = await import('../src/render.ts');
-const copyRange = await import('../src/copy.ts');
 const { loadConfig, loadPrefs, resolveCity, cityLocalName } = await import('../src/config.ts');
 const { applyPrefsCommand, describePrefs } = await import('../src/prefs-engine.ts');
-const { tagLabel } = await import('../src/copy.ts');
+const { tagLabel } = await import('../src/categories.ts');
 const { PreferencesSchema } = await import('../src/types.ts');
 const { parsePost, findDate, findTime, findVenue } = await import('../scripts/telegram.ts');
 const { resultToItem, buildQueries } = await import('../scripts/websearch.ts');
@@ -62,7 +61,9 @@ const { splitForTelegram } = await import('../src/telegram-api.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs } = await import('../src/users.ts');
 const { cacheKey } = await import('../src/cache.ts');
 const { fanout } = await import('../src/fanout.ts');
-const { handleMessage, handleReaction, parseBell, isHeart, isAllowed } = await import('../src/bot-handlers.ts');
+const { handleMessage, handleCallback, handleReaction, parseBell, isHeart, isAllowed, BOT_COMMANDS } = await import(
+  '../src/bot-handlers.ts'
+);
 const { deliver } = await import('../src/deliver.ts');
 const { makeLogger } = await import('../src/log.ts');
 const { ALL_SOURCE_NAMES } = await import('../src/pipeline.ts');
@@ -382,7 +383,7 @@ describe('render', () => {
 
   it('badges sold-out events in Ukrainian', () => {
     const items = [makeItem({ city: 'kharkiv', title: 'Gone', url: 'https://x/c', source: 's', startsAt: '2026-10-24T19:00:00+03:00', status: 'soldout' })!];
-    assert.ok(buildDigest({ title: 'T', query, items, format: 'text' }).text.includes('НЕМАЄ КВИТКІВ'));
+    assert.ok(buildDigest({ title: 'T', query, items, format: 'text' }).text.includes('КВИТКІВ НЕМАЄ'));
   });
 
   it('labels the ticket link in Ukrainian when there are tickets', () => {
@@ -392,7 +393,7 @@ describe('render', () => {
 
   it('says the date is unknown in Ukrainian', () => {
     const items = [makeItem({ city: 'kharkiv', title: 'Someday', url: 'https://x/c3', source: 's' })!];
-    assert.ok(buildDigest({ title: 'T', query, items, format: 'text' }).text.includes('дата невідома'));
+    assert.ok(buildDigest({ title: 'T', query, items, format: 'text' }).text.includes('дата уточнюється'));
   });
 
   it('escapes HTML coming from a site', () => {
@@ -448,7 +449,7 @@ describe('messages', () => {
   });
 
   it('does not repeat the window name the title already carries', () => {
-    const msgs = buildMessages({ title: copyRange.TITLE_WEEK, query, items: [earlier], format: 'text' });
+    const msgs = buildMessages({ title: '🗓 Цього тижня', query, items: [earlier], format: 'text' });
     assert.ok(!msgs[0]!.text.includes('('), msgs[0]!.text);
     assert.ok(msgs[0]!.text.includes('23 жовт.'), msgs[0]!.text);
   });
@@ -575,7 +576,7 @@ describe('taste words, as people read them', () => {
       PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['standup', 'jazz'], max_ticket_price: 700 }),
     );
     assert.ok(described.includes('улюблене: стендап, джаз'), described);
-    assert.ok(described.includes('максимальна ціна: 700 ₴'), described);
+    assert.ok(described.includes('максимум за квиток: 700 ₴'), described);
   });
 });
 
@@ -583,17 +584,17 @@ describe('date range labels', () => {
   const base = '2026-10-20';
 
   it('names every window in Ukrainian, because the label is shown to people', () => {
-    assert.equal(thisWeekRange(base).label, 'цього тижня');
-    assert.equal(weekendRange(base).label, 'на вихідних');
-    assert.equal(nextWeekRange(base).label, 'наступного тижня');
+    assert.equal(thisWeekRange(base).label, 'цей тиждень');
+    assert.equal(weekendRange(base).label, 'ці вихідні');
+    assert.equal(nextWeekRange(base).label, 'наступний тиждень');
     assert.equal(parseDateRange('сьогодні', base).label, 'сьогодні');
     assert.equal(parseDateRange('завтра', base).label, 'завтра');
-    assert.equal(parseDateRange('цього місяця', base).label, 'цього місяця');
+    assert.equal(parseDateRange('цього місяця', base).label, 'цей місяць');
   });
 
   it('counts days in Ukrainian for "next N days"', () => {
-    assert.equal(parseDateRange('next 3 days', base).label, 'наступні 3 дні');
-    assert.equal(parseDateRange('next 7 days', base).label, 'наступні 7 днів');
+    assert.equal(parseDateRange('next 3 days', base).label, 'найближчі 3 дн.');
+    assert.equal(parseDateRange('next 7 days', base).label, 'найближчі 7 дн.');
   });
 });
 
@@ -614,13 +615,13 @@ describe('preference commands', () => {
   });
 
   it('records dislikes and drops them from favourites', () => {
-    const edit = check("I don't like opera", { understood: true, changed: true, contains: 'не люблю + опера' });
+    const edit = check("I don't like opera", { understood: true, changed: true, contains: 'небажане + опера' });
     assert.ok(!edit.prefs.favourite_categories.includes('opera'));
   });
 
   it('follows and unfollows people', () => {
-    check('follow Latexfauna', { understood: true, changed: true, contains: 'слідкую за «Latexfauna»' });
-    check('unfollow Курган і Agregat', { understood: true, changed: true, contains: 'більше не слідкую' });
+    check('follow Latexfauna', { understood: true, changed: true, contains: 'стежу за «Latexfauna»' });
+    check('unfollow Курган і Agregat', { understood: true, changed: true, contains: 'більше не стежу' });
   });
 
   it('sets a budget and clears it', () => {
@@ -639,16 +640,51 @@ describe('preference commands', () => {
     assert.ok(applyPrefsCommand('watch Odesa', current).prefs.watch_cities.includes('odesa'));
   });
 
+  /**
+   * Every Ukrainian phrase here was dead for as long as the rules used `\b`,
+   * which is ASCII-only and therefore never finds a boundary before "д".
+   * The bot advertises these exact phrasings in /help, so they are checked.
+   */
+  it('understands the Ukrainian phrasings the bot suggests', () => {
+    check('додай джаз до улюблених', { understood: true, changed: true, contains: 'улюблене + джаз' });
+    check('не люблю балет', { understood: true, changed: true, contains: 'небажане + балет' });
+    // "класичну" is the inflected form of a tag already in the fixture's dislikes
+    check('не люблю класичну музику', { understood: true, changed: false });
+    check('слідкуй за Latexfauna', { understood: true, changed: true, contains: 'стежу за «Latexfauna»' });
+    check('максимум 800 грн', { understood: true, changed: true, contains: '800' });
+    check('прибери стендап з улюблених', { understood: true, changed: true, contains: 'улюблене − стендап' });
+    check('додай фолк до інтересів', { understood: true, changed: true, contains: 'інтереси + фолк' });
+  });
+
+  it('reads Ukrainian cities and trips', () => {
+    assert.equal(applyPrefsCommand('моє місто Одеса', current).prefs.home_city, 'odesa');
+    assert.ok(applyPrefsCommand('слідкуй за Львовом', current).prefs.watch_cities.includes('lviv'));
+    assert.equal(applyPrefsCommand('я у Львові наступного тижня', current).prefs.trip?.city, 'lviv');
+  });
+
+  it('folds an inflected tag onto the same key as its dictionary form', () => {
+    assert.equal(canonicalTag('класичну'), 'classical');
+    assert.equal(canonicalTag('класична'), 'classical');
+  });
+
+  it('switches to places when the request is Ukrainian', () => {
+    const base = '2026-10-21';
+    assert.deepEqual(parseRequest('тільки місця у Львові', { prefs, base }).kinds, ['place']);
+    assert.ok(parseRequest('нові кафе в Харкові', { prefs, base }).kinds.includes('place'));
+    assert.deepEqual(parseRequest('концерти на вихідних', { prefs, base }).kinds, ['event']);
+  });
+
   it('ignores things that are not preference changes', () => {
     check("what's on tonight in Kharkiv?", { understood: false, changed: false });
+    check('що цікавого у Харкові на вихідних', { understood: false, changed: false });
   });
 
   // JavaScript's \b is ASCII-only, so every Cyrillic phrasing below used to be
   // dead code: the words were in the patterns but could never match.
   it('understands the same commands written in Ukrainian', () => {
     check('люблю джаз', { understood: true, changed: true, contains: 'улюблене + джаз' });
-    check('не люблю шансон', { understood: true, changed: true, contains: 'не люблю + шансон' });
-    check('слідкуй за Latexfauna', { understood: true, changed: true, contains: 'слідкую за «Latexfauna»' });
+    check('не люблю шансон', { understood: true, changed: true, contains: 'небажане + шансон' });
+    check('слідкуй за Latexfauna', { understood: true, changed: true, contains: 'стежу за «Latexfauna»' });
     check('мені подобається театр', { understood: true, changed: true, contains: 'улюблене + театр' });
   });
 
@@ -961,7 +997,9 @@ describe('bot handlers', () => {
 
       const picked = await say(store, '3001', 'Львів');
       assert.ok(picked.includes('Львів'), picked.slice(0, 200));
-      assert.equal((await store.getUser('3001'))?.city, 'lviv');
+      const row = await store.getUser('3001');
+      assert.equal(row?.stage, 'taste', 'the city answer leads into the taste question');
+      assert.equal(row?.city, 'lviv');
     });
   });
 
@@ -969,7 +1007,7 @@ describe('bot handlers', () => {
     await withTestStore(async (store) => {
       await say(store, '3002', '/start');
       const reply = await say(store, '3002', 'Atlantis');
-      assert.ok(reply.includes('не знаю'), reply.slice(0, 200));
+      assert.ok(reply.includes('поки не знаю'), reply.slice(0, 200));
       assert.equal((await store.getUser('3002'))?.stage, 'city');
     });
   });
@@ -1008,7 +1046,7 @@ describe('bot handlers', () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3006', city: 'kharkiv' });
       assert.ok((await say(store, '3006', '/help')).includes('/weekend'));
-      assert.ok((await say(store, '3006', '/nonsense')).includes('не знаю'));
+      assert.ok((await say(store, '3006', '/nonsense')).includes('Не знаю команди'));
     });
   });
 
@@ -1027,12 +1065,98 @@ describe('bot handlers', () => {
     });
   });
 
+  /** Capture what a tap on an inline button produces. */
+  async function tap(store: StoreType, chatId: string, data: string): Promise<string> {
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    (process.stdout as { write: unknown }).write = (chunk: unknown) => {
+      chunks.push(String(chunk));
+      return true;
+    };
+    try {
+      await handleCallback({ store, log, dryRun: true }, {
+        id: 'cb',
+        data,
+        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' } },
+        from: { id: Number(chatId) },
+      } as never);
+    } finally {
+      (process.stdout as { write: unknown }).write = original;
+    }
+    return chunks.join('');
+  }
+
+  it('offers /settings as a panel of buttons', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3010', city: 'kharkiv' });
+      const panel = await say(store, '3010', '/settings');
+      assert.ok(panel.includes('Налаштування'), panel.slice(0, 300));
+      assert.ok(panel.includes('(set:weekend_digest)'), 'every digest needs its own button');
+      assert.ok(panel.includes('(set:city)') && panel.includes('(set:prefs)'), panel.slice(0, 600));
+    });
+  });
+
+  it('toggles a digest from the panel and redraws it in place', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3011', city: 'kharkiv' });
+      const off = await tap(store, '3011', 'set:weekend_digest');
+      assert.equal((await store.getUser('3011'))?.weekend_digest, 0);
+      assert.ok(off.includes('edit 42'), 'the panel is rewritten, not reposted');
+      assert.ok(off.includes('❌ 🎉 Вихідні'), off.slice(0, 400));
+
+      await tap(store, '3011', 'set:weekend_digest');
+      assert.equal((await store.getUser('3011'))?.weekend_digest, 1);
+    });
+  });
+
+  it('changes the city from the panel', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3012', city: 'kharkiv' });
+      const picker = await tap(store, '3012', 'set:city');
+      assert.ok(picker.includes('(city:lviv)'), picker.slice(0, 400));
+      await tap(store, '3012', 'city:lviv');
+      assert.equal((await store.getUser('3012'))?.city, 'lviv');
+    });
+  });
+
+  it('asks before unsubscribing from a button', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3013', city: 'kharkiv' });
+      const confirm = await tap(store, '3013', 'set:stop');
+      assert.ok(confirm.includes('Відписатися?'), confirm.slice(0, 300));
+      assert.equal((await store.getUser('3013'))?.blocked, 0, 'one tap must not unsubscribe anyone');
+      await tap(store, '3013', 'set:stop!');
+      assert.equal((await store.getUser('3013'))?.blocked, 1);
+    });
+  });
+
+  it('publishes a command menu that the router actually answers', async () => {
+    const source = readFileSync(new URL('../src/bot-handlers.ts', import.meta.url), 'utf8');
+    assert.ok(BOT_COMMANDS.length > 0);
+    for (const { command, description } of BOT_COMMANDS) {
+      assert.ok(source.includes(`case '/${command}'`), `/${command} is in the menu but the router ignores it`);
+      assert.ok(/^[a-z0-9_]{1,32}$/.test(command), `"${command}" is not a valid Telegram command name`);
+      assert.ok(description.length <= 256, `the description of /${command} is too long for Telegram`);
+    }
+  });
+
+  it('answers "покажи налаштування" with the panel instead of a search', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3014', city: 'kharkiv' });
+      const reply = await say(store, '3014', 'покажи налаштування');
+      assert.ok(reply.includes('Налаштування'), reply.slice(0, 300));
+      assert.ok(!reply.includes('Шукаю'), 'it must not kick off a scrape');
+    });
+  });
+
   it('reads a typed reminder request, hearts and Ukrainian included', () => {
     assert.deepEqual(parseBell('❤️'), { bell: true, index: undefined });
+    assert.deepEqual(parseBell('🔔'), { bell: true, index: undefined });
     assert.deepEqual(parseBell('🔔 3'), { bell: true, index: 3 });
-    assert.deepEqual(parseBell('нагадай'), { bell: true, index: undefined });
-    assert.deepEqual(parseBell('нагадай 2'), { bell: true, index: 2 });
+    assert.equal(parseBell('нагадай').bell, true);
+    assert.equal(parseBell('нагадай 2').index, 2);
     assert.equal(parseBell('що там цікавого').bell, false);
+    assert.equal(parseBell('what is on').bell, false);
   });
 
   it('is open to everyone unless an allowlist is configured', () => {
@@ -1159,7 +1283,7 @@ describe('the heart', () => {
 
       const reply = await react(store, '3203', 779, { from: ['❤️'], to: [] });
       assert.equal((await store.listReminders('3203')).length, 0);
-      assert.ok(reply.includes('Знято'), reply.slice(0, 300));
+      assert.ok(reply.includes('Прибрав нагадування'), reply.slice(0, 300));
     });
   });
 

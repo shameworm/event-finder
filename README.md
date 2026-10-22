@@ -120,29 +120,23 @@ Create `~/.hermes/.env` (shared with your other Hermes skills) or
 | `TELEGRAM_SESSION` | your GramJS login (optional) | written by `scripts/tg-login.ts` (§6) |
 | `DATABASE_URL` | Postgres instead of SQLite (optional) | your database |
 
-While you are in @BotFather, set the bot up properly:
+The command menu — what Telegram autocompletes after `/` and shows behind the
+☰ button — is published by the bot itself on every start (`setMyCommands`, from
+`BOT_COMMANDS` in `src/bot-handlers.ts`), so there is nothing to type into
+@BotFather. Add a command there and it appears in the menu on the next restart.
+
+Two things are still worth setting in @BotFather by hand:
 
 ```
 /setdescription  Знаходжу концерти, стендап, театр, виставки й нові місця в українських містах.
 /setabouttext    Твоє місто, твій смак, одне повідомлення на тиждень.
-/setcommands
-start - налаштувати / почати заново
-week - що є цього тижня
-weekend - з п'ятниці по неділю
-today - сьогодні
-tomorrow - завтра
-places - нові місця, куди варто зайти
-city - змінити місто
-prefs - що я думаю про твої смаки
-settings - які підбірки тобі приходять
-reminders - твої нагадування
-help - як мною користуватися
-stop - відписатися
 ```
 
-The bot replies in Ukrainian, so the command list should be Ukrainian too. All
-of its copy lives in one file, `src/copy.ts` — change the wording there, not in
-the handlers.
+The bot replies in Ukrainian and nothing else, so those two lines are Ukrainian
+too. There is one language, so its copy sits next to the code that sends it —
+`src/bot-handlers.ts` for the conversation, `src/render.ts` for events — rather
+than in a catalogue with a lookup layer on top. Logs, CLI output and `/stats`
+stay English: they are for whoever runs the bot.
 
 ## 4. Storage
 
@@ -308,8 +302,7 @@ scripts/
   search.ts digest.ts follows.ts places.ts reminders.ts
   prefs.ts tg-login.ts doctor.ts
 src/
-  bot-handlers.ts         the conversation, and the ❤️ reaction
-  copy.ts                 every word the bot says, in Ukrainian
+  bot-handlers.ts         the conversation, the buttons and the ❤️ reaction
   users.ts                chat id ↔ taste model
   cache.ts                one scrape per city
   fanout.ts               scheduled jobs across all users

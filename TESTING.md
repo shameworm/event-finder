@@ -60,7 +60,7 @@ npx tsx scripts/websearch.ts   --city kharkiv
 | items returned | more than zero for a 7-day window in a big city |
 | dates | all inside the window you asked for |
 | prices | `350–900 ₴` / `from 450 ₴` / `up to 390 ₴`, not `price n/a` everywhere |
-| statuses | some `scheduled`; `SOLD OUT`/`CANCELLED` badges where the site says so |
+| statuses | some `scheduled`; `КВИТКІВ НЕМАЄ`/`СКАСОВАНО` badges where the site says so |
 | politeness | ~1.5 s between requests in the log, not a burst |
 
 Add `--json | head -40` for raw fields, `--pages 1` to go faster.
@@ -81,33 +81,43 @@ npx tsx scripts/bot.ts
 
 In Telegram, as yourself:
 
-Everything it says should be in Ukrainian. Anything in English is a bug — the
-string is missing from `src/copy.ts`.
+Everything it says should be in Ukrainian. Anything in English is a bug: the
+copy sits next to the code that sends it (`src/bot-handlers.ts` for the
+conversation, `src/render.ts` for events), so that is where to look.
 
 1. `/start` → a greeting and a city keyboard. Pick a city → it confirms, then
    asks «А тепер — що тобі подобається?».
-2. Answer `стендап, джаз, виставки` → «✅ Записав: улюблене + стендап …» and the
-   help text. (`Пропустити` should also get you out of this step.)
+2. Answer `стендап, джаз, виставки` → «✅ Записав: улюблене + стендап …», the
+   help text and quick-action buttons. (`Пропустити` should also get you out of
+   this step.)
 3. `/prefs` → улюблене lists стендап, джаз, виставки — in Ukrainian, not
    `standup, jazz`.
-4. `/weekend` → «⏳ Шукаю…», then a header («🎉 На вихідних · Харків · … · 5
+4. Type `/` → Telegram autocompletes the command list, and the ☰ button next
+   to the text field shows the same menu.
+5. `/weekend` → «⏳ Шукаю…», then a header («🎉 На вихідних · Харків · … · 5
    подій») followed by **one message per event**. Check the dates read like
    «пт, 24 жовт. 19:00» and the price like «400–800 ₴».
-5. **Tap ❤️ on one of those event messages** → «❤️ Нагадування для … » as a
-   reply to that message, plus «(додав … до улюбленого)» the first time.
-6. `npx tsx scripts/reminders.ts --list` → the reminder is there with your chat id.
-7. **Take the ❤️ off** → «🤍 Знято нагадування …» and `--list` no longer shows it.
+6. **Tap ❤️ on one of those event messages** → «⏰ Нагадування поставив — …» as
+   a reply to that message, plus «(додав … до улюбленого)» the first time.
+7. `npx tsx scripts/reminders.ts --list` → the reminder is there with your chat id.
+8. **Take the ❤️ off** → «Прибрав нагадування …» and `--list` no longer shows it.
    If nothing happens at all, the bot is not receiving reaction updates — see
    §Gotchas below.
-8. `люблю інді-рок` → «✅ Записав: улюблене + інді».
-9. `не люблю класичну музику` → «✅ Записав: не люблю + класика».
-10. `максимум 700 грн` → «максимальна ціна → 700 ₴».
-11. `стендап на вихідних` → a search, not a preference change.
-12. `/settings`, `/mute weekend`, `/settings` → the weekend flag flips to ❌.
-13. `/city` → keyboard; pick another city; `/today` → events from the new city.
-14. `/nonsense` → «Я не знаю /nonsense» and the help text.
-15. `/stop` → unsubscribed. `npx tsx scripts/prefs.ts --list` shows them gone
-    from the active list. `/start` brings them back.
+9. `люблю інді-рок` → «✅ Записав: улюблене + інді».
+10. `не люблю класичну музику` → «✅ Записав: небажане + класика».
+11. `максимум 700 грн` → «максимальна ціна квитка → 700 ₴».
+12. `стендап на вихідних` → a search, not a preference change.
+13. `/settings` → a panel with a button per digest. Tap **Вихідні** → the
+    same message redraws with ❌ and no new message appears; tap it again → ✅.
+14. In the panel: **Змінити місто** → city buttons → pick one → back to the
+    panel with the new city. **Мої смаки** → the preference summary with ⬅️ Назад.
+15. `/mute weekend`, then `/settings` → the panel shows the weekend flag ❌ too.
+16. `/city` → keyboard; pick another city; `/today` → events from the new city.
+17. `покажи налаштування` → the panel, not a twenty-second search.
+18. `/nonsense` → «Не знаю команди /nonsense» and the help text.
+19. `/stop`, or **Відписатися** in the panel (which asks first) → unsubscribed.
+    `npx tsx scripts/prefs.ts --list` shows them gone from the active list.
+    `/start` brings them back, with quick-action buttons under the greeting.
 
 ### If ❤️ does nothing
 

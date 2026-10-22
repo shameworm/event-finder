@@ -16,7 +16,7 @@
  *   --dry-run     print instead of sending
  */
 import { loadConfig } from '../src/config.ts';
-import * as copy from '../src/copy.ts';
+import { REMINDER_HINT } from '../src/render.ts';
 import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore } from '../src/db.ts';
@@ -38,7 +38,7 @@ await withStore(async (store) => {
     store,
     log,
     optIn: 'follow_alerts',
-    window: { from: base, to: addDays(base, days), label: `next ${days} days` },
+    window: { from: base, to: addDays(base, days), label: `найближчі ${days} дн.` },
     // a follow alert covers the user's own city and everything they watch
     includeWatch: true,
     maxPages: args.num('pages'),
@@ -47,8 +47,8 @@ await withStore(async (store) => {
     // the per-person delivery log is the memory here: told once, told again
     // only when something about the show changed
     newOnly: !args.has('all'),
-    footer: copy.REMINDER_HINT,
-    title: () => copy.TITLE_FOLLOW,
+    footer: REMINDER_HINT,
+    title: () => '⭐️ Грає хтось, за ким ти стежиш',
     // keep only the shows by people this user follows
     select: (user, ranked) => ranked.filter((item) => user.prefs.follow.some((f) => matchesFollow(item, f))),
   });

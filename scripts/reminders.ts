@@ -19,7 +19,6 @@ import { withStore } from '../src/db.ts';
 import { TelegramError, escapeHtml, sendMessage } from '../src/telegram-api.ts';
 import { canSend } from '../src/deliver.ts';
 import { dayLabel, localDate, localTime, sleep } from '../src/util.ts';
-import * as copy from '../src/copy.ts';
 
 const args = parseArgs();
 const log = makeLogger('reminders');
@@ -59,13 +58,13 @@ await withStore(async (store) => {
 
   let fired = 0;
   for (const { row, which } of due) {
-    const when = which === '1d' ? copy.REMIND_TOMORROW : copy.REMIND_SOON;
+    const when = which === '1d' ? 'Завтра' : 'Вже за ~3 години';
     const day = dayLabel(localDate(row.starts_at, cfg.timezone), cfg.locale);
     const time = localTime(row.starts_at, cfg.timezone);
     const text =
       `❤️ <b>${escapeHtml(when)}</b>: ${escapeHtml(row.title)}\n` +
       `${escapeHtml(day)} ${escapeHtml(time)}${row.venue ? ` · ${escapeHtml(row.venue)}` : ''}\n` +
-      (row.url ? `<a href="${escapeHtml(row.url)}">${copy.DETAILS_LINK}</a>` : '');
+      (row.url ? `<a href="${escapeHtml(row.url)}">детальніше →</a>` : '');
 
     try {
       await sendMessage(text, { chatId: row.chat_id, dryRun, log });

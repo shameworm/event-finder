@@ -18,7 +18,7 @@
  *   --dry-run            print instead of sending
  */
 import { loadConfig } from '../src/config.ts';
-import * as copy from '../src/copy.ts';
+import { REMINDER_HINT } from '../src/render.ts';
 import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { thisWeekRange, weekendRange } from '../src/request.ts';
@@ -45,14 +45,14 @@ await withStore(async (store) => {
     optIn: weekend ? 'weekend_digest' : 'weekly_digest',
     window,
     // the header already names the city, so the title does not repeat it
-    title: () => (weekend ? copy.TITLE_WEEKEND : copy.TITLE_WEEK),
+    title: () => (weekend ? '🎉 На вихідних' : '🗓 Цього тижня'),
     top,
     maxPerDay: weekend ? 0 : cfg.digest.max_items_per_day,
     newOnly: !args.has('all'),
     dryRun: args.has('dry-run'),
     maxPages: args.num('pages'),
     onlyChats: args.list('chat'),
-    footer: copy.DIGEST_FOOTER,
+    footer: `${REMINDER_HINT} /settings — щоб змінити, що тобі приходить.`,
   });
 
   process.stdout.write(

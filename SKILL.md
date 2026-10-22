@@ -12,10 +12,15 @@ user, so a hundred subscribers cost one crawl.
 
 **Default city: Kharkiv.** Any other configured city works on request.
 
-**The bot speaks Ukrainian only.** Every string it says lives in `src/copy.ts`;
-nothing user-facing belongs anywhere else. Recognition stays multilingual —
-`src/categories.ts` matches Ukrainian, Russian and English — so "stand-up" and
-"стендап" are both understood, but the reply is always Ukrainian.
+**The bot speaks Ukrainian only.** Every string a user reads — the command menu,
+the settings panel, digests, reminders, prices and date labels — is Ukrainian;
+logs, CLI output and `/stats` stay English, because they are for whoever runs
+it. The copy sits next to the code that sends it, not in a catalogue: there is
+one language, so a lookup layer would buy nothing. Day names come from
+`locale: uk-UA` in config.yaml and city names from each city's `label`.
+Recognition stays multilingual — `src/categories.ts` matches Ukrainian, Russian
+and English — so "stand-up" and "стендап" are both understood, but the reply is
+always Ukrainian.
 
 **Every event is its own Telegram message.** A digest is a short header plus one
 message per event, each recorded against that single event, which is what makes
@@ -57,12 +62,22 @@ answer is what fills `favourite_categories` — new users do **not** inherit the
 operator's favourites from `preferences.yaml`, only the dislikes, budget and
 interests.
 
+Requests may be written in Ukrainian, Russian or English — that was always true
+of the parser and is unchanged.
+
+Most of this is also reachable without typing. The bot publishes `BOT_COMMANDS`
+with `setMyCommands` on start-up, so Telegram autocompletes `/` and fills the ☰
+menu; `/start` and `/help` carry quick-action buttons; and `/settings` is a
+panel of inline buttons that toggles each digest, changes the city and shows the
+taste model, rewriting itself in place on every tap. Button presses arrive as
+`callback_query` updates and are handled by `handleCallback`.
+
 ## Answering a request yourself
 
 When the user asks you directly rather than the bot, use the CLI:
 
 ```bash
-npx tsx scripts/search.ts "what's interesting in Kharkiv this weekend, I like stand-up and indie rock, no classical music"
+npx tsx scripts/search.ts "що цікавого у Харкові на вихідних, люблю стендап та інді-рок, без класики"
 ```
 
 It parses the free text (city, dates, likes, dislikes, budget), runs every

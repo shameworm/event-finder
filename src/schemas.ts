@@ -192,11 +192,22 @@ export const TgReactionUpdateSchema = z
   })
   .loose();
 
+/** A tap on an inline button, e.g. one of the toggles in /settings. */
+export const TgCallbackQuerySchema = z
+  .object({
+    id: z.string(),
+    data: z.string().optional(),
+    message: TgMessageSchema.optional(),
+    from: z.object({ id: z.union([z.number(), z.string()]), username: z.string().optional() }).loose().optional(),
+  })
+  .loose();
+
 export const TgUpdateSchema = z
   .object({
     update_id: z.number().int(),
     message: TgMessageSchema.optional(),
     edited_message: TgMessageSchema.optional(),
+    callback_query: TgCallbackQuerySchema.optional(),
     message_reaction: TgReactionUpdateSchema.optional(),
   })
   .loose();
@@ -206,6 +217,7 @@ export const TgResponseSchema = <T extends z.ZodTypeAny>(result: T) =>
 
 export type TgMessage = z.infer<typeof TgMessageSchema>;
 export type TgUpdate = z.infer<typeof TgUpdateSchema>;
+export type TgCallbackQuery = z.infer<typeof TgCallbackQuerySchema>;
 export type TgReactionUpdate = z.infer<typeof TgReactionUpdateSchema>;
 
 /* -------------------------------------------------- web-search hand-off --- */

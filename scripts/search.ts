@@ -33,7 +33,6 @@ import { withStore } from '../src/db.ts';
 import { ownerChatId } from '../src/users.ts';
 import { deliver } from '../src/deliver.ts';
 import { renderDigest } from '../src/render.ts';
-import * as copy from '../src/copy.ts';
 
 const args = parseArgs();
 const log = makeLogger('search');
@@ -91,7 +90,7 @@ await withStore(async (store) => {
   }
 
   // the header already names the cities; --send puts this in front of a real person
-  const title = query.kinds.includes('place') ? copy.TITLE_PLACES : copy.titleSearch();
+  const title = query.kinds.includes('place') ? '📍 Варто зайти' : '🗓 Що знайшлося';
 
   if (args.has('send')) {
     if (!chatId) {
