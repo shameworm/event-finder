@@ -33,7 +33,8 @@ web search ─┘                                            rank per user (thei
 
 The cache is the point: 200 people in Kharkiv asking about the same weekend cost
 **one** crawl of each site, not 200. Ranking, filtering and "already sent"
-happen per user afterwards.
+happen per user afterwards — and filtering means it: an answer holds what that
+person likes, not everything that is on (see §Taste).
 
 ---
 
@@ -175,6 +176,35 @@ Then message it `/start`.
 **Only one copy may poll at a time** — Telegram gives each update to a single
 `getUpdates` caller, so a second instance steals messages.
 
+### Taste
+
+A new user starts from nothing and builds their profile in the `/start`
+walkthrough: city, liked categories, dislikes, budget, who they follow. `/setup`
+and `/settings → 🎛 Мої смаки` reopen the same screens.
+
+From then on **an answer holds only what they like.** Anything matching nothing
+in their profile is dropped, and the message says how many events that was. If
+fewer than `bot.taste_floor` (default 5) of their things are on, the next best
+are added back and the bot admits it, so a quiet week does not look like a bug.
+Ask for something specific — «стендап на вихідних» — and the request wins over
+the stored profile for that answer.
+
+Every ❤️ feeds it: the category joins their favourites, its tally goes up (so a
+category hearted ten times outranks one hearted once), and the performer joins
+their follow list, where the heaviest weight lives — a followed act is searched
+for by name and ignores both the dislike filter and the budget cap.
+
+If your bot ran before the walkthrough existed, its users were handed a copy of
+your `preferences.yaml`. Take it back off them:
+
+```bash
+npx tsx scripts/disinherit.ts        # dry run: what would change, per user
+npx tsx scripts/disinherit.ts --yes  # write it
+```
+
+It removes only entries identical to the seed file; anything they added
+themselves stays, as do their ❤️ tallies.
+
 ### As a service (systemd)
 
 ```ini
@@ -239,7 +269,7 @@ npx tsx scripts/telegram.ts --channel @some_channel --dump   # see raw posts
 ```bash
 npx tsx scripts/doctor.ts            # config, secrets, db, users, bot policy
 npx tsx scripts/doctor.ts --network  # also probe every source site
-npm test                             # 145 offline checks (~3s, no network)
+npm test                             # 159 offline checks (~3s, no network)
 ```
 
 ## 8. Automate the digests
@@ -301,7 +331,7 @@ scripts/
   bot.ts                  the bot service (long-poll, or --once for cron)
   concertua.ts karabas.ts kontramarka.ts telegram.ts websearch.ts
   search.ts digest.ts follows.ts places.ts reminders.ts
-  prefs.ts tg-login.ts doctor.ts
+  prefs.ts disinherit.ts tg-login.ts doctor.ts
 src/
   bot-handlers.ts         the conversation, the buttons and the ❤️ reaction
   users.ts                chat id ↔ taste model

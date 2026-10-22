@@ -42,13 +42,13 @@ writeFileSync(
 
 // everything else is imported after the sandbox env vars are set above
 const { describe, it, run } = await import('./harness.ts');
-const { normText, stemText, isoInZone, localDate, localTime, addDays, weekdayOf, titleKey } = await import('../src/util.ts');
+const { normText, stemText, isoInZone, localDate, localTime, addDays, today, weekdayOf, titleKey } = await import('../src/util.ts');
 const { classify, canonicalTag, expandTag } = await import('../src/categories.ts');
 const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange, splitNegations } = await import('../src/request.ts');
 const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom } = await import('../src/normalize.ts');
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
-const { buildDigest, buildMessages } = await import('../src/render.ts');
+const { buildDigest, buildMessages, renderReminders } = await import('../src/render.ts');
 const { loadConfig, loadPrefs, resolveCity, cityLocalName } = await import('../src/config.ts');
 const { applyPrefsCommand, describePrefs } = await import('../src/prefs-engine.ts');
 const { tagLabel } = await import('../src/categories.ts');
@@ -342,6 +342,62 @@ describe('ranking', () => {
     assert.ok(ranked.items[0]!.reasons?.some((r) => r.includes('follow')));
   });
 
+  it('keeps only what the person likes, and says how much it hid', () => {
+    const mine = makeItem({ ...common, title: 'Відкритий мікрофон', url: 'https://x/t1', source: 'karabas', category: 'standup', priceMin: 200 })!;
+    const free = makeItem({ ...common, title: 'Безкоштовна лекція про котиків', url: 'https://x/t2', source: 'karabas', category: 'lecture', free: true, description: 'Приходьте', sources: ['karabas', 'concert.ua'] })!;
+    const theatre = makeItem({ ...common, title: 'Вистава', url: 'https://x/t3', source: 'karabas', category: 'theatre', priceMin: 300 })!;
+    // a free event on two sources used to outscore a category chosen by hand
+    const ranked = rank([free, theatre, mine], { query, prefs, tasteFloor: 0 });
+    assert.deepEqual(ranked.items.map((i) => i.title), ['Відкритий мікрофон']);
+    assert.equal(ranked.toppedUp, 0);
+    assert.equal(ranked.dropped.filter((d) => d.why === 'not in their taste').length, 2);
+  });
+
+  it('pads a thin list rather than sending an almost empty one, and owns up to it', () => {
+    const theatre = makeItem({ ...common, title: 'Вистава', url: 'https://x/p1', source: 'karabas', category: 'theatre', priceMin: 300 })!;
+    const kids = makeItem({ ...common, title: 'Дітям', url: 'https://x/p2', source: 'karabas', category: 'kids', priceMin: 100 })!;
+    const ranked = rank([theatre, kids], { query, prefs, tasteFloor: 2 });
+    assert.equal(ranked.items.length, 2, 'nothing of theirs was on, so the next best came back');
+    assert.equal(ranked.toppedUp, 2);
+  });
+
+  it('leaves everything in when there is no taste to filter by', () => {
+    const blank = PreferencesSchema.parse({ home_city: 'kharkiv' });
+    const plain = parseRequest('', { prefs: blank, base: '2026-10-20' });
+    const theatre = makeItem({ ...common, title: 'Вистава', url: 'https://x/n1', source: 'karabas', category: 'theatre', priceMin: 300 })!;
+    const ranked = rank([theatre], { query: plain, prefs: blank, tasteFloor: 0 });
+    assert.equal(ranked.items.length, 1);
+    // ...and the shared city cache is never filtered, whoever it is ranked for
+    assert.equal(rank([theatre], { query, prefs, keepOffTaste: true, tasteFloor: 0 }).items.length, 1);
+  });
+
+  it('does not filter café suggestions by a taste for concerts', () => {
+    const p = PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['concert'] });
+    const cafe = makeItem({ city: 'kharkiv', kind: 'place', title: 'Нова кавʼярня', url: 'https://x/pl', source: 'websearch', category: 'cafe' })!;
+    const places = parseRequest('', { prefs: p, base: '2026-10-20', kinds: ['place'] });
+    const ranked = rank([cafe], { query: places, prefs: p, tasteFloor: 0 });
+    assert.equal(ranked.items.length, 1, 'a concert favourite says nothing about cafés');
+    assert.equal(ranked.toppedUp, 0, 'and there is nothing to apologise for');
+  });
+
+  it('counts every ❤️ on a category, so a repeated like outranks a one-off', () => {
+    const once = PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['standup'], taste: { standup: 1 } });
+    const often = PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['standup'], taste: { standup: 6 } });
+    const item = makeItem({ ...common, title: 'Відкритий мікрофон', url: 'https://x/h1', source: 'karabas', category: 'standup', priceMin: 200 })!;
+    const score = (p: typeof once) => rank([item], { query: parseRequest('', { prefs: p, base: '2026-10-20' }), prefs: p }).items[0]!.score!;
+    assert.ok(score(often) > score(once) + 3, `${score(often)} vs ${score(once)}`);
+  });
+
+  it('does not let a genre stand in for its whole category', () => {
+    const indie = PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['concert'], interests: ['indie'] });
+    const symphony = makeItem({ ...common, title: 'Симфонія №5', url: 'https://x/g1', source: 'karabas', category: 'concert', priceMin: 300, description: 'класична музика' })!;
+    const party = makeItem({ ...common, title: 'Інді-вечірка', url: 'https://x/g2', source: 'karabas', category: 'concert', priceMin: 200 })!;
+    const ranked = rank([symphony, party], { query: parseRequest('', { prefs: indie, base: '2026-10-20' }), prefs: indie });
+    const why = (title: string) => ranked.items.find((i) => i.title === title)?.reasons ?? [];
+    assert.ok(why('Інді-вечірка').some((r) => r.includes('indie')), JSON.stringify(why('Інді-вечірка')));
+    assert.ok(!why('Симфонія №5').some((r) => r.includes('indie')), 'a symphony is not indie');
+  });
+
   it('drops disliked and over-budget items, and says why', () => {
     const classical = makeItem({ ...common, title: 'Класична музика при свічках', url: 'https://x/3', source: 'karabas', category: 'concert', priceMin: 400 })!;
     const expensive = makeItem({ ...common, title: 'Дорогий концерт', url: 'https://x/4', source: 'karabas', category: 'concert', priceMin: 5000 })!;
@@ -381,6 +437,29 @@ describe('ranking', () => {
 
 describe('render', () => {
   const query = parseRequest('', { prefs, base: '2026-10-20', from: '2026-10-23', to: '2026-10-25' });
+
+  it('renders the reminder list by day, with an emoji and a time', () => {
+    const now = new Date('2026-10-22T12:00:00+03:00');
+    const text = renderReminders(
+      [
+        { title: 'Вистава «Тартюф»', starts_at: '2026-10-22T21:00:00+03:00', venue: 'Театр Квітки', url: 'https://x/1' },
+        { title: 'Вечір імпровізації', starts_at: '2026-10-25T19:30:00+02:00', venue: null, url: null },
+        { title: 'Виставка, що вже минула', starts_at: '2026-10-01T19:30:00+03:00', venue: null, url: 'https://x/2' },
+      ],
+      { now },
+    );
+    assert.ok(text.includes('🎭 <b>Вистава «Тартюф»</b>'), text);
+    assert.ok(text.includes('21:00 · Театр Квітки'), text);
+    assert.ok(text.includes('чт, 22 жовт.') && text.includes('нд, 25 жовт.'), 'grouped by day');
+    assert.ok(text.includes('2 нагадування'), 'the past one is not counted');
+    assert.ok(!text.includes('вже минула'), 'a reminder for something already started is done');
+    assert.ok(!/\d{4}-\d{2}-\d{2}/.test(text), 'no raw ISO dates');
+    assert.ok(text.includes('❤️'), 'it says how to cancel');
+  });
+
+  it('says what to do when there are no reminders', () => {
+    assert.ok(renderReminders([]).includes('Тапни ❤️'));
+  });
 
   it('numbers items in the order they are shown, which is what a "🔔 3" reply means', () => {
     const items = [
@@ -714,6 +793,22 @@ describe('preference commands', () => {
   it('adds and removes a Ukrainian watch city', () => {
     const added = applyPrefsCommand('слідкуй за містом Одеса', current);
     assert.ok(added.prefs.watch_cities.includes('odesa'), JSON.stringify(added.changes));
+  });
+
+  it('takes a watch city in whatever word order it is asked for', () => {
+    // "Додай до міст Київ" used to fall through and search Kyiv instead
+    for (const text of ['Додай до міст Одеса', 'додай до міста Одеса', 'додай Одеса до міст', 'add Odesa to cities']) {
+      const edit = applyPrefsCommand(text, current);
+      assert.ok(edit.understood, `"${text}" was not understood`);
+      assert.ok(edit.prefs.watch_cities.includes('odesa'), `"${text}" → ${JSON.stringify(edit.changes)}`);
+    }
+    for (const text of ['прибери з міст Київ', 'прибери Київ з міст']) {
+      const edit = applyPrefsCommand(text, current);
+      assert.ok(edit.understood, `"${text}" was not understood`);
+      assert.ok(!edit.prefs.watch_cities.includes('kyiv'), `"${text}" → ${JSON.stringify(edit.changes)}`);
+    }
+    // and none of that may swallow the other lists
+    assert.ok(applyPrefsCommand('додай джаз до улюблених', current).prefs.favourite_categories.includes('jazz'));
   });
 });
 
@@ -1134,6 +1229,52 @@ describe('bot handlers', () => {
     });
   });
 
+  /** An answer comes out of the shared cache, so these run without a network. */
+  async function seedToday(store: StoreType, items: Item[]): Promise<void> {
+    const base = today(loadConfig().timezone);
+    await store.putCache(cacheKey({ city: 'kharkiv', from: base, to: base, kinds: ['event'] }, ALL_SOURCE_NAMES), items, 600);
+  }
+  const onToday = (title: string, category: Item['category'], extra: Record<string, unknown> = {}) =>
+    makeItem({
+      city: 'kharkiv', title, url: `https://s/${encodeURIComponent(title)}`, source: 'karabas', category,
+      startsAt: `${today(loadConfig().timezone)}T23:00:00+03:00`, status: 'scheduled', ...extra,
+    })!;
+
+  /** Someone with taste, already past the walkthrough and the one-time nudge. */
+  async function withTaste(store: StoreType, chatId: string, favourites: string[]): Promise<void> {
+    await registerUser(store, { chatId, city: 'kharkiv' });
+    const user = (await getUser(store, chatId))!;
+    await saveUserPrefs(store, user, { ...user.prefs, favourite_categories: favourites });
+    await store.setState(`setup_offered:${chatId}`, 'done');
+  }
+
+  it('answers with what the person likes, and says what it hid', async () => {
+    await withTestStore(async (store) => {
+      await seedToday(store, [
+        ...[1, 2, 3, 4, 5].map((n) => onToday(`Відкритий мікрофон ${n}`, 'standup', { priceMin: 200 })),
+        onToday('Безкоштовна лекція про котиків', 'lecture', { free: true, sources: ['karabas', 'concert.ua'] }),
+      ]);
+      await withTaste(store, '3040', ['standup']);
+      const out = await say(store, '3040', '/today');
+      assert.ok(out.includes('Відкритий мікрофон 1'), out.slice(0, 400));
+      assert.ok(!out.includes('котиків'), 'a free lecture is not stand-up, however cheap');
+      assert.ok(out.includes('відфільтрував'), out.slice(-400));
+    });
+  });
+
+  it('pads a thin answer rather than looking broken, and admits it', async () => {
+    await withTestStore(async (store) => {
+      await seedToday(store, [
+        onToday('Відкритий мікрофон', 'standup', { priceMin: 200 }),
+        onToday('Вистава', 'theatre', { priceMin: 300 }),
+      ]);
+      await withTaste(store, '3041', ['standup']);
+      const out = await say(store, '3041', '/today');
+      assert.ok(out.includes('Вистава'), 'the next best came back');
+      assert.ok(out.includes('додав ще 1'), out.slice(-400));
+    });
+  });
+
   it('reopens the same taste screens from /settings, without touching the stage', async () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3027', city: 'kharkiv' });
@@ -1426,6 +1567,46 @@ describe('the heart', () => {
       await react(store, '3202', 778);
       const user = await getUser(store, '3202');
       assert.ok(user?.prefs.favourite_categories.includes('standup'), JSON.stringify(user?.prefs.favourite_categories));
+    });
+  });
+
+  it('counts every heart on the same category, not just the first', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3210', city: 'kharkiv' });
+      for (const [id, title] of [[801, 'Вечір імпровізації'], [802, 'Відкритий мікрофон'], [803, 'Стендап концерт']] as const) {
+        const item = makeItem({ city: 'kharkiv', title, url: `https://h/${id}`, source: 's', category: 'standup', startsAt: '2026-11-01T19:00:00+02:00' })!;
+        await store.recordMessage('3210', id, [item]);
+        await react(store, '3210', id);
+      }
+      const user = await getUser(store, '3210');
+      assert.equal(user?.prefs.taste['standup'], 3, JSON.stringify(user?.prefs.taste));
+      assert.deepEqual(user?.prefs.favourite_categories, ['standup'], 'and the list itself does not repeat');
+    });
+  });
+
+  it('follows whoever is on stage, when the ticket site said who', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3211', city: 'kharkiv' });
+      const named = makeItem({
+        city: 'kharkiv', title: 'Вечір імпровізації', url: 'https://h/810', source: 's',
+        category: 'standup', startsAt: '2026-11-01T19:00:00+02:00', performers: ['Паша Пінчук'],
+      })!;
+      await store.recordMessage('3211', 810, [named]);
+      const reply = await react(store, '3211', 810);
+      assert.ok(reply.includes('Паша Пінчук'), reply.slice(0, 400));
+      const user = await getUser(store, '3211');
+      assert.deepEqual(user?.prefs.follow, ['Паша Пінчук']);
+      // the tally survived the same save
+      assert.equal(user?.prefs.taste['standup'], 1);
+    });
+  });
+
+  it('does not invent a performer out of a show title', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3212', city: 'kharkiv' });
+      await store.recordMessage('3212', 811, [gig()]);
+      await react(store, '3212', 811);
+      assert.deepEqual((await getUser(store, '3212'))?.prefs.follow, []);
     });
   });
 

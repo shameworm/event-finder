@@ -14,13 +14,13 @@ cd ~/.hermes/skills/events-finder
 ## 0. Automated suite (start here)
 
 ```bash
-npm test          # 145 offline checks: parsing, classification, dedupe, ranking,
+npm test          # 159 offline checks: parsing, classification, dedupe, ranking,
                   # rendering, per-user store, users, fan-out, bot handlers
 npm run typecheck # tsc --noEmit
 ```
 
 Uses a temporary database and the committed example config, so it is safe at any
-time and needs no secrets. Expect `145/145 passed` and exit code 0.
+time and needs no secrets. Expect `159/159 passed` and exit code 0.
 
 Notable cases it covers, so you do not have to by hand: a city is scraped once
 and ranked per user; a muted user is skipped; an already-delivered item is not
@@ -29,9 +29,12 @@ a stored profile and clears the stage at the end; abandoning it after the city
 still leaves someone in the digest list; a digest goes out as a header plus one
 message per event; a ❤️ on an event message sets a reminder and teaches the
 taste model, and taking it off cancels the reminder; the Ukrainian preference
-phrasings ("люблю джаз", "не люблю класичну музику") are understood; `🔔 2`
-resolves to the second line of a digest; one user's "already sent" does not
-affect another's.
+phrasings ("люблю джаз", "не люблю класичну музику") are understood, in
+whatever word order ("додай до міст Київ" as well as "додай місто Київ"); `🔔 2`
+resolves to the second line of a digest; the reminder list groups by day and
+drops what has already started; an answer holds only what that person likes and
+pads a thin list rather than looking broken; a ❤️ counts every time and picks up
+the performer; one user's "already sent" does not affect another's.
 
 ## 1. Health check
 
@@ -106,14 +109,23 @@ conversation, `src/render.ts` for events), so that is where to look.
    подій») followed by **one message per event**. Check the dates read like
    «пт, 24 жовт. 19:00» and the price like «400–800 ₴».
 6. **Tap ❤️ on one of those event messages** → «⏰ Нагадування поставив — …» as
-   a reply to that message, plus «(додав … до улюбленого)» the first time.
+   a reply to that message, plus «(додав … до улюбленого)» the first time and
+   «стежу за «…»» when the ticket site named a performer. Heart two more of the
+   same kind, then `npx tsx scripts/prefs.ts --chat <your id>` → the ❤️ tally
+   has gone up, and the favourites list has not grown a duplicate.
+   Run `/weekend` again → the answer should now be mostly that category, with a
+   line saying how many events it filtered out.
 7. `npx tsx scripts/reminders.ts --list` → the reminder is there with your chat id.
+   `/reminders` in the chat → grouped by day («— сб, 24 жовт.»), an emoji and a
+   time per line, no raw `2026-10-24 21:00`, and nothing that already started.
 8. **Take the ❤️ off** → «Прибрав нагадування …» and `--list` no longer shows it.
    If nothing happens at all, the bot is not receiving reaction updates — see
    §Gotchas below.
 9. `люблю інді-рок` → «✅ Записав: улюблене + інді».
 10. `не люблю класичну музику` → «✅ Записав: небажане + класика».
 11. `максимум 700 грн` → «максимальна ціна квитка → 700 ₴».
+    `додай до міст Київ` → «міста на оці + Київ», **not** a search for Kyiv.
+    Try `додай Київ до міст` and `прибери Київ з міст` too — word order is free.
 12. `стендап на вихідних` → a search, not a preference change.
 13. `/settings` → a panel with a button per digest. Tap **Вихідні** → the
     same message redraws with ❌ and no new message appears; tap it again → ✅.
