@@ -62,8 +62,28 @@ function writeInbox(inbox: Inbox): void {
 
 /* --------------------------------------------------------------- queries --- */
 
-/** The web_search queries worth running for this request. */
-export function buildQueries(city: string, kind: Kind, opts: { from: string; to: string; like: string[]; interests: string[] }): string[] {
+/**
+ * The search that finds a tour announcement by name.
+ *
+ * No year in it on purpose: a follow window runs months ahead and can cross
+ * into the next one, and anything out of range is dropped on ingest anyway.
+ */
+export function followQuery(name: string, city: string): string {
+  return `${name} ${cityLocalName(city)} концерт тур квитки`;
+}
+
+/**
+ * The web_search queries worth running for this request.
+ *
+ * Followed acts come first and keep their slots: a tour announcement is the one
+ * thing a person actually wants chased, and it rarely turns up in a generic
+ * "афіша" search — it is announced by name, months ahead.
+ */
+export function buildQueries(
+  city: string,
+  kind: Kind,
+  opts: { from: string; to: string; like: string[]; interests: string[]; follow?: string[] },
+): string[] {
   const cfg = loadConfig();
   // Ukrainian listings are in Ukrainian, so search in Ukrainian
   const name = cityLocalName(city);
@@ -79,6 +99,7 @@ export function buildQueries(city: string, kind: Kind, opts: { from: string; to:
     return [...new Set([...configured, ...fromInterests, `нові заклади ${name} ${year} відкриття`])].slice(0, 8);
   }
 
+  const followed = (opts.follow ?? []).slice(0, 4).map((who) => followQuery(who, city));
   const tastes = [...new Set([...opts.like, ...opts.interests])].slice(0, 4);
   const base = [
     `афіша ${name} ${when} події`,
@@ -86,7 +107,10 @@ export function buildQueries(city: string, kind: Kind, opts: { from: string; to:
     `${name} лекція презентація анонс ${year}`,
     `${name} виставка відкриття ${year}`,
   ];
-  return [...base, ...tastes.map((t) => `${t} ${name} ${year} події`)].slice(0, 8);
+  return [...new Set([...followed, ...base, ...tastes.map((t) => `${t} ${name} ${year} події`)])].slice(
+    0,
+    8 + followed.length,
+  );
 }
 
 /* --------------------------------------------------------------- ingest --- */
@@ -199,7 +223,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const out = query.cities.map((city) => ({
       city,
       kind,
-      queries: buildQueries(city, kind, { from: query.from, to: query.to, like: query.like, interests: prefs.interests }),
+      queries: buildQueries(city, kind, {
+        from: query.from,
+        to: query.to,
+        like: query.like,
+        interests: prefs.interests,
+        follow: prefs.follow,
+      }),
     }));
     process.stdout.write(JSON.stringify(out, null, 2) + '\n');
   } else if (args.has('ingest')) {

@@ -1,27 +1,29 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# events-finder — DEFAULTS FOR NEW USERS
+# events-finder — THE OPERATOR'S OWN TASTE MODEL
 #
 #   cp preferences.example.yaml preferences.yaml
 #
-# This file is the taste model handed to someone the first time they send
-# /start to the bot. After that, each person's preferences live in the database
-# under their own Telegram chat id, and they change them by chatting
-# ("add stand-up to favourites", "I'm in Lviv next week") or with:
+# This file is *your* profile: the one the CLI uses (scripts/search.ts,
+# scripts/prefs.ts --defaults) when there is no chat id to look up.
+#
+# New bot users do NOT inherit any of it. Someone who sends /start starts from
+# an empty taste model and fills it in themselves, with buttons, through the
+# walkthrough — inheriting a stranger's favourites would rank them against
+# somebody else's taste. Only the home city and the currency are carried over,
+# and the walkthrough asks for the city anyway.
+#
+# Each person's live preferences then live in the database under their own
+# Telegram chat id. They change them with /setup, /settings, or by chatting
+# ("add stand-up to favourites", "I'm in Lviv next week") — or you can:
 #
 #   npx tsx scripts/prefs.ts --chat <id> "add jazz to favourites"
 #   npx tsx scripts/prefs.ts --list                 # who is registered
 #   npx tsx scripts/prefs.ts --defaults "..."       # edit THIS file
-#
-# Three fields are deliberately NOT inherited by new users, because they are
-# personal to whoever set this file up: `follow`, `watch_cities` and
-# `favourite_categories` — onboarding asks each person what they like and fills
-# their favourites in from their own answer.
 # ─────────────────────────────────────────────────────────────────────────────
 
 home_city: kharkiv
 
 # Extra cities to watch for follow alerts.
-# NOT copied to new users — they add their own with "watch Odesa".
 watch_cities:
   - kyiv
   - lviv
@@ -29,7 +31,7 @@ watch_cities:
 # Categories you like. Known keys:
 #   concert standup theatre exhibition lecture party festival workshop cinema kids sport
 #   cafe bar gallery spot
-# NOT copied to new users — the bot asks them directly. This list is the
+# NOT copied to new users — the walkthrough asks them directly. This list is the
 # operator's own taste, used by the CLI (scripts/search.ts) when no --chat is given.
 favourite_categories:
   - standup
@@ -41,9 +43,9 @@ disliked_categories:
   - classical
   - chanson
 
-# Artists, comedians, bands, theatres. A show by any of these triggers an
-# immediate alert from scripts/follows.ts, in any of that user's cities.
-# NOT copied to new users — each person builds their own with "follow <name>".
+# Artists, comedians, bands, theatres. These are searched for by name
+# (scripts/follows.ts --queries), beat every filter in the ranker, and trigger
+# an immediate alert in any of that user's cities.
 follow:
   - Курган і Agregat
   - Антон Тимошенко
@@ -70,3 +72,9 @@ interests:
   - contemporary art
 
 notes: []
+
+# Written by the bot, not by hand: how many ❤️ each tag has collected, which is
+# what makes a category someone keeps hearting outrank one they hearted once.
+# taste:
+#   standup: 7
+#   concert: 2

@@ -39,6 +39,7 @@ export interface PipelineOptions {
   maxPages?: number;
   keepDisliked?: boolean;
   keepExpensive?: boolean;
+  keepOffTaste?: boolean;
 }
 
 export interface PipelineResult extends Ranked {
@@ -82,6 +83,7 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
     prefs: opts.prefs,
     keepDisliked: opts.keepDisliked,
     keepExpensive: opts.keepExpensive,
+    keepOffTaste: opts.keepOffTaste,
     tz: cfg.timezone,
   });
 

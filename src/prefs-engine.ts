@@ -137,9 +137,20 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
       return ok(changed ? [`домашнє місто → ${cityLabel(city)}`] : [], changed ? undefined : 'це вже твоє домашнє місто');
     }
   }
-  const unwatch = t.match(
-    new RegExp(String.raw`${B}(?:unwatch|stop watching|не слідкуй за містом|не слідкуй за|прибери місто)\s*${CITY}${E}`, 'iu'),
-  );
+  // "додай до міст Київ", "додай Київ до міст", "add Kyiv to cities" — the watch
+  // list named as a list. People reach for every word order, and the one that
+  // was missing fell through to a search for Kyiv instead.
+  const CITY_LIST = String.raw`(?:міст\p{L}*|cit(?:y|ies)(?:\s+list)?)`;
+  const unwatch =
+    t.match(
+      new RegExp(String.raw`${B}(?:unwatch|stop watching|не слідкуй за містом|не слідкуй за|прибери місто)\s*${CITY}${E}`, 'iu'),
+    ) ??
+    t.match(
+      new RegExp(String.raw`${B}(?:remove|delete|прибери|видали|убери)\s+(?:(?:from|з|із)\s+)?${CITY_LIST}\s+${CITY}${E}`, 'iu'),
+    ) ??
+    t.match(
+      new RegExp(String.raw`${B}(?:remove|delete|прибери|видали|убери)\s+${CITY}\s+(?:from|з|із)\s+${CITY_LIST}${E}`, 'iu'),
+    );
   if (unwatch) {
     const city = resolveCity(unwatch[1] as string);
     if (city) {
@@ -147,9 +158,10 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
       return ok(changed ? [`міста на оці − ${cityLabel(city)}`] : [], changed ? undefined : 'за ним і не стежив');
     }
   }
-  const watch = t.match(
-    new RegExp(String.raw`${B}(?:watch|also watch|слідкуй за містом|слідкуй за|додай місто)\s*${CITY}${E}`, 'iu'),
-  );
+  const watch =
+    t.match(new RegExp(String.raw`${B}(?:watch|also watch|слідкуй за містом|слідкуй за|додай місто)\s*${CITY}${E}`, 'iu')) ??
+    t.match(new RegExp(String.raw`${B}(?:add|додай|додати)\s+(?:(?:to|до|в)\s+)?${CITY_LIST}\s+${CITY}${E}`, 'iu')) ??
+    t.match(new RegExp(String.raw`${B}(?:add|додай|додати)\s+${CITY}\s+(?:to|до|в)\s+${CITY_LIST}${E}`, 'iu'));
   if (watch) {
     const city = resolveCity(watch[1] as string);
     if (city) {
@@ -255,7 +267,7 @@ export function describePrefs(prefs: Preferences): string {
 }
 
 /**
- * The onboarding answer to "що тобі подобається?".
+ * A bare list of tastes, as typed at the walkthrough's "Що тобі заходить?".
  *
  * applyPrefsCommand needs a verb — "люблю джаз" — but a person who was just
  * asked what they like answers with a bare list: "стендап, джаз, театр". The
@@ -263,8 +275,10 @@ export function describePrefs(prefs: Preferences): string {
  * is either a genre we recognise or short enough to be a taste word rather
  * than a sentence.
  *
- * The answer *replaces* the favourites rather than adding to them: we asked, so
- * what they said is the whole answer, not an addition to somebody else's.
+ * The edit it returns *replaces* the favourites rather than adding to them: we
+ * asked, so what they said is the whole answer, not an addition to somebody
+ * else's. The likes screen then merges that over whatever is already ticked,
+ * because there the taps are answers too.
  */
 export function favouritesFromList(text: string, current: Preferences): PrefsEdit {
   const prefs = PreferencesSchema.parse(JSON.parse(JSON.stringify(current)));

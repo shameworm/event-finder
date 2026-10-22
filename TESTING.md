@@ -14,21 +14,27 @@ cd ~/.hermes/skills/events-finder
 ## 0. Automated suite (start here)
 
 ```bash
-npm test          # 87 offline checks: parsing, classification, dedupe, ranking,
+npm test          # 159 offline checks: parsing, classification, dedupe, ranking,
                   # rendering, per-user store, users, fan-out, bot handlers
 npm run typecheck # tsc --noEmit
 ```
 
 Uses a temporary database and the committed example config, so it is safe at any
-time and needs no secrets. Expect `124/124 passed` and exit code 0.
+time and needs no secrets. Expect `159/159 passed` and exit code 0.
 
 Notable cases it covers, so you do not have to by hand: a city is scraped once
 and ranked per user; a muted user is skipped; an already-delivered item is not
-repeated; onboarding walks city → taste → done; a digest goes out as a header
-plus one message per event; a ❤️ on an event message sets a reminder and teaches
-the taste model, and taking it off cancels the reminder; the Ukrainian
-preference phrasings ("люблю джаз", "не люблю класичну музику") are understood;
-one user's "already sent" does not affect another's.
+repeated; a new user inherits no taste at all; the walkthrough turns taps into
+a stored profile and clears the stage at the end; abandoning it after the city
+still leaves someone in the digest list; a digest goes out as a header plus one
+message per event; a ❤️ on an event message sets a reminder and teaches the
+taste model, and taking it off cancels the reminder; the Ukrainian preference
+phrasings ("люблю джаз", "не люблю класичну музику") are understood, in
+whatever word order ("додай до міст Київ" as well as "додай місто Київ"); `🔔 2`
+resolves to the second line of a digest; the reminder list groups by day and
+drops what has already started; an answer holds only what that person likes and
+pads a thin list rather than looking broken; a ❤️ counts every time and picks up
+the performer; one user's "already sent" does not affect another's.
 
 ## 1. Health check
 
@@ -86,11 +92,16 @@ copy sits next to the code that sends it (`src/bot-handlers.ts` for the
 conversation, `src/render.ts` for events), so that is where to look.
 
 1. `/start` → a greeting and a city keyboard. Pick a city → it confirms, then
-   asks «А тепер — що тобі подобається?».
-2. Answer `стендап, джаз, виставки` → «✅ Записав: улюблене + стендап …», the
-   help text and quick-action buttons. (`Пропустити` should also get you out of
-   this step.)
-3. `/prefs` → улюблене lists стендап, джаз, виставки — in Ukrainian, not
+   the walkthrough carries on by itself: tap two categories → **Далі →** →
+   dislikes → **Далі →** → a budget → the follow step → type
+   `Антон Тимошенко, Latexfauna` → **Готово ✅** → a summary of exactly what you
+   tapped, and nothing you did not. (Typing works at every screen too:
+   `стендап, джаз` at the first one adds favourites without losing your taps,
+   and `пропустити` moves on.)
+2. `npx tsx scripts/prefs.ts --chat <your id>` → agrees with that summary, and
+   shows no favourites you never chose. Then `/setup` → the same screens again,
+   pre-ticked.
+3. `/prefs` → улюблене lists what you tapped — in Ukrainian, not
    `standup, jazz`.
 4. Type `/` → Telegram autocompletes the command list, and the ☰ button next
    to the text field shows the same menu.
@@ -98,19 +109,30 @@ conversation, `src/render.ts` for events), so that is where to look.
    подій») followed by **one message per event**. Check the dates read like
    «пт, 24 жовт. 19:00» and the price like «400–800 ₴».
 6. **Tap ❤️ on one of those event messages** → «⏰ Нагадування поставив — …» as
-   a reply to that message, plus «(додав … до улюбленого)» the first time.
+   a reply to that message, plus «(додав … до улюбленого)» the first time and
+   «стежу за «…»» when the ticket site named a performer. Heart two more of the
+   same kind, then `npx tsx scripts/prefs.ts --chat <your id>` → the ❤️ tally
+   has gone up, and the favourites list has not grown a duplicate.
+   Run `/weekend` again → the answer should now be mostly that category, with a
+   line saying how many events it filtered out.
 7. `npx tsx scripts/reminders.ts --list` → the reminder is there with your chat id.
+   `/reminders` in the chat → grouped by day («— сб, 24 жовт.»), an emoji and a
+   time per line, no raw `2026-10-24 21:00`, and nothing that already started.
 8. **Take the ❤️ off** → «Прибрав нагадування …» and `--list` no longer shows it.
    If nothing happens at all, the bot is not receiving reaction updates — see
    §Gotchas below.
 9. `люблю інді-рок` → «✅ Записав: улюблене + інді».
 10. `не люблю класичну музику` → «✅ Записав: небажане + класика».
 11. `максимум 700 грн` → «максимальна ціна квитка → 700 ₴».
+    `додай до міст Київ` → «міста на оці + Київ», **not** a search for Kyiv.
+    Try `додай Київ до міст` and `прибери Київ з міст` too — word order is free.
 12. `стендап на вихідних` → a search, not a preference change.
 13. `/settings` → a panel with a button per digest. Tap **Вихідні** → the
     same message redraws with ❌ and no new message appears; tap it again → ✅.
 14. In the panel: **Змінити місто** → city buttons → pick one → back to the
-    panel with the new city. **Мої смаки** → the preference summary with ⬅️ Назад.
+    panel with the new city. **🎛 Мої смаки** → the summary plus a button per
+    screen; open **💸 Бюджет**, change it, and ⬅️ Назад returns to the summary
+    rather than marching you through a walkthrough.
 15. `/mute weekend`, then `/settings` → the panel shows the weekend flag ❌ too.
 16. `/city` → keyboard; pick another city; `/today` → events from the new city.
 17. `покажи налаштування` → the panel, not a twenty-second search.
@@ -133,7 +155,20 @@ when one message covered a whole list: that gets «Тапни ❤️ на сам
 
 Then **as a second person** (another Telegram account, or a friend): `/start`,
 pick a different city, set a different taste. Both of you should now be in
-`npx tsx scripts/prefs.ts --list`.
+`npx tsx scripts/prefs.ts --list` — with different profiles, neither of them
+yours.
+
+### Followed acts are searched for by name
+
+```bash
+npx tsx scripts/follows.ts --queries --chat <your id>
+```
+
+Expect one entry per city you care about, listing a query per name on your
+follow list (`Антон Тимошенко Харків концерт тур квитки`). Run them with
+web_search, ingest with `npx tsx scripts/websearch.ts --ingest -`, then
+`npx tsx scripts/follows.ts --dry-run --chat <your id>` — anything found should
+come through even if its ticket costs more than your limit.
 
 ### Multi-user behaviour — the thing that matters
 

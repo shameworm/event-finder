@@ -67,6 +67,13 @@ const GENRE_LABEL: Record<string, string> = {
   poetry: 'поезія',
 };
 
+/**
+ * The genres offered as buttons on the "what should I never show you?" screen —
+ * the handful people actually want gone. Keys, so `tagLabel` stays the one
+ * place Ukrainian labels live.
+ */
+export const DISLIKE_SUGGESTIONS: string[] = ['classical', 'opera', 'ballet', 'chanson', 'karaoke', 'tribute'];
+
 /** A tag as a person should read it: a known key in Ukrainian, else as typed. */
 export function tagLabel(tag: string): string {
   return CATEGORY_LABEL[tag as Category] ?? GENRE_LABEL[tag] ?? tag;
@@ -230,6 +237,24 @@ export function classify(text: string): Category | null {
 }
 
 /** Map a user-written word ("stand-up", "класика") to a category, if it is one. */
+/**
+ * The category a tag *names*, as opposed to one it merely hints at.
+ *
+ * `categoryFromWord` answers "which category does this word belong to", so it
+ * maps "інді" to `concert` — every rock gig is a concert. That is right for
+ * classifying a scraped title and wrong for taste: someone who likes indie did
+ * not ask for every concert in town. Only a category key or its Ukrainian
+ * label counts here; genres fall through to a text match.
+ */
+export function categoryKeyOf(tag: string): Category | null {
+  const n = normText(tag);
+  if (!n) return null;
+  for (const cat of CLASSIFY_ORDER) {
+    if (cat === n || normText(CATEGORY_LABEL[cat]) === n) return cat;
+  }
+  return null;
+}
+
 export function categoryFromWord(word: string): Category | null {
   const n = normText(word);
   if (!n) return null;
@@ -266,7 +291,15 @@ export const TAG_SYNONYMS: Record<string, string[]> = {
   poetry: ['poetry', 'поезія', 'поэзия', 'вірші'],
 };
 
-/** Expand a taste tag into every spelling worth matching. */
+/**
+ * Expand a taste tag into every spelling worth matching.
+ *
+ * A tag that names a category brings that category's whole keyword list with
+ * it, which is how "standup" finds a show called «Відкритий мікрофон». A genre
+ * gets its own synonyms and nothing else: pulling in the keywords of the
+ * category it belongs to turned "indie" into "музика", "концерт", "джаз" — and
+ * then an indie fan was told a classical symphony matched their taste.
+ */
 export function expandTag(tag: string): string[] {
   const n = normText(tag);
   const out = new Set<string>([n]);
@@ -274,7 +307,7 @@ export function expandTag(tag: string): string[] {
     const all = [key, ...syns].map(normText);
     if (all.includes(n)) for (const s of all) out.add(s);
   }
-  const cat = categoryFromWord(tag);
+  const cat = categoryKeyOf(tag);
   if (cat) for (const kw of KEYWORDS[cat]) out.add(normText(kw));
   out.delete('');
   return [...out];

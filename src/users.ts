@@ -2,8 +2,9 @@
  * The bridge between a Telegram chat and a taste model.
  *
  * In the multi-user bot each person's Preferences live in the `users` table as
- * JSON; `preferences.yaml` is only the starting point handed to someone who has
- * just typed /start.
+ * JSON. A new user starts from an empty taste model (`newUserPrefs`) and fills
+ * it in through the /start walkthrough; `preferences.yaml` belongs to whoever
+ * runs the bot and is only used by the CLI.
  */
 import { PreferencesSchema, formatZodError, type Preferences } from './types.ts';
 import { loadConfig, loadPrefs, resolveCity } from './config.ts';
@@ -30,7 +31,25 @@ export function isOwner(chatId: string): boolean {
   return Boolean(owner && owner === chatId);
 }
 
-/** Defaults for a brand new user: preferences.yaml, with their city applied. */
+/**
+ * The taste model a brand new user starts with: nothing.
+ *
+ * `preferences.yaml` is the operator's own profile, not a template for
+ * strangers — inheriting it would rank everyone against someone else's taste.
+ * The /start walkthrough is where a new person's favourites, dislikes, budget
+ * and follow list actually come from; only the city and the currency are
+ * carried over, and the walkthrough asks for the city anyway.
+ */
+export function newUserPrefs(city?: string): Preferences {
+  const cfg = loadConfig();
+  const seed = loadPrefs();
+  return PreferencesSchema.parse({
+    home_city: (city && resolveCity(city)) || seed.home_city || cfg.default_city,
+    currency: seed.currency,
+  });
+}
+
+/** The operator's own preferences: preferences.yaml, with their city applied. */
 export function defaultPrefs(city?: string): Preferences {
   const cfg = loadConfig();
   const seed = loadPrefs();
@@ -38,11 +57,8 @@ export function defaultPrefs(city?: string): Preferences {
   return PreferencesSchema.parse({
     ...seed,
     home_city: home,
-    // the seed file's follow list belongs to the operator, not to new users —
-    // and neither do their favourites, because onboarding now asks the person
-    // what they like and fills this in from their own answer
+    // the seed file's follow list belongs to the operator, not to new users
     follow: [],
-    favourite_categories: [],
     trip: null,
     watch_cities: [],
   });
@@ -53,13 +69,13 @@ function parsePrefs(json: string, city: string, log?: Logger): Preferences {
   try {
     raw = JSON.parse(json);
   } catch {
-    log?.warn('stored preferences are not valid JSON — falling back to defaults');
-    return defaultPrefs(city);
+    log?.warn('stored preferences are not valid JSON — starting their taste model over');
+    return newUserPrefs(city);
   }
   const parsed = PreferencesSchema.safeParse(raw);
   if (!parsed.success) {
-    log?.warn(`stored preferences are invalid (${formatZodError(parsed.error, 2)}) — falling back to defaults`);
-    return defaultPrefs(city);
+    log?.warn(`stored preferences are invalid (${formatZodError(parsed.error, 2)}) — starting their taste model over`);
+    return newUserPrefs(city);
   }
   // the users table is the source of truth for the city
   return { ...parsed.data, home_city: city };
@@ -97,7 +113,7 @@ export async function registerUser(
   }
 
   const city = (input.city && resolveCity(input.city)) || loadConfig().default_city;
-  const prefs = defaultPrefs(city);
+  const prefs = newUserPrefs(city);
   const row = await store.ensureUser({
     chatId: input.chatId,
     city,

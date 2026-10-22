@@ -51,21 +51,37 @@ npx tsx scripts/bot.ts --dry-run   # print replies instead of sending
 check nothing is already running (`pgrep -fl "scripts/bot.ts"`). In production it
 belongs under a supervisor — see the README.
 
-What users can send it: `/start` (onboarding asks for their city), `/week`,
-`/weekend`, `/today`, `/tomorrow`, `/places`, `/city`, `/prefs`, `/settings`,
-`/mute week|weekend|follows|places`, `/unmute`, `/reminders`, `/follow X`,
-`/unfollow X`, `/stop`, `/help`, and `/stats` (owner only). Anything else is
-treated as a preference change if it reads like one, otherwise as a search.
-
-Onboarding is two steps: city, then "що тобі подобається?" (skippable). The
-answer is what fills `favourite_categories` — new users do **not** inherit the
-operator's favourites from `preferences.yaml`, only the dislikes, budget and
-interests.
+What users can send it: `/start` (the walkthrough — see below), `/week`,
+`/weekend`, `/today`, `/tomorrow`, `/places`, `/city`, `/prefs`, `/setup`,
+`/settings`, `/mute week|weekend|follows|places`, `/unmute`, `/reminders`,
+`/follow X`, `/unfollow X`, `/stop`, `/help`, and `/stats` (owner only).
+Anything else is treated as a preference change if it reads like one, otherwise
+as a search.
 
 Requests may be written in Ukrainian, Russian or English — that was always true
 of the parser and is unchanged.
 
-Most of this is also reachable without typing. The bot publishes `BOT_COMMANDS`
+**Nobody inherits anybody's taste.** `/start` runs a five-step walkthrough —
+city, liked categories, dislikes, budget, follow list — and a new user's profile
+is whatever they tapped, starting from empty. The step lives in `users.stage`
+(`city → likes → dislikes → budget → follow → NULL`); every screen renders its
+ticks from the stored preferences, so `/setup` and `/settings → 🎛 Мої смаки`
+reopen the same screens later to change one thing. Only `stage = 'city'` holds
+someone back from the scheduled jobs: walking away at "what's your budget?"
+costs them nothing. `preferences.yaml` is the operator's own profile and the
+CLI's defaults — never a template for strangers.
+
+Users who registered before the walkthrough existed are offered it once, with a
+button; declining is remembered in the `state` table under
+`setup_offered:<chat id>`.
+
+Typing still works at every screen and never falls through to a search: a
+sentence («не люблю класику») goes through the usual parser, a bare list
+(«стендап, джаз») is read as favourites and added to whatever is already ticked,
+a name at the follow step is a name, and «пропустити» moves on. Anyone left on
+the earlier one-question `taste` stage is treated as being on the first screen.
+
+Most of that is also reachable without typing. The bot publishes `BOT_COMMANDS`
 with `setMyCommands` on start-up, so Telegram autocompletes `/` and fills the ☰
 menu; `/start` and `/help` carry quick-action buttons; and `/settings` is a
 panel of inline buttons that toggles each digest, changes the city and shows the
@@ -131,6 +147,7 @@ Hermes has no HTTP search API, so this source borrows your `web_search` tool:
 ```bash
 # 1. ask what to search for — one entry per city that has users
 npx tsx scripts/places.ts --queries
+npx tsx scripts/follows.ts --queries                  # the names people follow
 npx tsx scripts/websearch.ts --queries --city kharkiv --kind place
 
 # 2. run those queries with your own web_search tool
@@ -153,6 +170,7 @@ date are dropped.
 npx tsx scripts/digest.ts --week                # Monday 09:00 — this week, per user's city
 npx tsx scripts/digest.ts --weekend --top 5     # Thursday 18:00 — weekend picks
 npx tsx scripts/follows.ts                      # every 6h — new shows by people they follow
+npx tsx scripts/follows.ts --queries            #   …run these first: tours are announced by name
 npx tsx scripts/places.ts                       # weekly — places to try
 npx tsx scripts/reminders.ts                    # every 15min — fire due ❤️ reminders
 ```
@@ -173,9 +191,15 @@ npx tsx scripts/prefs.ts --chat 123456789 "follow Latexfauna"
 npx tsx scripts/prefs.ts --defaults "add jazz to favourites"  # defaults for NEW users
 ```
 
-`preferences.yaml` is only the starting point for new users; live preferences
-live in the database per chat id. `follow` and `watch_cities` are never copied
-from the defaults — they are personal.
+One-off cleanup for a bot that ran before the walkthrough existed:
+`npx tsx scripts/disinherit.ts` (dry run; `--yes` to write) removes from every
+user the favourites, dislikes and interests that are identical to the seed file
+— the ones they were handed rather than chose. It leaves the ❤️ tally and the
+price cap alone.
+
+`preferences.yaml` is the operator's own profile and what the CLI falls back to;
+it is not handed to new users, who build their own through the walkthrough. Live
+preferences live in the database per chat id.
 
 **Be careful with other people's data.** Only inspect or change a specific
 user's preferences when the user you are talking to is asking about their own
@@ -199,11 +223,35 @@ Work down this list:
 
 ## How ranking works
 
-Request-level likes count most, then favourites, then interests. A followed
-performer adds a large boost **and** bypasses both the dislike filter and the
-budget cap. Disliked tags and over-budget items are dropped by default
+**An answer only contains what that person likes.** Taste is a filter, not a
+nudge: everything matching nothing in their profile is dropped and counted, and
+the bot says how many it hid. Scoring alone was not enough — a free event on two
+ticket sites outscored a category somebody had chosen by hand, so the taste
+model was invisible and looked broken.
+
+What counts as "their thing": the tags of the request if they asked for
+something specific (`стендап на вихідних` means stand-up, not everything they
+have ever liked), otherwise their favourites and interests. A followed performer
+always counts.
+
+When fewer than `bot.taste_floor` (default 5) of their things are on, the next
+best are added back rather than sending an almost empty list — `Ranked.toppedUp`
+says how many, and the message admits it. An empty profile filters nothing, and
+neither does the shared city cache (`keepOffTaste`), which is written once for
+everybody and ranked per person afterwards.
+
+Inside what survives: request-level likes count most, then favourites, then
+interests. Each ❤️ on a tag adds one more point to it (`prefs.taste`, capped at
+five), so a category someone keeps hearting beats one they hearted once. A
+followed performer adds a large boost **and** bypasses both the dislike filter
+and the budget cap. Disliked tags and over-budget items are dropped
 (`--include-disliked`, `--include-expensive`, `--explain`). Sold-out, cancelled
 and postponed events are kept but marked and pushed down.
+
+**A genre is not its category.** `matchesTag`/`expandTag` only treat a tag as a
+category when it *names* one. "indie" lives in the concert keyword list, so
+borrowing that category made one indie interest match every gig in town — and
+report "indie" as the reason for a classical symphony.
 
 ## Already-sent memory
 
@@ -219,8 +267,14 @@ A user taps ❤️ on an event message (or types `нагадай`);
 before the start. Reminders belong to a chat, so `--cancel` needs `--chat` too.
 
 Taking the ❤️ off cancels the reminder; the taste it taught is kept. A heart
-also adds the event's category to that person's favourites, which is why the
-model improves without anyone typing anything.
+does three things at once, in one save, which is why the model improves without
+anyone typing anything:
+
+- the event's category joins their favourites (a place joins their interests)
+- `prefs.taste[tag]` goes up — **every** heart, not just the first
+- whoever is on stage joins their follow list, when the ticket site filled in a
+  performer. A show title is never used as a name: «Вечір імпровізації» is
+  nobody.
 
 Reactions only arrive because `getUpdates` asks for `message_reaction`
 (`src/telegram-api.ts`). If reminders stop appearing while replies still work,

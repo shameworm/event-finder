@@ -82,6 +82,12 @@ export const ConfigSchema = z.object({
       message_delay_ms: z.number().int().nonnegative().default(400),
       /** Pages per source for on-demand searches — keep it small, people are waiting. */
       interactive_pages: z.number().int().positive().default(2),
+      /**
+       * Answers are filtered to what each person likes. When fewer than this
+       * many of their things are on, the next best are let back in rather than
+       * sending someone an almost empty list.
+       */
+      taste_floor: z.number().int().nonnegative().default(5),
     })
     .prefault({}),
   cache: z
