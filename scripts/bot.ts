@@ -2,6 +2,10 @@
 /**
  * The bot service: one Telegram bot that anybody can use.
  *
+ * It handles both messages and ❤️ reactions — a reaction on an event message
+ * is what sets a reminder, so `getUpdates` asks Telegram for `message_reaction`
+ * as well (see src/telegram-api.ts).
+ *
  *   npx tsx scripts/bot.ts                 # long-poll until stopped (the normal way to run it)
  *   npx tsx scripts/bot.ts --once          # drain whatever is waiting, then exit (cron mode)
  *   npx tsx scripts/bot.ts --dry-run       # print replies instead of sending them
@@ -19,7 +23,7 @@ import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore, type Store } from '../src/db.ts';
 import { botToken, getMe, getUpdates } from '../src/telegram-api.ts';
-import { handleMessage, type HandlerContext } from '../src/bot-handlers.ts';
+import { handleMessage, handleReaction, type HandlerContext } from '../src/bot-handlers.ts';
 import { sleep } from '../src/util.ts';
 
 const args = parseArgs();
@@ -41,15 +45,20 @@ async function drain(store: Store, timeout: number): Promise<number> {
 
   for (const update of updates) {
     const msg = update.message ?? update.edited_message;
-    if (msg) {
+    const reaction = update.message_reaction;
+    const chat = msg?.chat.id ?? reaction?.chat.id;
+    if (msg || reaction) {
       const started = Date.now();
       try {
-        await handleMessage(ctx, msg);
-        log.info(`handled update ${update.update_id} from chat ${msg.chat.id} in ${Date.now() - started}ms`);
+        // a ❤️ on an event message is how people set reminders, so reactions
+        // are first-class updates here, not a side channel
+        if (msg) await handleMessage(ctx, msg);
+        else if (reaction) await handleReaction(ctx, reaction);
+        log.info(`handled update ${update.update_id} from chat ${chat} in ${Date.now() - started}ms`);
       } catch (err) {
         // one user's bad message must never take the bot down
         log.error(
-          `update ${update.update_id} from chat ${msg.chat.id} failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
+          `update ${update.update_id} from chat ${chat} failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
         );
       }
     }
