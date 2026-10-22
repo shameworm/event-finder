@@ -6,7 +6,7 @@ import type { Logger } from './log.ts';
 import { TgMessageSchema, TgResponseSchema, TgUpdateSchema, type TgMessage, type TgUpdate } from './schemas.ts';
 import { formatZodError } from './types.ts';
 
-export type { TgMessage, TgUpdate } from './schemas.ts';
+export type { TgMessage, TgUpdate, TgCallbackQuery } from './schemas.ts';
 
 /**
  * Telegram Bot API over plain fetch — used for *sending* digests, alerts and
@@ -74,6 +74,9 @@ export class TelegramError extends Error {
   }
 }
 
+/** A button under a message: either it calls back into the bot, or it opens a link. */
+export type InlineButton = { text: string; callback_data: string } | { text: string; url: string };
+
 export interface SendOptions {
   chatId?: string;
   dryRun?: boolean;
@@ -83,6 +86,27 @@ export interface SendOptions {
   /** Reply keyboard rows, e.g. [[{ text: 'Kharkiv' }], [{ text: 'Kyiv' }]]. */
   keyboard?: { text: string }[][];
   removeKeyboard?: boolean;
+  /** Inline button rows, attached to the last chunk of a long message. */
+  inlineKeyboard?: InlineButton[][];
+}
+
+/**
+ * Telegram accepts exactly one reply_markup. An inline keyboard belongs to the
+ * last chunk of a split message, so the buttons end up under the final card.
+ */
+function replyMarkup(opts: SendOptions, last: boolean): Record<string, unknown> {
+  if (opts.keyboard) return { reply_markup: { keyboard: opts.keyboard, resize_keyboard: true, one_time_keyboard: true } };
+  if (opts.removeKeyboard) return { reply_markup: { remove_keyboard: true } };
+  if (opts.inlineKeyboard && last) return { reply_markup: { inline_keyboard: opts.inlineKeyboard } };
+  return {};
+}
+
+/** Dry-run rendering: buttons are part of the answer, so print them too. */
+function printButtons(rows: InlineButton[][] | undefined): void {
+  if (!rows?.length) return;
+  for (const row of rows) {
+    process.stdout.write(`[ ${row.map((b) => ('url' in b ? `${b.text} → ${b.url}` : `${b.text} (${b.callback_data})`)).join(' | ')} ]\n`);
+  }
 }
 
 /**
@@ -99,10 +123,12 @@ export async function sendMessage(text: string, opts: SendOptions = {}): Promise
     // one after another, and they are separate private chats, not one thread
     if (chatId) process.stdout.write(`\n──────── to chat ${chatId} ────────\n`);
     process.stdout.write(text + '\n');
+    printButtons(opts.inlineKeyboard);
     return [];
   }
   const ids: number[] = [];
-  for (const chunk of splitForTelegram(text)) {
+  const chunks = splitForTelegram(text);
+  for (const [i, chunk] of chunks.entries()) {
     const body = {
       chat_id: chatId,
       text: chunk,
@@ -110,8 +136,7 @@ export async function sendMessage(text: string, opts: SendOptions = {}): Promise
       disable_web_page_preview: cfg.telegram.disable_preview,
       disable_notification: opts.silent ?? false,
       ...(opts.replyTo ? { reply_to_message_id: opts.replyTo } : {}),
-      ...(opts.keyboard ? { reply_markup: { keyboard: opts.keyboard, resize_keyboard: true, one_time_keyboard: true } } : {}),
-      ...(opts.removeKeyboard ? { reply_markup: { remove_keyboard: true } } : {}),
+      ...replyMarkup(opts, i === chunks.length - 1),
     };
     let msg;
     try {
@@ -148,9 +173,77 @@ export function splitForTelegram(text: string, limit = 3800): string[] {
   return out;
 }
 
+/**
+ * Rewrite a message that is already in the chat — how a settings panel changes
+ * in place when somebody taps one of its buttons instead of piling up replies.
+ */
+export async function editMessageText(
+  text: string,
+  opts: { chatId: string; messageId: number; inlineKeyboard?: InlineButton[][]; dryRun?: boolean; log?: Logger },
+): Promise<void> {
+  if (opts.dryRun) {
+    process.stdout.write(`\n──────── edit ${opts.messageId} in chat ${opts.chatId} ────────\n${text}\n`);
+    printButtons(opts.inlineKeyboard);
+    return;
+  }
+  const cfg = loadConfig();
+  try {
+    await call(
+      'editMessageText',
+      {
+        chat_id: opts.chatId,
+        message_id: opts.messageId,
+        text,
+        parse_mode: cfg.telegram.parse_mode,
+        disable_web_page_preview: cfg.telegram.disable_preview,
+        ...(opts.inlineKeyboard ? { reply_markup: { inline_keyboard: opts.inlineKeyboard } } : {}),
+      },
+      TgMessageSchema,
+    );
+  } catch (err) {
+    // tapping a toggle twice in a row produces identical text; Telegram calls
+    // that an error, we call it nothing happened
+    if (err instanceof TelegramError && (err.description ?? '').includes('message is not modified')) return;
+    throw err;
+  }
+}
+
+/**
+ * Stop the spinner on a tapped button. Telegram expects this within seconds,
+ * and a failure here must never sink the work the tap asked for.
+ */
+export async function answerCallbackQuery(
+  id: string,
+  opts: { text?: string; dryRun?: boolean; log?: Logger } = {},
+): Promise<void> {
+  if (opts.dryRun) return;
+  try {
+    await call('answerCallbackQuery', { callback_query_id: id, ...(opts.text ? { text: opts.text } : {}) }, z.boolean());
+  } catch (err) {
+    opts.log?.debug(`answerCallbackQuery failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * Publish the command list, which is what makes Telegram autocomplete "/" and
+ * fill the ☰ menu button. Idempotent, so the bot re-sends it on every start.
+ */
+export async function setMyCommands(commands: { command: string; description: string }[]): Promise<void> {
+  await call('setMyCommands', { commands }, z.boolean());
+}
+
+/** What Telegram currently has on file, for `scripts/doctor.ts`. */
+export async function getMyCommands(): Promise<{ command: string; description: string }[]> {
+  return call('getMyCommands', {}, z.array(z.object({ command: z.string(), description: z.string() }).loose()));
+}
+
 /** Long-poll new updates; the caller stores the offset (see scripts/bot.ts). */
 export async function getUpdates(offset: number, timeout = 0): Promise<TgUpdate[]> {
-  return call('getUpdates', { offset, timeout, allowed_updates: ['message', 'edited_message'] }, z.array(TgUpdateSchema));
+  return call(
+    'getUpdates',
+    { offset, timeout, allowed_updates: ['message', 'edited_message', 'callback_query'] },
+    z.array(TgUpdateSchema),
+  );
 }
 
 export async function getMe(): Promise<{ id: number; username?: string; first_name?: string }> {
