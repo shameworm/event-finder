@@ -69,8 +69,8 @@ try {
   bad(`config: ${err instanceof Error ? err.message : String(err)}`);
 }
 
-/* --- defaults for new users -------------------------------------------- */
-section('defaults for new users (preferences.yaml)');
+/* --- the operator's own profile ---------------------------------------- */
+section("the operator's own profile (preferences.yaml — the CLI's defaults)");
 try {
   const prefs = loadPrefs((m) => warn(m));
   const which = prefsSource();

@@ -16,8 +16,9 @@
  * Telegram chat id — this CLI is the same engine the bot uses, aimed at one
  * chat (yours by default, from TELEGRAM_CHAT_ID).
  *
- *   --defaults   edit preferences.yaml instead: the starting point handed to
- *                new users when they type /start
+ *   --defaults   edit preferences.yaml instead: the operator's own profile,
+ *                used by the CLI. Bot users do not inherit it — they build
+ *                their own through the /start walkthrough.
  */
 import { cityLabel, loadPrefs, prefsFile, savePrefs } from '../src/config.ts';
 import { makeLogger } from '../src/log.ts';
@@ -35,11 +36,11 @@ const HINTS =
   `  add stand-up to favourites\n  remove theatre from favourites\n  I don't like classical music\n` +
   `  follow Latexfauna\n  unfollow Latexfauna\n  max price 800\n  watch Odesa\n  I'm in Lviv next week\n`;
 
-/* --- editing the defaults for new users (preferences.yaml) -------------- */
+/* --- editing the operator's own profile (preferences.yaml) -------------- */
 if (args.has('defaults')) {
   const current = loadPrefs((m) => log.warn(m));
   if (!text) {
-    process.stdout.write(`defaults for new users (${prefsFile()}):\n\n${describePrefs(current)}\n`);
+    process.stdout.write(`CLI defaults (${prefsFile()}):\n\n${describePrefs(current)}\n`);
     process.exit(0);
   }
   const edit = applyPrefsCommand(text, current);
@@ -82,7 +83,7 @@ await withStore(async (store) => {
   if (!chatId) {
     process.stderr.write(
       'No chat id: set TELEGRAM_CHAT_ID in ~/.hermes/.env, or pass --chat <id>.\n' +
-        'To edit the defaults handed to new users instead: --defaults\n',
+        'To edit the CLI defaults in preferences.yaml instead: --defaults\n',
     );
     process.exitCode = 1;
     return;

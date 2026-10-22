@@ -2,8 +2,9 @@
  * The bridge between a Telegram chat and a taste model.
  *
  * In the multi-user bot each person's Preferences live in the `users` table as
- * JSON; `preferences.yaml` is only the starting point handed to someone who has
- * just typed /start.
+ * JSON. A new user starts from an empty taste model (`newUserPrefs`) and fills
+ * it in through the /start walkthrough; `preferences.yaml` belongs to whoever
+ * runs the bot and is only used by the CLI.
  */
 import { PreferencesSchema, formatZodError, type Preferences } from './types.ts';
 import { loadConfig, loadPrefs, resolveCity } from './config.ts';
@@ -30,7 +31,25 @@ export function isOwner(chatId: string): boolean {
   return Boolean(owner && owner === chatId);
 }
 
-/** Defaults for a brand new user: preferences.yaml, with their city applied. */
+/**
+ * The taste model a brand new user starts with: nothing.
+ *
+ * `preferences.yaml` is the operator's own profile, not a template for
+ * strangers — inheriting it would rank everyone against someone else's taste.
+ * The /start walkthrough is where a new person's favourites, dislikes, budget
+ * and follow list actually come from; only the city and the currency are
+ * carried over, and the walkthrough asks for the city anyway.
+ */
+export function newUserPrefs(city?: string): Preferences {
+  const cfg = loadConfig();
+  const seed = loadPrefs();
+  return PreferencesSchema.parse({
+    home_city: (city && resolveCity(city)) || seed.home_city || cfg.default_city,
+    currency: seed.currency,
+  });
+}
+
+/** The operator's own preferences: preferences.yaml, with their city applied. */
 export function defaultPrefs(city?: string): Preferences {
   const cfg = loadConfig();
   const seed = loadPrefs();
@@ -94,7 +113,7 @@ export async function registerUser(
   }
 
   const city = (input.city && resolveCity(input.city)) || loadConfig().default_city;
-  const prefs = defaultPrefs(city);
+  const prefs = newUserPrefs(city);
   const row = await store.ensureUser({
     chatId: input.chatId,
     city,

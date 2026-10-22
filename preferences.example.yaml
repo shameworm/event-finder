@@ -1,25 +1,29 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# events-finder — DEFAULTS FOR NEW USERS
+# events-finder — THE OPERATOR'S OWN TASTE MODEL
 #
 #   cp preferences.example.yaml preferences.yaml
 #
-# This file is the taste model handed to someone the first time they send
-# /start to the bot. After that, each person's preferences live in the database
-# under their own Telegram chat id, and they change them by chatting
-# ("add stand-up to favourites", "I'm in Lviv next week") or with:
+# This file is *your* profile: the one the CLI uses (scripts/search.ts,
+# scripts/prefs.ts --defaults) when there is no chat id to look up.
+#
+# New bot users do NOT inherit any of it. Someone who sends /start starts from
+# an empty taste model and fills it in themselves, with buttons, through the
+# walkthrough — inheriting a stranger's favourites would rank them against
+# somebody else's taste. Only the home city and the currency are carried over,
+# and the walkthrough asks for the city anyway.
+#
+# Each person's live preferences then live in the database under their own
+# Telegram chat id. They change them with /setup, /settings, or by chatting
+# ("add stand-up to favourites", "I'm in Lviv next week") — or you can:
 #
 #   npx tsx scripts/prefs.ts --chat <id> "add jazz to favourites"
 #   npx tsx scripts/prefs.ts --list                 # who is registered
 #   npx tsx scripts/prefs.ts --defaults "..."       # edit THIS file
-#
-# Two fields are deliberately NOT inherited by new users, because they are
-# personal to whoever set this file up: `follow` and `watch_cities`.
 # ─────────────────────────────────────────────────────────────────────────────
 
 home_city: kharkiv
 
 # Extra cities to watch for follow alerts.
-# NOT copied to new users — they add their own with "watch Odesa".
 watch_cities:
   - kyiv
   - lviv

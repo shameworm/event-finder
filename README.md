@@ -58,8 +58,9 @@ cp preferences.example.yaml preferences.yaml
 - **`config.yaml`** — sites, cities, politeness, bot policy and cache TTL. One
   section per city with the Concert.ua slug, the Karabas and Kontramarka
   subdomains, Telegram channels and place-search queries. All commented.
-- **`preferences.yaml`** — the taste model a **new user** starts with. Live
-  preferences live in the database per chat id.
+- **`preferences.yaml`** — **your own** taste model, used by the CLI. New bot
+  users inherit none of it: `/start` walks them through building their own with
+  buttons, and their live preferences live in the database per chat id.
 
 Both are gitignored; only the `*.example.yaml` versions are committed.
 
@@ -241,7 +242,7 @@ Rehearse each one with `--dry-run`, and against yourself with
 npx tsx scripts/prefs.ts --list                              # who is registered
 npx tsx scripts/prefs.ts --chat 123456789                    # one person's taste
 npx tsx scripts/prefs.ts --chat 123456789 "follow Latexfauna"
-npx tsx scripts/prefs.ts --defaults "add jazz to favourites"  # defaults for new users
+npx tsx scripts/prefs.ts --defaults "add jazz to favourites"  # your own profile
 npx tsx scripts/reminders.ts --list                          # all pending reminders
 npx tsx scripts/search.ts "stand-up in Lviv this weekend"    # answer by hand
 ```
@@ -269,7 +270,7 @@ README.md                 this file
 TESTING.md                manual test checklist
 cron.example.yaml         the scheduled fan-out jobs
 config.example.yaml       sites, cities, bot policy, cache
-preferences.example.yaml  defaults for new users
+preferences.example.yaml  the operator's own taste model (CLI defaults)
 .env.example              secrets template
 scripts/
   bot.ts                  the bot service (long-poll, or --once for cron)

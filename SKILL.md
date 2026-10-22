@@ -160,9 +160,9 @@ npx tsx scripts/prefs.ts --chat 123456789 "follow Latexfauna"
 npx tsx scripts/prefs.ts --defaults "add jazz to favourites"  # defaults for NEW users
 ```
 
-`preferences.yaml` is only the starting point for new users; live preferences
-live in the database per chat id. `follow` and `watch_cities` are never copied
-from the defaults — they are personal.
+`preferences.yaml` is the operator's own profile and what the CLI falls back to;
+it is not handed to new users, who build their own through the walkthrough. Live
+preferences live in the database per chat id.
 
 **Be careful with other people's data.** Only inspect or change a specific
 user's preferences when the user you are talking to is asking about their own

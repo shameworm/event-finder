@@ -56,7 +56,7 @@ const { resultToItem, buildQueries } = await import('../scripts/websearch.ts');
 const { collect: collectKontramarka } = await import('../scripts/kontramarka.ts');
 const { Store } = await import('../src/db.ts');
 const { splitForTelegram } = await import('../src/telegram-api.ts');
-const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs } = await import('../src/users.ts');
+const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs, newUserPrefs } = await import('../src/users.ts');
 const { cacheKey } = await import('../src/cache.ts');
 const { fanout } = await import('../src/fanout.ts');
 const { handleMessage, handleCallback, parseBell, isAllowed, BOT_COMMANDS } = await import('../src/bot-handlers.ts');
@@ -672,8 +672,24 @@ describe('users', () => {
     assert.deepEqual(defaults.follow, []);
     assert.deepEqual(defaults.watch_cities, []);
     assert.equal(defaults.home_city, 'lviv');
-    // taste defaults are still inherited from preferences.yaml
+    // defaultPrefs is the operator's own profile, so their taste is still there
     assert.ok(defaults.favourite_categories.includes('standup'));
+  });
+
+  it('gives a brand new user an empty taste model, not the operator\'s', async () => {
+    const blank = newUserPrefs('lviv');
+    assert.equal(blank.home_city, 'lviv');
+    assert.deepEqual(blank.favourite_categories, []);
+    assert.deepEqual(blank.disliked_categories, []);
+    assert.deepEqual(blank.interests, []);
+    assert.deepEqual(blank.follow, []);
+    assert.equal(blank.max_ticket_price, null);
+    // ...and that is what registration stores
+    await withTestStore(async (store) => {
+      const { user } = await registerUser(store, { chatId: '1009' });
+      assert.deepEqual(user.prefs.favourite_categories, []);
+      assert.equal(user.prefs.max_ticket_price, null);
+    });
   });
 
   it('keeps the users row and the stored prefs agreeing about the city', async () => {
