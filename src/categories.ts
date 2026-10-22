@@ -293,5 +293,11 @@ export function canonicalTag(word: string): string {
   for (const [key, syns] of Object.entries(TAG_SYNONYMS)) {
     if ([key, ...syns].some((s) => normText(s) === n)) return key;
   }
+  // a person types the case the sentence needs — "не люблю класичну музику"
+  // gives "класичну", which is the same word as the synonym "класична"
+  const stem = stemText(n);
+  for (const [key, syns] of Object.entries(TAG_SYNONYMS)) {
+    if ([key, ...syns].some((s) => stemText(s) === stem)) return key;
+  }
   return categoryFromWord(word) ?? word.trim();
 }

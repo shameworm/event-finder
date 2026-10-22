@@ -1,7 +1,7 @@
 import type { Kind, Preferences, Query } from './types.ts';
 import { EVENT_CATEGORIES, KEYWORDS, PLACE_CATEGORIES, TAG_SYNONYMS } from './categories.ts';
 import { loadConfig, resolveCity } from './config.ts';
-import { addDays, hasWord, monthFromWord, normText, pad2, today, weekdayOf } from './util.ts';
+import { WORD_START, addDays, hasWord, monthFromWord, normText, pad2, today, weekdayOf } from './util.ts';
 
 /* ------------------------------------------------------------- date ranges --- */
 
@@ -244,8 +244,12 @@ export function parseRequest(text: string, opts: ParseOptions = {}): Query {
   // --- kinds
   let kinds: Kind[] = opts.kinds ?? ['event'];
   if (!opts.kinds) {
-    const wantsPlaces = /\b(place|places|cafe|café|bar|gallery|spot|місц|кафе|бар|галере|локац|заклад)/i.test(normText(text));
-    const onlyPlaces = /\b(only places|тільки місця|лише місця)/i.test(normText(text));
+    // these are prefixes ("місц" matches "місця"), so only the left boundary
+    const wantsPlaces = new RegExp(
+      `${WORD_START}(place|places|cafe|café|bar|gallery|spot|місц|кафе|бар|галере|локац|заклад)`,
+      'iu',
+    ).test(normText(text));
+    const onlyPlaces = new RegExp(`${WORD_START}(only places|тільки місця|лише місця)`, 'iu').test(normText(text));
     if (onlyPlaces) kinds = ['place'];
     else if (wantsPlaces) kinds = ['event', 'place'];
   }

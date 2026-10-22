@@ -12,7 +12,7 @@ import type { Preferences } from './types.ts';
 import { PreferencesSchema } from './types.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
 import { canonicalTag, tagLabel } from './categories.ts';
-import { normText, today } from './util.ts';
+import { WORD_END, WORD_START, normText, today } from './util.ts';
 import { nextWeekRange, parseDateRange, thisWeekRange } from './request.ts';
 
 export interface PrefsEdit {
@@ -24,14 +24,20 @@ export interface PrefsEdit {
   note?: string;
 }
 
-const CITY = String.raw`([A-Za-zА-Яа-яЄєІіЇїҐґ'\- ]{3,30}?)`;
+// `\b` is ASCII-only, so `/\bдодай/` never matches: "д" is not a `\w` character
+// and the boundary it needs is never there. Every rule with a Ukrainian
+// alternative is built from these instead, with the `u` flag.
+const B = WORD_START;
+const E = WORD_END;
+
+const CITY = String.raw`([\p{L}' -]{3,30}?)`;
 
 /** Trim filler words a human leaves on a tag: "classical music" -> "classical". */
 function cleanTag(raw: string): string {
   let t = raw
     .replace(/[«»"'’.!?,;:]+/g, ' ')
-    .replace(/\b(music|музику|музика|музыку|музыка|genre|жанр|events?|подій|події|шоу)\b/gi, ' ')
-    .replace(/\b(please|будь ласка|pls)\b/gi, ' ')
+    .replace(new RegExp(String.raw`${B}(music|музик\p{L}*|музык\p{L}*|genre|жанр|events?|поді\p{L}*|шоу)${E}`, 'giu'), ' ')
+    .replace(new RegExp(String.raw`${B}(please|будь ласка|pls)${E}`, 'giu'), ' ')
     .replace(/\s+/g, ' ')
     .trim();
   if (t.length > 60) t = t.slice(0, 60).trim();
@@ -69,18 +75,24 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   const ok = (changes: string[], note?: string): PrefsEdit => ({ changes, prefs, understood: true, note });
 
   /* --- show ------------------------------------------------------------- */
-  if (/^(show|list|які|what are)?\s*(my )?(prefs|preferences|налаштування|уподобання|смаки)\b/i.test(t) && !/add|remove/i.test(t)) {
+  if (
+    new RegExp(String.raw`^(show|list|які|what are)?\s*(my )?(prefs|preferences|налаштування|уподобання|смаки)${E}`, 'iu').test(t) &&
+    !/add|remove|додай|прибери/i.test(t)
+  ) {
     return ok([], 'нічого міняти');
   }
 
   /* --- budget ----------------------------------------------------------- */
-  if (/\b(no|без)\s*(price\s*)?(limit|ліміт|обмежень|budget)\b|unlimited/i.test(t)) {
+  if (new RegExp(String.raw`${B}(no|без)\s*(price\s*)?(limit|ліміт|обмежень|budget)${E}|unlimited`, 'iu').test(t)) {
     const changed = prefs.max_ticket_price !== null;
     prefs.max_ticket_price = null;
     return ok(changed ? ['максимальна ціна квитка → без обмежень'] : [], changed ? undefined : 'і так без обмежень');
   }
   const budget = t.match(
-    /\b(?:max(?:imum)?|budget|limit|ліміт|бюджет|не більше|не дорожче|cheaper than|under|до)\b[^\d]{0,15}(\d{2,5})/i,
+    new RegExp(
+      String.raw`${B}(?:max(?:imum)?|budget|limit|ліміт|бюджет|максимум|не більше|не дорожче|cheaper than|under|до)${E}[^\d]{0,15}(\d{2,5})`,
+      'iu',
+    ),
   );
   if (budget && /price|грн|uah|₴|budget|бюджет|ціна|цін|квит|ticket|max|limit|ліміт|до|under/i.test(t)) {
     const value = Number(budget[1]);
@@ -90,12 +102,16 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   }
 
   /* --- trip ------------------------------------------------------------- */
-  if (/\b(cancel|скасуй|скасувати)\b.*\b(trip|поїздк)|back home|повернувся додому|i'?m home/i.test(t)) {
+  if (
+    new RegExp(String.raw`${B}(cancel|скасуй|скасувати)${E}.*${B}(trip|поїздк)|back home|повернувся додому|i'?m home`, 'iu').test(t)
+  ) {
     const changed = prefs.trip !== null;
     prefs.trip = null;
     return ok(changed ? ['поїздку скасовано'] : [], changed ? undefined : 'поїздки й не було');
   }
-  const trip = t.match(new RegExp(String.raw`\b(?:i'?m|i am|я|ill be|i'?ll be|буду|їду|поїду|going)\b\s*(?:in|to|у|в|до)?\s*${CITY}\b`, 'i'));
+  const trip = t.match(
+    new RegExp(String.raw`${B}(?:i'?m|i am|я|ill be|i'?ll be|буду|їду|поїду|going)${E}\s*(?:in|to|у|в|до)?\s*${CITY}${E}`, 'iu'),
+  );
   if (trip) {
     const city = resolveCity(trip[1] as string);
     if (city) {
@@ -110,7 +126,9 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   }
 
   /* --- cities ----------------------------------------------------------- */
-  const home = t.match(new RegExp(String.raw`\b(?:home city|home|домашнє місто|моє місто)\b\s*(?:is|=|:|—)?\s*${CITY}\b`, 'i'));
+  const home = t.match(
+    new RegExp(String.raw`${B}(?:home city|home|домашнє місто|моє місто)${E}\s*(?:is|=|:|—)?\s*${CITY}${E}`, 'iu'),
+  );
   if (home) {
     const city = resolveCity(home[1] as string);
     if (city) {
@@ -119,7 +137,7 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
       return ok(changed ? [`домашнє місто → ${cityLabel(city)}`] : [], changed ? undefined : 'це вже твоє домашнє місто');
     }
   }
-  const unwatch = t.match(new RegExp(String.raw`\b(?:unwatch|stop watching|не слідкуй за|прибери місто)\s*${CITY}\b`, 'i'));
+  const unwatch = t.match(new RegExp(String.raw`${B}(?:unwatch|stop watching|не слідкуй за|прибери місто)\s*${CITY}${E}`, 'iu'));
   if (unwatch) {
     const city = resolveCity(unwatch[1] as string);
     if (city) {
@@ -127,7 +145,7 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
       return ok(changed ? [`міста на оці − ${cityLabel(city)}`] : [], changed ? undefined : 'за ним і не стежив');
     }
   }
-  const watch = t.match(new RegExp(String.raw`\b(?:watch|also watch|слідкуй за|додай місто)\s*${CITY}\b`, 'i'));
+  const watch = t.match(new RegExp(String.raw`${B}(?:watch|also watch|слідкуй за|додай місто)\s*${CITY}${E}`, 'iu'));
   if (watch) {
     const city = resolveCity(watch[1] as string);
     if (city) {
@@ -137,13 +155,13 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   }
 
   /* --- follow list ------------------------------------------------------ */
-  const unfollow = t.match(/\b(?:unfollow|stop following|не слідкуй за|розлюби)\s+(.+)$/i);
+  const unfollow = t.match(new RegExp(String.raw`${B}(?:unfollow|stop following|не слідкуй за|не стеж за|розлюби)\s+(.+)$`, 'iu'));
   if (unfollow) {
     const who = cleanTag(unfollow[1] as string);
     const changed = drop(prefs.follow, who);
     return ok(changed ? [`більше не стежу за «${who}»`] : [], changed ? undefined : `за «${who}» я і не стежив`);
   }
-  const follow = t.match(/\b(?:follow|слідкуй за|стеж за|підпишись на)\s+(.+)$/i);
+  const follow = t.match(new RegExp(String.raw`${B}(?:follow|слідкуй за|стеж за|підпишись на)\s+(.+)$`, 'iu'));
   if (follow) {
     const who = cleanTag(follow[1] as string);
     const changed = add(prefs.follow, who);
@@ -151,7 +169,9 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   }
 
   /* --- interests -------------------------------------------------------- */
-  const interest = t.match(/\b(?:add|додай)\s+(.+?)\s+(?:to|в|до)\s+(?:interests?|інтересів|цікавого)\b/i);
+  const interest = t.match(
+    new RegExp(String.raw`${B}(?:add|додай|додати)\s+(.+?)\s+(?:to|в|до)\s+(?:interests?|інтерес\p{L}*|цікавого)${E}`, 'iu'),
+  );
   if (interest) {
     const tag = asTag(interest[1] as string);
     const changed = add(prefs.interests, tag);
@@ -159,15 +179,23 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   }
 
   /* --- dislikes --------------------------------------------------------- */
-  const undislike = t.match(/\b(?:remove|delete|прибери|видали|убери)\s+(.+?)\s+(?:from|з|із)\s+(?:dislikes?|disliked|чорного списку|blacklist)\b/i);
+  const undislike = t.match(
+    new RegExp(
+      String.raw`${B}(?:remove|delete|прибери|видали|убери)\s+(.+?)\s+(?:from|з|із)\s+(?:dislikes?|disliked|небажаного|чорного списку|blacklist)${E}`,
+      'iu',
+    ),
+  );
   if (undislike) {
     const tag = asTag(undislike[1] as string);
     const changed = drop(prefs.disliked_categories, tag);
     return ok(changed ? [`небажане − ${tagLabel(tag)}`] : [], changed ? undefined : 'цього й не було в небажаному');
   }
-  const dislike = t.match(/\b(?:i\s+)?(?:don'?t like|do not like|dislike|hate|не люблю|не цікавить|ненавиджу|не хочу)\s+(.+)$/i)
-    ?? t.match(/^\s*(?:no|без|ніякого|никакого)\s+(.+)$/i)
-    ?? t.match(/\b(?:add)\s+(.+?)\s+(?:to)\s+(?:dislikes?|disliked)\b/i);
+  const dislike =
+    t.match(
+      new RegExp(String.raw`${B}(?:i\s+)?(?:don'?t like|do not like|dislike|hate|не люблю|не цікавить|ненавиджу|не хочу)\s+(.+)$`, 'iu'),
+    ) ??
+    t.match(/^\s*(?:no|без|ніякого|никакого)\s+(.+)$/iu) ??
+    t.match(new RegExp(String.raw`${B}(?:add|додай)\s+(.+?)\s+(?:to|до)\s+(?:dislikes?|disliked|небажаного)${E}`, 'iu'));
   if (dislike) {
     const tag = asTag(dislike[1] as string);
     if (tag) {
@@ -179,15 +207,18 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   }
 
   /* --- favourites ------------------------------------------------------- */
-  const unfav = t.match(/\b(?:remove|delete|прибери|видали|убери)\s+(.+?)\s+(?:from|з|із)\s+(?:favourites?|favorites?|улюблених|улюблен\w*)\b/i);
+  const unfav = t.match(
+    new RegExp(String.raw`${B}(?:remove|delete|прибери|видали|убери)\s+(.+?)\s+(?:from|з|із)\s+(?:favourites?|favorites?|улюблен\p{L}*)${E}`, 'iu'),
+  );
   if (unfav) {
     const tag = asTag(unfav[1] as string);
     const changed = drop(prefs.favourite_categories, tag);
     return ok(changed ? [`улюблене − ${tagLabel(tag)}`] : [], changed ? undefined : 'цього й не було в улюбленому');
   }
   const fav =
-    t.match(/\b(?:add|додай|додати)\s+(.+?)\s+(?:to|в|до)\s+(?:favourites?|favorites?|улюблен\w*|любимих)\b/i) ??
-    t.match(/\b(?:i\s+)?(?:like|love|люблю|подобається|обожнюю)\s+(.+)$/i);
+    t.match(
+      new RegExp(String.raw`${B}(?:add|додай|додати)\s+(.+?)\s+(?:to|в|до)\s+(?:favourites?|favorites?|улюблен\p{L}*|любим\p{L}*)${E}`, 'iu'),
+    ) ?? t.match(new RegExp(String.raw`${B}(?:i\s+)?(?:like|love|люблю|подобається|обожнюю)\s+(.+)$`, 'iu'));
   if (fav) {
     const tag = asTag(fav[1] as string);
     if (tag) {

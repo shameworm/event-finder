@@ -226,8 +226,12 @@ export function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** The two halves of a Unicode word boundary, for building patterns by hand. */
+export const WORD_START = String.raw`(?<![\p{L}\p{N}])`;
+export const WORD_END = String.raw`(?![\p{L}\p{N}])`;
+
 export function wordRe(word: string, flags = 'iu'): RegExp {
-  return new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(word)}(?![\\p{L}\\p{N}])`, flags);
+  return new RegExp(`${WORD_START}${escapeRe(word)}${WORD_END}`, flags);
 }
 
 /** True when any of `words` appears in `text` as a whole word. */
