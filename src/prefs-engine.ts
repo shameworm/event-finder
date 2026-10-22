@@ -137,9 +137,20 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
       return ok(changed ? [`домашнє місто → ${cityLabel(city)}`] : [], changed ? undefined : 'це вже твоє домашнє місто');
     }
   }
-  const unwatch = t.match(
-    new RegExp(String.raw`${B}(?:unwatch|stop watching|не слідкуй за містом|не слідкуй за|прибери місто)\s*${CITY}${E}`, 'iu'),
-  );
+  // "додай до міст Київ", "додай Київ до міст", "add Kyiv to cities" — the watch
+  // list named as a list. People reach for every word order, and the one that
+  // was missing fell through to a search for Kyiv instead.
+  const CITY_LIST = String.raw`(?:міст\p{L}*|cit(?:y|ies)(?:\s+list)?)`;
+  const unwatch =
+    t.match(
+      new RegExp(String.raw`${B}(?:unwatch|stop watching|не слідкуй за містом|не слідкуй за|прибери місто)\s*${CITY}${E}`, 'iu'),
+    ) ??
+    t.match(
+      new RegExp(String.raw`${B}(?:remove|delete|прибери|видали|убери)\s+(?:(?:from|з|із)\s+)?${CITY_LIST}\s+${CITY}${E}`, 'iu'),
+    ) ??
+    t.match(
+      new RegExp(String.raw`${B}(?:remove|delete|прибери|видали|убери)\s+${CITY}\s+(?:from|з|із)\s+${CITY_LIST}${E}`, 'iu'),
+    );
   if (unwatch) {
     const city = resolveCity(unwatch[1] as string);
     if (city) {
@@ -147,9 +158,10 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
       return ok(changed ? [`міста на оці − ${cityLabel(city)}`] : [], changed ? undefined : 'за ним і не стежив');
     }
   }
-  const watch = t.match(
-    new RegExp(String.raw`${B}(?:watch|also watch|слідкуй за містом|слідкуй за|додай місто)\s*${CITY}${E}`, 'iu'),
-  );
+  const watch =
+    t.match(new RegExp(String.raw`${B}(?:watch|also watch|слідкуй за містом|слідкуй за|додай місто)\s*${CITY}${E}`, 'iu')) ??
+    t.match(new RegExp(String.raw`${B}(?:add|додай|додати)\s+(?:(?:to|до|в)\s+)?${CITY_LIST}\s+${CITY}${E}`, 'iu')) ??
+    t.match(new RegExp(String.raw`${B}(?:add|додай|додати)\s+${CITY}\s+(?:to|до|в)\s+${CITY_LIST}${E}`, 'iu'));
   if (watch) {
     const city = resolveCity(watch[1] as string);
     if (city) {
