@@ -5,11 +5,11 @@
  * cron mode, so the behaviour is identical either way.
  */
 import type { Item, Kind } from './types.ts';
-import type { Store } from './db.ts';
+import type { OptIn, Store } from './db.ts';
 import type { Logger } from './log.ts';
-import type { TgMessage } from './schemas.ts';
+import type { TgCallbackQuery, TgMessage } from './schemas.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
-import { escapeHtml, sendMessage } from './telegram-api.ts';
+import { answerCallbackQuery, editMessageText, escapeHtml, sendMessage, type InlineButton } from './telegram-api.ts';
 import { applyPrefsCommand, describePrefs } from './prefs-engine.ts';
 import { parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
@@ -45,15 +45,26 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: 'stop', description: '🔕 Unsubscribe' },
 ];
 
+/**
+ * The four scheduled jobs a person can switch on and off, in one place: the
+ * /settings text, its buttons and the /mute command all read from this list.
+ */
+const OPT_INS: { key: OptIn; emoji: string; label: string; hint: string; names: string[] }[] = [
+  { key: 'weekly_digest', emoji: '🗓', label: 'Weekly digest', hint: 'Monday — what is on this week', names: ['week', 'weekly'] },
+  { key: 'weekend_digest', emoji: '🎉', label: 'Weekend picks', hint: 'Thursday — Friday to Sunday', names: ['weekend'] },
+  { key: 'follow_alerts', emoji: '⭐️', label: 'Follow alerts', hint: 'new shows by people you follow', names: ['follows', 'follow'] },
+  { key: 'place_tips', emoji: '📍', label: 'Place tips', hint: 'weekly cafés, bars and galleries', names: ['places', 'place'] },
+];
+
 const COMMANDS = `<b>What I can do</b>
 
 /week — everything on this week
 /weekend — Friday to Sunday
 /today · /tomorrow — right now
 /places — new cafés, bars, galleries worth a visit
+/settings — digests, city and taste, with buttons
 /city — change your city
 /prefs — what I think you like
-/settings — which digests you get
 /reminders — your 🔔 list
 /stop — unsubscribe
 
@@ -74,13 +85,68 @@ one day and three hours before it starts.`;
 
 /* ------------------------------------------------------------- utilities --- */
 
+function rows<T>(items: T[], perRow: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += perRow) out.push(items.slice(i, i + perRow));
+  return out;
+}
+
 function cityKeyboard(): { text: string }[][] {
+  return rows(Object.keys(loadConfig().cities).map((c) => ({ text: cityLabel(c) })), 2);
+}
+
+/** The same city list as inline buttons, with a tick on the one in use. */
+function cityButtons(current: string): InlineButton[][] {
   const cities = Object.keys(loadConfig().cities);
-  const rows: { text: string }[][] = [];
-  for (let i = 0; i < cities.length; i += 2) {
-    rows.push(cities.slice(i, i + 2).map((c) => ({ text: cityLabel(c) })));
-  }
-  return rows;
+  return [
+    ...rows(
+      cities.map((c) => ({ text: `${c === current ? '✅ ' : ''}${cityLabel(c)}`, callback_data: `city:${c}` })),
+      2,
+    ),
+    [{ text: '⬅️ Back', callback_data: 'set:back' }],
+  ];
+}
+
+/** Shown under the welcome, so a new user has something to tap straight away. */
+function quickActions(): InlineButton[][] {
+  return [
+    [
+      { text: '🗓 This week', callback_data: 'go:week' },
+      { text: '🎉 Weekend', callback_data: 'go:weekend' },
+    ],
+    [
+      { text: '📍 Places', callback_data: 'go:places' },
+      { text: '⚙️ Settings', callback_data: 'go:settings' },
+    ],
+  ];
+}
+
+/**
+ * The settings screen: current state as text, every switch as a button.
+ * Rendered the same way whether it is a fresh /settings or a redraw after a tap.
+ */
+function settingsPanel(user: BotUser): { text: string; inlineKeyboard: InlineButton[][] } {
+  const on = (key: OptIn) => Boolean(user.row[key]);
+  const text =
+    `<b>⚙️ Settings</b>\n\n` +
+    `🏙 City — <b>${escapeHtml(cityLabel(user.city))}</b>\n\n` +
+    `<b>Digests</b>\n` +
+    OPT_INS.map((o) => `${on(o.key) ? '✅' : '❌'} ${o.emoji} ${o.label} — <i>${o.hint}</i>`).join('\n') +
+    `\n\nTap a button to change it.`;
+  return {
+    text,
+    inlineKeyboard: [
+      ...rows(
+        OPT_INS.map((o) => ({ text: `${on(o.key) ? '✅' : '❌'} ${o.label}`, callback_data: `set:${o.key}` })),
+        2,
+      ),
+      [
+        { text: '🏙 Change city', callback_data: 'set:city' },
+        { text: '🎛 My taste', callback_data: 'set:prefs' },
+      ],
+      [{ text: '🔕 Unsubscribe', callback_data: 'set:stop' }],
+    ],
+  };
 }
 
 /** "🔔", "🔔3", "🔔 3", "remind me 2" */
@@ -101,7 +167,10 @@ export function isAllowed(chatId: string): boolean {
 /* --------------------------------------------------------------- answers --- */
 
 interface Reply {
-  (body: string, opts?: { keyboard?: { text: string }[][]; removeKeyboard?: boolean }): Promise<void>;
+  (
+    body: string,
+    opts?: { keyboard?: { text: string }[][]; removeKeyboard?: boolean; inlineKeyboard?: InlineButton[][] },
+  ): Promise<void>;
 }
 
 function makeReply(ctx: HandlerContext, chatId: string, replyTo?: number): Reply {
@@ -113,6 +182,7 @@ function makeReply(ctx: HandlerContext, chatId: string, replyTo?: number): Reply
       replyTo,
       keyboard: opts.keyboard,
       removeKeyboard: opts.removeKeyboard,
+      inlineKeyboard: opts.inlineKeyboard,
     });
   };
 }
@@ -198,6 +268,41 @@ export async function answerSearch(
   return items.length;
 }
 
+/** The canned searches, reachable both as a command and as a quick-action button. */
+export type Preset = 'week' | 'weekend' | 'today' | 'tomorrow' | 'places';
+
+async function runPreset(ctx: HandlerContext, user: BotUser, preset: Preset, reply: Reply): Promise<void> {
+  const cfg = loadConfig();
+  const base = today(cfg.timezone);
+  switch (preset) {
+    case 'week': {
+      const r = thisWeekRange(base);
+      await answerSearch(ctx, user, '', { from: r.from, to: r.to, label: r.label, reply, top: cfg.digest.week_top });
+      return;
+    }
+    case 'weekend': {
+      const r = weekendRange(base);
+      await answerSearch(ctx, user, '', { from: r.from, to: r.to, label: r.label, reply });
+      return;
+    }
+    case 'today':
+      await answerSearch(ctx, user, '', { from: base, to: base, label: 'today', reply });
+      return;
+    case 'tomorrow':
+      await answerSearch(ctx, user, '', { from: addDays(base, 1), to: addDays(base, 1), label: 'tomorrow', reply });
+      return;
+    case 'places':
+      await answerSearch(ctx, user, '', {
+        from: base,
+        to: addDays(base, 30),
+        label: 'open now',
+        kinds: ['place'],
+        top: cfg.digest.places_top,
+        reply,
+      });
+  }
+}
+
 /* ------------------------------------------------------------- the router --- */
 
 export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promise<void> {
@@ -231,7 +336,9 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
         { keyboard: cityKeyboard() },
       );
     } else {
-      await reply(`Welcome back. Your city is ${escapeHtml(cityLabel(user.city))}.\n\n${COMMANDS}`, { removeKeyboard: true });
+      await reply(`Welcome back. Your city is ${escapeHtml(cityLabel(user.city))}.\n\n${COMMANDS}`, {
+        inlineKeyboard: quickActions(),
+      });
     }
     return;
   }
@@ -261,39 +368,22 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
       `✅ ${escapeHtml(cityLabel(city))} it is.\n\nTell me what you are into — "stand-up and indie rock, no classical" — or just try /weekend.\n\n${COMMANDS}`,
       { removeKeyboard: true },
     );
+    await reply('Pick something to start with:', { inlineKeyboard: quickActions() });
     return;
   }
 
   /* --- commands --------------------------------------------------------- */
   switch (command) {
     case '/help':
-      return reply(COMMANDS);
+    case '/menu':
+      return reply(COMMANDS, { inlineKeyboard: quickActions() });
 
-    case '/week': {
-      const r = thisWeekRange(base);
-      await answerSearch(ctx, user, '', { from: r.from, to: r.to, label: r.label, reply, top: cfg.digest.week_top });
-      return;
-    }
-    case '/weekend': {
-      const r = weekendRange(base);
-      await answerSearch(ctx, user, '', { from: r.from, to: r.to, label: r.label, reply });
-      return;
-    }
+    case '/week':
+    case '/weekend':
     case '/today':
-      await answerSearch(ctx, user, '', { from: base, to: base, label: 'today', reply });
-      return;
     case '/tomorrow':
-      await answerSearch(ctx, user, '', { from: addDays(base, 1), to: addDays(base, 1), label: 'tomorrow', reply });
-      return;
     case '/places':
-      await answerSearch(ctx, user, '', {
-        from: base,
-        to: addDays(base, 30),
-        label: 'open now',
-        kinds: ['place'],
-        top: cfg.digest.places_top,
-        reply,
-      });
+      await runPreset(ctx, user, command.slice(1) as Preset, reply);
       return;
 
     case '/city': {
@@ -313,31 +403,15 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
       return reply(`<b>What I think you like</b>\n<code>${escapeHtml(describePrefs(user.prefs))}</code>`);
 
     case '/settings': {
-      const r = user.row;
-      const flag = (n: number) => (n ? '✅' : '❌');
-      return reply(
-        `<b>Your digests</b>\n` +
-          `${flag(r.weekly_digest)} /mute week — Monday "this week"\n` +
-          `${flag(r.weekend_digest)} /mute weekend — Thursday weekend picks\n` +
-          `${flag(r.follow_alerts)} /mute follows — new shows by people you follow\n` +
-          `${flag(r.place_tips)} /mute places — weekly place suggestions\n\n` +
-          `Use /mute &lt;name&gt; to turn one off and /unmute &lt;name&gt; to turn it back on.`,
-      );
+      const panel = settingsPanel(user);
+      return reply(panel.text, { inlineKeyboard: panel.inlineKeyboard });
     }
 
     case '/mute':
     case '/unmute': {
       const on = command === '/unmute';
       const which = text.slice(command.length).trim().toLowerCase();
-      const map: Record<string, 'weekly_digest' | 'weekend_digest' | 'follow_alerts' | 'place_tips'> = {
-        week: 'weekly_digest',
-        weekly: 'weekly_digest',
-        weekend: 'weekend_digest',
-        follows: 'follow_alerts',
-        follow: 'follow_alerts',
-        places: 'place_tips',
-      };
-      const key = map[which];
+      const key = OPT_INS.find((o) => o.names.includes(which))?.key;
       if (!key) return reply('Which one? week, weekend, follows or places. See /settings.');
       await ctx.store.setOptIn(chatId, key, on);
       return reply(`${on ? '🔔' : '🔕'} ${escapeHtml(which)} digests ${on ? 'on' : 'off'}.`);
@@ -397,6 +471,115 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
   if (edit.understood) return reply(`Nothing to change — ${escapeHtml(edit.note ?? 'already set')}.`);
 
   await answerSearch(ctx, user, text, { reply });
+}
+
+/* ----------------------------------------------------------- the buttons --- */
+
+/**
+ * A tap on an inline button. The callback_data is a short `kind:arg` pair:
+ *
+ *   go:week …     a quick action — answers with a new message
+ *   set:<optin>   toggle one digest, then redraw the panel in place
+ *   set:city · set:prefs · set:back · set:stop · set:stop!
+ *   city:<key>    pick a city from the panel
+ *
+ * Everything that changes a setting rewrites the panel it was tapped from, so
+ * the chat keeps one settings screen rather than a stack of confirmations.
+ */
+export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): Promise<void> {
+  const chatId = cq.message ? String(cq.message.chat.id) : cq.from ? String(cq.from.id) : '';
+  const messageId = cq.message?.message_id;
+  const data = cq.data ?? '';
+  // Telegram shows a spinner on the button until this lands, so ack first
+  await answerCallbackQuery(cq.id, { dryRun: ctx.dryRun, log: ctx.log });
+  if (!chatId || !data) return;
+
+  const reply = makeReply(ctx, chatId);
+  if (!isAllowed(chatId)) return reply('This bot is private at the moment. Ask its owner to add you.');
+
+  const user = await getUser(ctx.store, chatId, ctx.log);
+  if (!user) return reply('Send /start and I will set you up.');
+  await ctx.store.touchUser(chatId);
+
+  const sep = data.indexOf(':');
+  const kind = sep < 0 ? data : data.slice(0, sep);
+  const arg = sep < 0 ? '' : data.slice(sep + 1);
+
+  /** Redraw the settings screen with whatever is in the database now. */
+  const draw = async (screen: { text: string; inlineKeyboard: InlineButton[][] }, inPlace = true) => {
+    if (inPlace && messageId) {
+      await editMessageText(screen.text, {
+        chatId,
+        messageId,
+        inlineKeyboard: screen.inlineKeyboard,
+        dryRun: ctx.dryRun,
+        log: ctx.log,
+      });
+    } else {
+      await reply(screen.text, { inlineKeyboard: screen.inlineKeyboard });
+    }
+  };
+  const drawPanel = async (inPlace = true) =>
+    draw(settingsPanel((await getUser(ctx.store, chatId, ctx.log)) ?? user), inPlace);
+
+  if (kind === 'go') {
+    if (arg === 'settings') return drawPanel(false);
+    if (arg === 'help') return reply(COMMANDS, { inlineKeyboard: quickActions() });
+    const presets: Preset[] = ['week', 'weekend', 'today', 'tomorrow', 'places'];
+    if (presets.includes(arg as Preset)) return runPreset(ctx, user, arg as Preset, reply);
+    return;
+  }
+
+  if (kind === 'city') {
+    if (!loadConfig().cities[arg]) return drawPanel();
+    await saveUserPrefs(ctx.store, user, { ...user.prefs, home_city: arg });
+    // tapping a city finishes onboarding too, if that is where they were
+    if (user.row.stage === 'city') await ctx.store.setUserStage(chatId, null);
+    return drawPanel();
+  }
+
+  if (kind !== 'set') return;
+
+  const optIn = OPT_INS.find((o) => o.key === arg);
+  if (optIn) {
+    await ctx.store.setOptIn(chatId, optIn.key, !user.row[optIn.key]);
+    return drawPanel();
+  }
+
+  switch (arg) {
+    case 'city':
+      return draw({
+        text: `<b>🏙 Change city</b>\n\nYou are in <b>${escapeHtml(cityLabel(user.city))}</b>. Pick another:`,
+        inlineKeyboard: cityButtons(user.city),
+      });
+
+    case 'prefs':
+      return draw({
+        text: `<b>🎛 What I think you like</b>\n<code>${escapeHtml(describePrefs(user.prefs))}</code>\n\nTell me in words to change it — "add jazz to favourites", "max price 800".`,
+        inlineKeyboard: [[{ text: '⬅️ Back', callback_data: 'set:back' }]],
+      });
+
+    case 'stop':
+      return draw({
+        text: `<b>🔕 Unsubscribe?</b>\n\nNo more digests, alerts or reminders. Your city and taste are kept, so /start brings everything back.`,
+        inlineKeyboard: [
+          [
+            { text: '✅ Yes, unsubscribe', callback_data: 'set:stop!' },
+            { text: '⬅️ Keep them', callback_data: 'set:back' },
+          ],
+        ],
+      });
+
+    case 'stop!':
+      await ctx.store.setBlocked(chatId, true);
+      return draw({
+        text: '🔕 Unsubscribed — no more digests. Send /start whenever you want them back.',
+        inlineKeyboard: [],
+      });
+
+    case 'back':
+      return drawPanel();
+  }
 }
 
 async function handleBell(ctx: HandlerContext, msg: TgMessage, chatId: string, index?: number): Promise<string> {
