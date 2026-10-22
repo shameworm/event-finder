@@ -101,7 +101,20 @@ In Telegram, as yourself:
 
 Then **as a second person** (another Telegram account, or a friend): `/start`,
 pick a different city, set a different taste. Both of you should now be in
-`npx tsx scripts/prefs.ts --list`.
+`npx tsx scripts/prefs.ts --list` — with different profiles, neither of them
+yours.
+
+### Followed acts are searched for by name
+
+```bash
+npx tsx scripts/follows.ts --queries --chat <your id>
+```
+
+Expect one entry per city you care about, listing a query per name on your
+follow list (`Антон Тимошенко Харків концерт тур квитки`). Run them with
+web_search, ingest with `npx tsx scripts/websearch.ts --ingest -`, then
+`npx tsx scripts/follows.ts --dry-run --chat <your id>` — anything found should
+come through even if its ticket costs more than your limit.
 
 ### Multi-user behaviour — the thing that matters
 

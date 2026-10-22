@@ -118,6 +118,7 @@ Hermes has no HTTP search API, so this source borrows your `web_search` tool:
 ```bash
 # 1. ask what to search for — one entry per city that has users
 npx tsx scripts/places.ts --queries
+npx tsx scripts/follows.ts --queries                  # the names people follow
 npx tsx scripts/websearch.ts --queries --city kharkiv --kind place
 
 # 2. run those queries with your own web_search tool
@@ -140,6 +141,7 @@ date are dropped.
 npx tsx scripts/digest.ts --week                # Monday 09:00 — this week, per user's city
 npx tsx scripts/digest.ts --weekend --top 5     # Thursday 18:00 — weekend picks
 npx tsx scripts/follows.ts                      # every 6h — new shows by people they follow
+npx tsx scripts/follows.ts --queries            #   …run these first: tours are announced by name
 npx tsx scripts/places.ts                       # weekly — places to try
 npx tsx scripts/reminders.ts                    # every 15min — fire due 🔔 reminders
 ```

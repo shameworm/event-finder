@@ -37,11 +37,23 @@ cron:
     description: The five best things this weekend (Fri–Sun), per user.
 
   # ── 3. Every 6 hours — follow-list watch, alert immediately ───────────────
+  #
+  # Tours are announced by name, not by turning up in a city listing, so the
+  # agent prompt below searches for the names first. The plain
+  # `command: npx tsx scripts/follows.ts` still works — it just waits for the
+  # acts to appear in the normal city scrape.
   - name: events-finder-follow-alerts
     schedule: "0 */6 * * *"
     timezone: Europe/Kyiv
     cwd: ~/.hermes/skills/events-finder
-    command: npx tsx scripts/follows.ts
+    prompt: |
+      Use the events-finder skill (~/.hermes/skills/events-finder).
+      1. npx tsx scripts/follows.ts --queries
+      2. run each query with web_search
+      3. pipe the combined results into
+         npx tsx scripts/websearch.ts --ingest -
+      4. npx tsx scripts/follows.ts
+      Report how many alerts went out, and name any source that failed.
     description: Has anyone a user follows announced a show in one of their cities?
 
   # ── 4. Sunday 11:00 — 2–3 places to try ───────────────────────────────────

@@ -202,6 +202,18 @@ describe('request parsing', () => {
     const queries = buildQueries('kharkiv', 'event', { from: base, to: base, like: ['standup'], interests: [] });
     assert.ok(queries.every((q) => !q.includes('Kharkiv')), 'Ukrainian queries should not use the English name');
   });
+
+  it('looks for a followed act by name, before anything generic', () => {
+    const queries = buildQueries('kharkiv', 'event', {
+      from: base,
+      to: base,
+      like: ['standup'],
+      interests: [],
+      follow: ['Антон Тимошенко'],
+    });
+    assert.ok(queries[0]?.startsWith('Антон Тимошенко'), queries.join(' | '));
+    assert.ok(queries.some((q) => q.includes('афіша')), 'the generic searches still get their turn');
+  });
 });
 
 /* -------------------------------------------------------------- normalize --- */

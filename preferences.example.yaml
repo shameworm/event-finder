@@ -41,9 +41,9 @@ disliked_categories:
   - classical
   - chanson
 
-# Artists, comedians, bands, theatres. A show by any of these triggers an
-# immediate alert from scripts/follows.ts, in any of that user's cities.
-# NOT copied to new users — each person builds their own with "follow <name>".
+# Artists, comedians, bands, theatres. These are searched for by name
+# (scripts/follows.ts --queries), beat every filter in the ranker, and trigger
+# an immediate alert in any of that user's cities.
 follow:
   - Курган і Agregat
   - Антон Тимошенко
