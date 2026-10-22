@@ -109,24 +109,16 @@ Create `~/.hermes/.env` (shared with your other Hermes skills) or
 | `TELEGRAM_SESSION` | your GramJS login (optional) | written by `scripts/tg-login.ts` (§6) |
 | `DATABASE_URL` | Postgres instead of SQLite (optional) | your database |
 
-While you are in @BotFather, set the bot up properly:
+The command menu — what Telegram autocompletes after `/` and shows behind the
+☰ button — is published by the bot itself on every start (`setMyCommands`, from
+`BOT_COMMANDS` in `src/bot-handlers.ts`), so there is nothing to type into
+@BotFather. Add a command there and it appears in the menu on the next restart.
+
+Two things are still worth setting in @BotFather by hand:
 
 ```
 /setdescription  Finds concerts, stand-up, theatre, exhibitions and new places in Ukrainian cities.
 /setabouttext    Your city, your taste, one message a week.
-/setcommands
-start - set up / restart
-week - what's on this week
-weekend - Friday to Sunday
-today - tonight
-tomorrow - tomorrow
-places - new places worth a visit
-city - change city
-prefs - what I think you like
-settings - which digests you get
-reminders - your reminder list
-help - how to use me
-stop - unsubscribe
 ```
 
 ## 4. Storage
