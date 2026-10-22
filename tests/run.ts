@@ -226,7 +226,7 @@ describe('normalization', () => {
     assert.ok(item);
     assert.equal(item.status, 'soldout');
     assert.equal(item.category, 'standup');
-    assert.equal(priceText(item), 'from 450 ₴');
+    assert.equal(priceText(item), 'від 450 ₴');
   });
 
   it('rejects junk instead of throwing', () => {
@@ -244,9 +244,9 @@ describe('normalization', () => {
 
   it('never advertises a placeholder price as free', () => {
     const placeholder = makeItem({ city: 'kyiv', title: 'Музей', url: 'https://x/m', source: 'kontramarka', priceMin: 0.01, priceMax: 390 })!;
-    assert.equal(priceText(placeholder), 'up to 390 ₴');
+    assert.equal(priceText(placeholder), 'до 390 ₴');
     const reallyFree = makeItem({ city: 'kyiv', title: 'Лекція', url: 'https://x/l', source: 'websearch', priceMin: 0 })!;
-    assert.equal(priceText(reallyFree), 'free');
+    assert.equal(priceText(reallyFree), 'безкоштовно');
   });
 
   it('reads prices out of free text', () => {
@@ -369,7 +369,7 @@ describe('render', () => {
 
   it('badges sold-out and cancelled events', () => {
     const items = [makeItem({ city: 'kharkiv', title: 'Gone', url: 'https://x/c', source: 's', startsAt: '2026-10-24T19:00:00+03:00', status: 'soldout' })!];
-    assert.ok(buildDigest({ title: 'T', query, items, format: 'text' }).text.includes('SOLD OUT'));
+    assert.ok(buildDigest({ title: 'T', query, items, format: 'text' }).text.includes('КВИТКІВ НЕМАЄ'));
   });
 
   it('escapes HTML coming from a site', () => {
@@ -472,19 +472,19 @@ describe('preference commands', () => {
   };
 
   it('adds and removes favourites', () => {
-    check('add jazz to favourites', { understood: true, changed: true, contains: 'favourites + jazz' });
-    check('remove concert from favourites', { understood: true, changed: true, contains: 'favourites − concert' });
+    check('add jazz to favourites', { understood: true, changed: true, contains: 'улюблене + джаз' });
+    check('remove concert from favourites', { understood: true, changed: true, contains: 'улюблене − концерти' });
     check('add stand-up to favourites', { understood: true, changed: false });
   });
 
   it('records dislikes and drops them from favourites', () => {
-    const edit = check("I don't like opera", { understood: true, changed: true, contains: 'dislikes + opera' });
+    const edit = check("I don't like opera", { understood: true, changed: true, contains: 'небажане + опера' });
     assert.ok(!edit.prefs.favourite_categories.includes('opera'));
   });
 
   it('follows and unfollows people', () => {
-    check('follow Latexfauna', { understood: true, changed: true, contains: 'following "Latexfauna"' });
-    check('unfollow Курган і Agregat', { understood: true, changed: true, contains: 'unfollowed' });
+    check('follow Latexfauna', { understood: true, changed: true, contains: 'стежу за «Latexfauna»' });
+    check('unfollow Курган і Agregat', { understood: true, changed: true, contains: 'більше не стежу' });
   });
 
   it('sets a budget and clears it', () => {
@@ -785,11 +785,11 @@ describe('bot handlers', () => {
   it('onboards a new user by asking for a city, then remembers it', async () => {
     await withTestStore(async (store) => {
       const hello = await say(store, '3001', '/start');
-      assert.ok(hello.includes('Which city'), hello.slice(0, 200));
+      assert.ok(hello.includes('У якому ти місті'), hello.slice(0, 200));
       assert.equal((await store.getUser('3001'))?.stage, 'city');
 
       const picked = await say(store, '3001', 'Львів');
-      assert.ok(picked.includes('Lviv'), picked.slice(0, 200));
+      assert.ok(picked.includes('Львів'), picked.slice(0, 200));
       const row = await store.getUser('3001');
       assert.equal(row?.stage, null);
       assert.equal(row?.city, 'lviv');
@@ -800,7 +800,7 @@ describe('bot handlers', () => {
     await withTestStore(async (store) => {
       await say(store, '3002', '/start');
       const reply = await say(store, '3002', 'Atlantis');
-      assert.ok(reply.includes('do not know'), reply.slice(0, 200));
+      assert.ok(reply.includes('поки не знаю'), reply.slice(0, 200));
       assert.equal((await store.getUser('3002'))?.stage, 'city');
     });
   });
@@ -809,7 +809,7 @@ describe('bot handlers', () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3003', city: 'kharkiv' });
       const reply = await say(store, '3003', 'add jazz to favourites');
-      assert.ok(reply.includes('favourites + jazz'), reply.slice(0, 200));
+      assert.ok(reply.includes('улюблене + джаз'), reply.slice(0, 200));
       const user = await getUser(store, '3003');
       assert.ok(user?.prefs.favourite_categories.includes('jazz'));
     });
@@ -839,7 +839,7 @@ describe('bot handlers', () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3006', city: 'kharkiv' });
       assert.ok((await say(store, '3006', '/help')).includes('/weekend'));
-      assert.ok((await say(store, '3006', '/nonsense')).includes('do not know'));
+      assert.ok((await say(store, '3006', '/nonsense')).includes('Не знаю команди'));
     });
   });
 
@@ -851,7 +851,7 @@ describe('bot handlers', () => {
       await store.recordMessage('3007', 555, [a, b]);
 
       const ambiguous = await say(store, '3007', '🔔', { reply_to_message: { message_id: 555 } });
-      assert.ok(ambiguous.includes('Which one'), ambiguous.slice(0, 200));
+      assert.ok(ambiguous.includes('Яка саме'), ambiguous.slice(0, 200));
 
       const chosen = await say(store, '3007', '🔔 2', { reply_to_message: { message_id: 555 } });
       assert.ok(chosen.includes('Second'), chosen.slice(0, 200));
@@ -883,7 +883,7 @@ describe('bot handlers', () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3010', city: 'kharkiv' });
       const panel = await say(store, '3010', '/settings');
-      assert.ok(panel.includes('Settings'), panel.slice(0, 300));
+      assert.ok(panel.includes('Налаштування'), panel.slice(0, 300));
       assert.ok(panel.includes('(set:weekend_digest)'), 'every digest needs its own button');
       assert.ok(panel.includes('(set:city)') && panel.includes('(set:prefs)'), panel.slice(0, 600));
     });
@@ -895,7 +895,7 @@ describe('bot handlers', () => {
       const off = await tap(store, '3011', 'set:weekend_digest');
       assert.equal((await store.getUser('3011'))?.weekend_digest, 0);
       assert.ok(off.includes('edit 42'), 'the panel is rewritten, not reposted');
-      assert.ok(off.includes('❌ 🎉 Weekend picks'), off.slice(0, 400));
+      assert.ok(off.includes('❌ 🎉 Вихідні'), off.slice(0, 400));
 
       await tap(store, '3011', 'set:weekend_digest');
       assert.equal((await store.getUser('3011'))?.weekend_digest, 1);
@@ -916,7 +916,7 @@ describe('bot handlers', () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3013', city: 'kharkiv' });
       const confirm = await tap(store, '3013', 'set:stop');
-      assert.ok(confirm.includes('Unsubscribe?'), confirm.slice(0, 300));
+      assert.ok(confirm.includes('Відписатися?'), confirm.slice(0, 300));
       assert.equal((await store.getUser('3013'))?.blocked, 0, 'one tap must not unsubscribe anyone');
       await tap(store, '3013', 'set:stop!');
       assert.equal((await store.getUser('3013'))?.blocked, 1);

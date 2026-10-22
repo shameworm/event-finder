@@ -42,6 +42,16 @@ What users can send it: `/start` (onboarding asks for their city), `/week`,
 `/unfollow X`, `/stop`, `/help`, and `/stats` (owner only). Anything else is
 treated as a preference change if it reads like one, otherwise as a search.
 
+**The bot speaks Ukrainian.** Every string a user reads — the command menu, the
+settings panel, digests, reminders, prices and date labels — is Ukrainian; logs,
+CLI output and `/stats` stay English, because they are for whoever runs it. The
+copy lives next to the code that sends it, not in a catalogue: there is one
+language, so a lookup layer would buy nothing. Day names come from
+`locale: uk-UA` in config.yaml and city names from each city's `label`.
+
+Requests may be written in Ukrainian, Russian or English — that was always true
+of the parser and is unchanged.
+
 Most of that is also reachable without typing. The bot publishes `BOT_COMMANDS`
 with `setMyCommands` on start-up, so Telegram autocompletes `/` and fills the ☰
 menu; `/start` and `/help` carry quick-action buttons; and `/settings` is a
@@ -54,7 +64,7 @@ taste model, rewriting itself in place on every tap. Button presses arrive as
 When the user asks you directly rather than the bot, use the CLI:
 
 ```bash
-npx tsx scripts/search.ts "what's interesting in Kharkiv this weekend, I like stand-up and indie rock, no classical music"
+npx tsx scripts/search.ts "що цікавого у Харкові на вихідних, люблю стендап та інді-рок, без класики"
 ```
 
 It parses the free text (city, dates, likes, dislikes, budget), runs every

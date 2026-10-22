@@ -58,13 +58,13 @@ await withStore(async (store) => {
 
   let fired = 0;
   for (const { row, which } of due) {
-    const when = which === '1d' ? 'Tomorrow' : 'In ~3 hours';
+    const when = which === '1d' ? 'Завтра' : 'Через ~3 години';
     const day = dayLabel(localDate(row.starts_at, cfg.timezone), cfg.locale);
     const time = localTime(row.starts_at, cfg.timezone);
     const text =
       `⏰ <b>${escapeHtml(when)}</b>: ${escapeHtml(row.title)}\n` +
       `${escapeHtml(day)} ${escapeHtml(time)}${row.venue ? ` · ${escapeHtml(row.venue)}` : ''}\n` +
-      (row.url ? `<a href="${escapeHtml(row.url)}">details →</a>` : '');
+      (row.url ? `<a href="${escapeHtml(row.url)}">детальніше →</a>` : '');
 
     try {
       await sendMessage(text, { chatId: row.chat_id, dryRun, log });

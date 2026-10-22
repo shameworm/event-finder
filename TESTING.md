@@ -57,7 +57,7 @@ npx tsx scripts/websearch.ts   --city kharkiv
 | items returned | more than zero for a 7-day window in a big city |
 | dates | all inside the window you asked for |
 | prices | `350–900 ₴` / `from 450 ₴` / `up to 390 ₴`, not `price n/a` everywhere |
-| statuses | some `scheduled`; `SOLD OUT`/`CANCELLED` badges where the site says so |
+| statuses | some `scheduled`; `КВИТКІВ НЕМАЄ`/`СКАСОВАНО` badges where the site says so |
 | politeness | ~1.5 s between requests in the log, not a burst |
 
 Add `--json | head -40` for raw fields, `--pages 1` to go faster.
@@ -79,15 +79,16 @@ npx tsx scripts/bot.ts
 In Telegram, as yourself:
 
 1. `/start` → a greeting and a city keyboard. Pick a city → it confirms.
-2. `/weekend` → "⏳ Looking…" then a numbered digest grouped by day.
-3. Reply `🔔 2` to it → "Reminder set for …".
+2. `/weekend` → "⏳ Шукаю…" then a numbered digest grouped by day, in Ukrainian.
+3. Reply `🔔 2` to it → "⏰ Нагадування поставив — …".
 4. `npx tsx scripts/reminders.ts --list` → the reminder is there with your chat id.
-5. `add jazz to favourites` → "✅ Noted: favourites + jazz".
+5. `додай джаз до улюблених` → "✅ Записав: улюблене + джаз". The English
+   phrasings still work too.
 6. `/prefs` → jazz is listed.
 7. `stand-up this weekend` → a search, not a preference change.
 8. Type `/` → Telegram autocompletes the command list, and the ☰ button next
    to the text field shows the same menu.
-9. `/settings` → a panel with a button per digest. Tap **Weekend picks** → the
+9. `/settings` → a panel with a button per digest. Tap **Вихідні** → the
    same message redraws with ❌ and no new message appears; tap it again → ✅.
 10. In the panel: **Change city** → city buttons → pick one → back to the panel
     with the new city. **My taste** → the preference summary with ⬅️ Back.
