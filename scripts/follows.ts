@@ -15,7 +15,8 @@
  *   --chat ID     restrict to these chat ids
  *   --dry-run     print instead of sending
  */
-import { cityLabel, loadConfig } from '../src/config.ts';
+import { loadConfig } from '../src/config.ts';
+import { REMINDER_HINT } from '../src/render.ts';
 import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore } from '../src/db.ts';
@@ -46,9 +47,8 @@ await withStore(async (store) => {
     // the per-person delivery log is the memory here: told once, told again
     // only when something about the show changed
     newOnly: !args.has('all'),
-    oneMessagePerItem: true,
-    footer: 'Відповідай 🔔 — і я нагадаю за добу та за 3 години до початку.',
-    title: (_user, city) => `⭐️ Хтось, за ким ти стежиш, виступає — ${cityLabel(city)}`,
+    footer: REMINDER_HINT,
+    title: () => '⭐️ Грає хтось, за ким ти стежиш',
     // keep only the shows by people this user follows
     select: (user, ranked) => ranked.filter((item) => user.prefs.follow.some((f) => matchesFollow(item, f))),
   });

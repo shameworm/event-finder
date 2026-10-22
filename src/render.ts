@@ -8,11 +8,40 @@ import { escapeHtml } from './telegram-api.ts';
 
 export type Format = 'html' | 'text';
 
+/** Ukrainian needs three forms: 1 подія, 2 події, 5 подій. */
+function plural(n: number, [one, few, many]: [string, string, string]): string {
+  const mod100 = n % 100;
+  const mod10 = n % 10;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
+}
+
+export const countEvents = (n: number): string => `${n} ${plural(n, ['подія', 'події', 'подій'])}`;
+export const countPlaces = (n: number): string => `${n} ${plural(n, ['місце', 'місця', 'місць'])}`;
+
+export const REMINDER_HINT = 'Тапни ❤️ на події — нагадаю за день і за 3 години до початку.';
+export const PLACES_HINT = 'Скажи, як тобі — і я підлаштую підказки.';
+export const NOTHING_FOUND = 'Цього разу нічого не знайшлося. Спробуй ширший період або інше місто.';
+
 const STATUS_BADGE: Record<string, string> = {
   soldout: ' — 🚫 КВИТКІВ НЕМАЄ',
   cancelled: ' — ❌ СКАСОВАНО',
   postponed: ' — ⏳ ПЕРЕНЕСЕНО',
   limited: ' — ⚠️ лишилось мало квитків',
+};
+
+/**
+ * `changeNote` arrives as the freshness checker's own reason — an English key
+ * from src/fresh.ts, not something a person should read.
+ */
+const CHANGE_NOTE: Record<string, string> = {
+  'new date': 'нова дата',
+  'sold out': 'квитки скінчилися',
+  'few tickets left': 'мало квитків',
+  cancelled: 'скасовано',
+  'price changed': 'змінилася ціна',
 };
 
 function link(label: string, url: string, format: Format): string {
@@ -61,12 +90,15 @@ export function renderItem(item: Item, opts: RenderItemOptions = {}): string {
     .map((x) => plain(x, format))
     .join(' · ');
 
+  const note = opts.changeNote ? CHANGE_NOTE[opts.changeNote] ?? opts.changeNote : undefined;
   const lines = [
-    `${num}${emoji} ${bold(item.title, format)}${STATUS_BADGE[item.status] ?? ''}${opts.changeNote ? ` — 🔁 ${opts.changeNote}` : ''}`,
+    `${num}${emoji} ${bold(item.title, format)}${STATUS_BADGE[item.status] ?? ''}${note ? ` — 🔁 ${note}` : ''}`,
     facts,
   ];
   if (item.description) lines.push(plain(truncate(item.description, 140), format));
-  lines.push(link(item.kind === 'place' ? 'детальніше →' : 'квитки →', item.url, format));
+  // "квитки" is a promise; a free event or one with no price has none to make
+  const buyable = item.kind === 'event' && !item.free && (item.priceMin !== undefined || item.priceMax !== undefined);
+  lines.push(link(buyable ? 'квитки →' : 'детальніше →', item.url, format));
   if (opts.explain && item.reasons?.length) {
     lines.push(plain(`· ${item.reasons.slice(0, 4).join(', ')} (бали ${item.score})`, format));
   }
@@ -82,17 +114,19 @@ export interface DigestOptions {
   maxPerDay?: number;
   explain?: boolean;
   footer?: string;
-  /** Number items continuously so the user can reply "🔔 3". */
+  /** Number items continuously (console output only; Telegram gets one message each). */
   numbered?: boolean;
   changeNotes?: Map<string, string>;
 }
 
 /**
- * Full digest: header, day sections, numbered items, footer.
+ * Full digest as one block of text: header, day sections, numbered items, footer.
+ *
+ * This is the console shape, for `scripts/search.ts` and the agent hand-off in
+ * `src/source.ts`. Telegram does not use it — see `buildMessages`.
  *
  * Also returns `ordered` — the items in the order they were numbered, which is
- * day-grouped and therefore NOT the score order they came in as. Callers store
- * that list so a "🔔 3" reply resolves to the event the user actually saw as 3.
+ * day-grouped and therefore NOT the score order they came in as.
  */
 export function buildDigest(opts: DigestOptions): { text: string; ordered: Item[] } {
   const cfg = loadConfig();
@@ -106,7 +140,7 @@ export function buildDigest(opts: DigestOptions): { text: string; ordered: Item[
     ? `${bold(opts.title, format)}\n${plain(cities, format)}`
     : `${bold(opts.title, format)}\n${plain(`${cities} · ${rangeText(opts.query)}`, format)}`;
   if (opts.items.length === 0) {
-    const empty = opts.footer ?? 'Цього разу нічого не знайшлося. Спробуй ширший період або інше місто.';
+    const empty = opts.footer ?? NOTHING_FOUND;
     return { text: `${head}\n\n${plain(empty, format)}`, ordered: [] };
   }
 
@@ -121,7 +155,7 @@ export function buildDigest(opts: DigestOptions): { text: string; ordered: Item[
         .map((it) => renderItem(it, { format, index: opts.numbered === false ? undefined : n++, explain: opts.explain }))
         .join('\n\n'),
     );
-    blocks.push(plain(opts.footer ?? 'Скажи, як тобі — і я підлаштую підказки.', format));
+    blocks.push(plain(opts.footer ?? PLACES_HINT, format));
     return { text: blocks.join('\n\n'), ordered };
   }
 
@@ -144,13 +178,80 @@ export function buildDigest(opts: DigestOptions): { text: string; ordered: Item[
         .join('\n\n'),
     );
   }
-  blocks.push(plain(opts.footer ?? 'Відповідай 🔔 (або «🔔 3»), щоб отримати нагадування за добу та за 3 години до початку.', format));
+  blocks.push(plain(opts.footer ?? REMINDER_HINT, format));
   return { text: blocks.join('\n\n'), ordered };
 }
 
 /** Digest text only. */
 export function renderDigest(opts: DigestOptions): string {
   return buildDigest(opts).text;
+}
+
+export interface OutgoingMessage {
+  text: string;
+  /** What this message is about: exactly one item for an event, none for the header. */
+  items: Item[];
+}
+
+/**
+ * The Telegram shape: a short header, then **one message per event**.
+ *
+ * One message per event is what makes the heart work. Every event message is
+ * stored against its single item (see src/deliver.ts), so a ❤️ reaction on it
+ * resolves to exactly one event with nothing to disambiguate — no numbering,
+ * no "which one did you mean".
+ *
+ * The header carries the city, the window and the count; the events keep their
+ * own day, since there are no day headings to group them under any more.
+ */
+export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
+  const cfg = loadConfig();
+  const format = opts.format ?? 'html';
+  const maxPerDay = opts.maxPerDay ?? cfg.digest.max_items_per_day;
+  const placesOnly = opts.items.length > 0 && opts.items.every((i) => i.kind === 'place');
+
+  // same order and same per-day cap as the digest, then flattened
+  const kept: Item[] = [];
+  if (placesOnly) {
+    kept.push(...opts.items);
+  } else {
+    for (const group of groupByDay(opts.items, cfg.timezone)) {
+      kept.push(...(maxPerDay > 0 ? group.items.slice(0, maxPerDay) : group.items));
+    }
+  }
+
+  const facts = [
+    opts.query.cities.map((c) => cityLabel(c)).join(', '),
+    // dates only: the title already names the window, and "(цього тижня)"
+    // under a "Цього тижня" heading is just noise
+    placesOnly ? '' : rangeDates(opts.query),
+    kept.length ? (placesOnly ? countPlaces(kept.length) : countEvents(kept.length)) : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  const tail = kept.length === 0 ? opts.footer ?? NOTHING_FOUND : opts.footer ?? (placesOnly ? PLACES_HINT : REMINDER_HINT);
+  const header = `${bold(opts.title, format)}\n${plain(facts, format)}\n\n${plain(tail, format)}`;
+
+  return [
+    { text: header, items: [] },
+    ...kept.map((item) => ({
+      text: renderItem(item, {
+        format,
+        withDay: !placesOnly,
+        explain: opts.explain,
+        changeNote: opts.changeNotes?.get(item.id),
+      }),
+      items: [item],
+    })),
+  ];
+}
+
+/** "пт, 23 жовт. – нд, 25 жовт.", or one day when the window is one day. */
+export function rangeDates(q: Query): string {
+  const cfg = loadConfig();
+  if (q.from === q.to) return dayLabel(q.from, cfg.locale);
+  return `${dayLabel(q.from, cfg.locale)} – ${dayLabel(q.to, cfg.locale)}`;
 }
 
 export function rangeText(q: Query): string {

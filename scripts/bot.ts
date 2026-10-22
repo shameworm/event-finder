@@ -2,9 +2,17 @@
 /**
  * The bot service: one Telegram bot that anybody can use.
  *
+ * It handles both messages and ❤️ reactions — a reaction on an event message
+ * is what sets a reminder, so `getUpdates` asks Telegram for `message_reaction`
+ * as well (see src/telegram-api.ts).
+ *
  *   npx tsx scripts/bot.ts                 # long-poll until stopped (the normal way to run it)
  *   npx tsx scripts/bot.ts --once          # drain whatever is waiting, then exit (cron mode)
  *   npx tsx scripts/bot.ts --dry-run       # print replies instead of sending them
+ *
+ * --dry-run only stops the sending. Preferences, onboarding stages, opt-ins and
+ * reminders are still written, so run it against a throwaway database if you do
+ * not want it touching real users.
  *
  * Each user gets their own city, taste model, digest settings and reminders —
  * all keyed by their Telegram chat id. Searches go through the shared per-city
@@ -19,7 +27,7 @@ import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore, type Store } from '../src/db.ts';
 import { botToken, getMe, getUpdates, setMyCommands } from '../src/telegram-api.ts';
-import { BOT_COMMANDS, handleCallback, handleMessage, type HandlerContext } from '../src/bot-handlers.ts';
+import { BOT_COMMANDS, handleCallback, handleMessage, handleReaction, type HandlerContext } from '../src/bot-handlers.ts';
 import { sleep } from '../src/util.ts';
 
 const args = parseArgs();
@@ -42,12 +50,16 @@ async function drain(store: Store, timeout: number): Promise<number> {
   for (const update of updates) {
     const msg = update.message ?? update.edited_message;
     const cb = update.callback_query;
-    if (msg || cb) {
+    const reaction = update.message_reaction;
+    if (msg || cb || reaction) {
       const started = Date.now();
-      const where = msg ? msg.chat.id : (cb?.message?.chat.id ?? cb?.from?.id);
+      const where = msg ? msg.chat.id : (cb?.message?.chat.id ?? cb?.from?.id ?? reaction?.chat.id);
       try {
+        // a ❤️ on an event message is how people set reminders, so reactions
+        // are first-class updates here, not a side channel
         if (msg) await handleMessage(ctx, msg);
         else if (cb) await handleCallback(ctx, cb);
+        else if (reaction) await handleReaction(ctx, reaction);
         log.info(`handled update ${update.update_id} from chat ${where} in ${Date.now() - started}ms`);
       } catch (err) {
         // one user's bad message or button tap must never take the bot down

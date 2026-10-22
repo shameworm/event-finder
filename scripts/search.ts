@@ -33,7 +33,6 @@ import { withStore } from '../src/db.ts';
 import { ownerChatId } from '../src/users.ts';
 import { deliver } from '../src/deliver.ts';
 import { renderDigest } from '../src/render.ts';
-import { cityLabel } from '../src/config.ts';
 
 const args = parseArgs();
 const log = makeLogger('search');
@@ -90,7 +89,8 @@ await withStore(async (store) => {
     return;
   }
 
-  const title = `${query.kinds.includes('place') ? '📍 Places' : '🗓 What’s on'} in ${query.cities.map((c) => cityLabel(c)).join(', ')}`;
+  // the header already names the cities; --send puts this in front of a real person
+  const title = query.kinds.includes('place') ? '📍 Варто зайти' : '🗓 Що знайшлося';
 
   if (args.has('send')) {
     if (!chatId) {

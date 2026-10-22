@@ -9,6 +9,8 @@ personalised digests, alerts and reminders.
 - **Sources**: Concert.ua, Karabas, Kontramarka, Telegram channels (GramJS), web search
 - **Cities**: Kharkiv (default), Kyiv, Lviv, Dnipro, Odesa, Ivano-Frankivsk — add any
 - **Multi-user**: every person gets their own city, taste, digest settings and reminders
+- **Ukrainian**: the bot speaks Ukrainian only; it still understands requests typed in Russian or English
+- **One message per event**, so a ❤️ on it means exactly that event
 
 TypeScript on Node 20+, run directly with `tsx` — no build step.
 
@@ -25,6 +27,8 @@ web search ─┘                                            rank per user (thei
                                                  ┌───────────────────┼───────────────────┐
                                                  ▼                   ▼                   ▼
                                            user A digest       user B digest       user C digest
+                                                 │                   │                   │
+                                        header + one message per event, each one ❤️-able
 ```
 
 The cache is the point: 200 people in Kharkiv asking about the same weekend cost
@@ -73,10 +77,16 @@ bot:
   max_results: 10
   interactive_pages: 2     # pages per source while someone waits for a reply
   send_delay_ms: 60        # pause between users when fanning out a digest
+  message_delay_ms: 400    # pause between the messages of one digest
 
 cache:
   ttl_seconds: 1800        # one scrape per city serves everyone for this long
 ```
+
+`message_delay_ms` exists because every event is its own message: a ten-event
+week is eleven sends to the same chat, and Telegram throttles a sustained burst
+at roughly one message per second. Lower it and you will start seeing 429s
+(`sendMessage` retries once, then gives up on that message).
 
 Start with `public: false` and your own chat id on the allowlist while you try
 it out; flip it to `true` when you are ready for strangers.
@@ -91,9 +101,10 @@ curl -sI https://<sub>.karabas.com/                          | head -1   # want 
 curl -sI https://<sub>.kontramarka.ua/uk/concert             | head -1   # want 200
 ```
 
-Put every spelling into `aliases` (including declensions — "Харкові",
-"Kharkov"): that is how free text and onboarding match a city. Only configured
-cities are offered to new users.
+Give the city a Ukrainian `label` — that is the name people see — and put every
+spelling into `aliases` (including declensions and the English spelling:
+"Харкові", "Kharkiv", "Kharkov"). Aliases are how free text and onboarding match
+a city; only configured cities are offered to new users.
 
 ## 3. Secrets
 
@@ -117,9 +128,15 @@ The command menu — what Telegram autocompletes after `/` and shows behind the
 Two things are still worth setting in @BotFather by hand:
 
 ```
-/setdescription  Finds concerts, stand-up, theatre, exhibitions and new places in Ukrainian cities.
-/setabouttext    Your city, your taste, one message a week.
+/setdescription  Знаходжу концерти, стендап, театр, виставки й нові місця в українських містах.
+/setabouttext    Твоє місто, твій смак, одне повідомлення на тиждень.
 ```
+
+The bot replies in Ukrainian and nothing else, so those two lines are Ukrainian
+too. There is one language, so its copy sits next to the code that sends it —
+`src/bot-handlers.ts` for the conversation, `src/render.ts` for events — rather
+than in a catalogue with a lookup layer on top. Logs, CLI output and `/stats`
+stay English: they are for whoever runs the bot.
 
 ## 4. Storage
 
@@ -137,8 +154,9 @@ npm run db:generate    # or generate SQL migrations into drizzle/migrations
 npx tsx scripts/doctor.ts   # should report: postgres
 ```
 
-Tables: `users`, `deliveries` (what each person was shown), `messages` (so 🔔
-replies resolve), `reminders`, `scrape_cache`, `usage` (rate limits), `state`.
+Tables: `users`, `deliveries` (what each person was shown), `messages` (which
+event each message was about, so a ❤️ on it resolves), `reminders`,
+`scrape_cache`, `usage` (rate limits), `state`.
 
 ## 5. Run the bot
 
@@ -146,6 +164,10 @@ replies resolve), `reminders`, `scrape_cache`, `usage` (rate limits), `state`.
 npx tsx scripts/bot.ts            # long-polls until stopped
 npx tsx scripts/bot.ts --dry-run  # prints replies instead of sending
 ```
+
+`--dry-run` stops the *sending* only. Preferences, onboarding stages, opt-ins
+and reminders are still written, so point it at a throwaway database
+(`EVENTS_FINDER_DB=/tmp/test.db`) if you do not want it touching real users.
 
 Then message it `/start`.
 
@@ -216,7 +238,7 @@ npx tsx scripts/telegram.ts --channel @some_channel --dump   # see raw posts
 ```bash
 npx tsx scripts/doctor.ts            # config, secrets, db, users, bot policy
 npx tsx scripts/doctor.ts --network  # also probe every source site
-npm test                             # 87 offline checks (~3s, no network)
+npm test                             # 124 offline checks (~3s, no network)
 ```
 
 ## 8. Automate the digests
@@ -230,7 +252,7 @@ them with `hermes cron add` (both forms are there, plus a crontab fallback):
 | Thursday 18:00 | `digest.ts --weekend --top 5` | same |
 | every 6 hours | `follows.ts` | each user's follow list |
 | Sunday 11:00 | `places.ts` | each user's interests |
-| every 15 minutes | `reminders.ts` | everyone's 🔔 reminders |
+| every 15 minutes | `reminders.ts` | everyone's ❤️ reminders |
 
 Rehearse each one with `--dry-run`, and against yourself with
 `--chat <your-chat-id>`, before letting it loose on real users.
@@ -251,7 +273,10 @@ npx tsx scripts/search.ts "stand-up in Lviv this weekend"    # answer by hand
 - **Users who block the bot** are detected on the next send and marked `blocked`,
   so they stop receiving everything. `/start` brings them back.
 - **No repeats**: an event is re-sent to a person only when its date, price or
-  availability changed, and the line says which (`🔁 new date`).
+  availability changed, and the line says which (`🔁 нова дата`).
+- **Reminders** are set by tapping ❤️ on an event message, and cancelled by
+  taking the ❤️ off. Typing `нагадай` still works for anyone who does not react.
+  A heart also adds that event's category to the person's favourites.
 - **`/stats`** in the chat (owner only) shows user counts and table sizes.
 
 ### Being a good citizen
@@ -277,7 +302,7 @@ scripts/
   search.ts digest.ts follows.ts places.ts reminders.ts
   prefs.ts tg-login.ts doctor.ts
 src/
-  bot-handlers.ts         the conversation
+  bot-handlers.ts         the conversation, the buttons and the ❤️ reaction
   users.ts                chat id ↔ taste model
   cache.ts                one scrape per city
   fanout.ts               scheduled jobs across all users

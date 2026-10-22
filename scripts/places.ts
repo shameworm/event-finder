@@ -16,7 +16,7 @@
  * round of searching serves everybody.
  */
 import { loadConfig } from '../src/config.ts';
-import { cityLabel } from '../src/config.ts';
+import { PLACES_HINT } from '../src/render.ts';
 import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore } from '../src/db.ts';
@@ -65,8 +65,8 @@ await withStore(async (store) => {
     newOnly: !args.has('all'),
     dryRun: args.has('dry-run'),
     onlyChats: args.list('chat'),
-    title: (_user, city) => `📍 Варто зайти — ${cityLabel(city)}`,
-    footer: 'Скажи, як тобі — і я підлаштую підказки. /settings, щоб вимкнути ці пропозиції.',
+    title: () => '📍 Варто зайти',
+    footer: `${PLACES_HINT} /mute places — щоб не приходили.`,
   });
 
   if (result.items === 0) {

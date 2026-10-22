@@ -1,5 +1,6 @@
 /**
- * The conversation: everything the bot does when someone sends it a message.
+ * The conversation: everything the bot does when someone sends it a message,
+ * taps one of its buttons, or puts a ❤️ on one of its event messages.
  *
  * Used by `scripts/bot.ts`, both as a long-polling service and in --once
  * cron mode, so the behaviour is identical either way.
@@ -7,16 +8,18 @@
 import type { Item, Kind } from './types.ts';
 import type { OptIn, Store } from './db.ts';
 import type { Logger } from './log.ts';
-import type { TgCallbackQuery, TgMessage } from './schemas.ts';
+import type { TgCallbackQuery, TgMessage, TgReactionUpdate } from './schemas.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
 import { answerCallbackQuery, editMessageText, escapeHtml, sendMessage, type InlineButton } from './telegram-api.ts';
-import { applyPrefsCommand, describePrefs } from './prefs-engine.ts';
+import { applyPrefsCommand, describePrefs, favouritesFromList } from './prefs-engine.ts';
+import { canonicalTag, tagLabel } from './categories.ts';
 import { parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
+import { countEvents } from './render.ts';
 import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
-import { WORD_END, addDays, today } from './util.ts';
+import { WORD_END, addDays, normText, today } from './util.ts';
 
 export interface HandlerContext {
   store: Store;
@@ -153,12 +156,54 @@ function settingsPanel(user: BotUser): { text: string; inlineKeyboard: InlineBut
  * "покажи налаштування", "мої смаки", "show my settings" — asking to see the
  * panel, which must not turn into a twenty-second scrape for "налаштування".
  */
+/* ------------------------------------------------------- onboarding: taste --- */
+
+const TASTE_ASK = `А тепер — що тобі подобається?
+
+Напиши своїми словами: <i>стендап, інді-рок і виставки, тільки не класика</i>. Можна просто перелічити через кому.`;
+const TASTE_SKIPPED = 'Гаразд, розберуся по ходу — я вчуся з того, на що ти тапаєш ❤️.';
+const TASTE_UNCLEAR =
+  'Не вловив смаки в цьому. Спробуй перелічити через кому — <i>стендап, джаз, театр</i> — або натисни «Пропустити».';
+const TASTE_SKIP_BUTTON = 'Пропустити';
+
+/** Nudges for the taste question; tapping one is a valid answer by itself. */
+function tasteKeyboard(): { text: string }[][] {
+  const nudges = [
+    ['Стендап', 'Концерти'],
+    ['Театр', 'Виставки'],
+    ['Вечірки', 'Лекції'],
+  ];
+  return [...nudges.map((row) => row.map((text) => ({ text }))), [{ text: TASTE_SKIP_BUTTON }]];
+}
+
+/** Anchored to the end, not followed by \b: JavaScript's \b never fires after a Cyrillic letter. */
+const SKIP = /^\s*(?:пропустити|пропуск|пропусти|далі|потім|не знаю|skip)\s*[.!]?\s*$/iu;
+
+/* ------------------------------------------------------------- the heart --- */
+
+/**
+ * Every heart Telegram offers, including the uncoloured ❤ and the variation
+ * selector it usually arrives with. Only hearts count: 👍 or 🔥 is applause,
+ * not "remind me".
+ */
+const HEARTS = new Set([
+  '❤', '🧡', '💛', '💚', '💙', '💜', '🤎', '🖤', '🤍', '🩷', '🩵', '🩶',
+  '💖', '💗', '💓', '💞', '💕', '💘', '💝', '❣', '♥',
+]);
+
+export function isHeart(emoji: string | undefined): boolean {
+  if (!emoji) return false;
+  return HEARTS.has(emoji.replace(/️/gu, ''));
+}
+
 const SHOW_SETTINGS =
   /^\s*(?:покажи|показати|show|list|які|яке)?\s*(?:my |мої |моє )?(?:налаштування|settings|смаки|уподобання|prefs|preferences)\s*\??\s*$/iu;
 
-/** "🔔", "🔔3", "🔔 3", "remind me 2" */
+/** "❤️", "🔔", "нагадай 3" — the typed fallback for people who do not react. */
 export function parseBell(text: string): { bell: boolean; index?: number } {
-  const bell = /🔔|🛎|⏰/u.test(text) || new RegExp(`^\\s*(bell|remind me|нагадай)${WORD_END}`, 'iu').test(text);
+  const bell =
+    /🔔|🛎|⏰|❤|🧡|💛|💚|💙|💜|🤍|🖤|💖|💗|💓|💞|💕|💘|💝|♥/u.test(text) ||
+    new RegExp(`^\\s*(bell|remind me|нагадай)${WORD_END}`, 'iu').test(text);
   if (!bell) return { bell: false };
   const m = text.match(/(\d{1,2})/);
   return { bell: true, index: m ? Number(m[1]) : undefined };
@@ -370,11 +415,41 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
       return;
     }
     user = await saveUserPrefs(ctx.store, user, { ...user.prefs, home_city: city });
+    await ctx.store.setUserStage(chatId, 'taste');
+    await reply(`✅ Нехай буде ${escapeHtml(cityLabel(city))}.\n\n${TASTE_ASK}`, { keyboard: tasteKeyboard() });
+    return;
+  }
+
+  /**
+   * The second onboarding step. We ask outright rather than waiting to infer
+   * it, which is also why a new user no longer inherits the operator's
+   * `favourite_categories` from preferences.yaml (see src/users.ts).
+   */
+  if (user.row.stage === 'taste') {
+    if (SKIP.test(text)) {
+      await ctx.store.setUserStage(chatId, null);
+      await reply(`${TASTE_SKIPPED}\n\n${COMMANDS}`, { removeKeyboard: true });
+      await reply('Обери, з чого почати:', { inlineKeyboard: quickActions() });
+      return;
+    }
+    // "не люблю класику" is a full command and still goes through the parser;
+    // a bare list ("стендап, джаз") only makes sense because we just asked
+    const sentence = applyPrefsCommand(text, user.prefs);
+    const edit = sentence.understood ? sentence : favouritesFromList(text, user.prefs);
+    if (!edit.understood) {
+      await reply(TASTE_UNCLEAR, { keyboard: tasteKeyboard() });
+      return;
+    }
+    // they answered the question, so onboarding is over either way — even when
+    // what they said was already true and there was nothing to store
+    if (edit.changes.length > 0) user = await saveUserPrefs(ctx.store, user, edit.prefs);
     await ctx.store.setUserStage(chatId, null);
-    await reply(
-      `✅ Нехай буде ${escapeHtml(cityLabel(city))}.\n\nРозкажи, що тобі заходить — «стендап та інді-рок, без класики» — або просто спробуй /weekend.\n\n${COMMANDS}`,
-      { removeKeyboard: true },
-    );
+    ctx.log.info(`chat ${chatId} onboarded: ${edit.changes.join('; ') || 'no change'}`);
+    const head =
+      edit.changes.length > 0
+        ? `✅ Записав:\n${edit.changes.map((c) => `· ${escapeHtml(c)}`).join('\n')}`
+        : `Нічого міняти — ${escapeHtml(edit.note ?? 'вже так і є')}.`;
+    await reply(`${head}\n\n${COMMANDS}`, { removeKeyboard: true });
     await reply('Обери, з чого почати:', { inlineKeyboard: quickActions() });
     return;
   }
@@ -430,7 +505,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
 
     case '/reminders': {
       const rows = await ctx.store.listReminders(chatId);
-      if (rows.length === 0) return reply('Нагадувань поки немає. Відповідай 🔔 на подію — і я поставлю.');
+      if (rows.length === 0) return reply('Нагадувань поки немає. Тапни ❤️ на події — і я поставлю.');
       return reply(
         `<b>⏰ Твої нагадування</b>\n` +
           rows
@@ -601,17 +676,98 @@ async function handleBell(ctx: HandlerContext, msg: TgMessage, chatId: string, i
 
   if (items.length === 0) {
     return replyTo
-      ? 'Я вже не памʼятаю, про яку подію було те повідомлення — попроси свіжий список і відповідай на нього.'
-      : 'Відповідай 🔔 на повідомлення з подією, або спершу попроси щось знайти.';
+      ? 'Я вже не памʼятаю, про яку подію було те повідомлення — попроси свіжий список і тапни ❤️ на потрібній.'
+      : 'Тапни ❤️ на повідомленні з подією, або спершу попроси щось знайти.';
   }
   const chosen = items.length === 1 ? items[0] : index ? items[index - 1] : undefined;
   if (!chosen) {
     const list = items.slice(0, 20).map((it, i) => `${i + 1}. ${it.title}`).join('\n');
-    return `У тому списку було ${items.length} подій. Яка саме? Відповідай «🔔 N».\n\n${escapeHtml(list)}`;
+    return `У тому списку було ${countEvents(items.length)}. Яка саме? Тапни ❤️ на потрібній.\n\n${escapeHtml(list)}`;
   }
   if (!chosen.startsAt) return `У «${escapeHtml(chosen.title)}» ще немає часу початку, тож нагадування не поставлю.`;
 
-  const outcome = ctx.dryRun ? 'added' : await ctx.store.addReminder(chatId, chosen);
+  const outcome = await ctx.store.addReminder(chatId, chosen);
   if (outcome === 'no-date') return `У «${escapeHtml(chosen.title)}» ще немає часу початку.`;
-  return `⏰ Нагадування ${outcome === 'exists' ? 'вже стоїть' : 'поставив'} — <b>${escapeHtml(chosen.title)}</b>. Нагадаю за добу та за 3 години до початку.`;
+
+  const user = await getUser(ctx.store, chatId, ctx.log);
+  const learned = user ? await learnFromHeart(ctx, user, chosen) : null;
+  return reminderSaid(outcome, chosen.title, learned);
+}
+
+/* --------------------------------------------------------- the reactions --- */
+
+function reminderSaid(outcome: string, title: string, learned: string | null): string {
+  const said = `⏰ Нагадування ${outcome === 'exists' ? 'вже стоїть' : 'поставив'} — <b>${escapeHtml(title)}</b>. Нагадаю за добу та за 3 години до початку.`;
+  return learned ? `${said}\n(додав «${escapeHtml(tagLabel(learned))}» до улюбленого)` : said;
+}
+
+/**
+ * Someone put a ❤️ on one of our messages, or took one off.
+ *
+ * Every event goes out as its own message (src/deliver.ts), so the message id
+ * names exactly one event and there is nothing to disambiguate. A heart sets
+ * the reminder and teaches the taste model; removing it cancels the reminder
+ * but keeps what was learned — they were interested, plans just changed.
+ *
+ * Reactions on anything we do not recognise are met with silence: Telegram
+ * sends an update for every reaction in the chat, and a bot that answers all
+ * of them is a bot people mute.
+ */
+export async function handleReaction(ctx: HandlerContext, update: TgReactionUpdate): Promise<void> {
+  const chatId = String(update.chat.id);
+  if (!isAllowed(chatId)) return;
+
+  const had = update.old_reaction.some((r) => isHeart(r.emoji));
+  const has = update.new_reaction.some((r) => isHeart(r.emoji));
+  if (had === has) return;
+
+  const user = await getUser(ctx.store, chatId, ctx.log);
+  if (!user) return;
+
+  const items = await ctx.store.itemsForMessage(chatId, update.message_id);
+  if (items.length === 0) return;
+
+  const reply = makeReply(ctx, chatId, update.message_id);
+  // a digest header, or an old-style message that covered a whole list
+  if (items.length > 1) return reply('Тапни ❤️ на самій події — на цьому повідомленні їх багато.');
+  const item = items[0]!;
+
+  if (!has) {
+    await ctx.store.cancelReminder(chatId, item.id);
+    ctx.log.info(`chat ${chatId} un-hearted "${item.title}"`);
+    return reply(`Прибрав нагадування — <b>${escapeHtml(item.title)}</b>.`);
+  }
+
+  if (!item.startsAt) return reply(`У «${escapeHtml(item.title)}» ще немає часу початку, тож нагадування не поставлю.`);
+
+  const outcome = await ctx.store.addReminder(chatId, item);
+  if (outcome === 'no-date') return reply(`У «${escapeHtml(item.title)}» ще немає часу початку.`);
+
+  const learned = await learnFromHeart(ctx, user, item);
+  ctx.log.info(`chat ${chatId} hearted "${item.title}" (reminder ${outcome}${learned ? `, learned ${learned}` : ''})`);
+  return reply(reminderSaid(outcome, item.title, learned));
+}
+
+/**
+ * A heart is a free sample of someone's taste, so take it: the event's category
+ * joins their favourites (an interesting place joins their interests).
+ * Returns the tag that was learned, or null when there was nothing new.
+ */
+async function learnFromHeart(ctx: HandlerContext, user: BotUser, item: Item): Promise<string | null> {
+  const tag = canonicalTag(item.category);
+  if (!tag) return null;
+  const has = (list: string[]) => list.some((v) => normText(v) === normText(tag));
+  if (has(user.prefs.disliked_categories)) return null;
+
+  if (item.kind === 'place') {
+    if (has(user.prefs.interests)) return null;
+    await saveUserPrefs(ctx.store, user, { ...user.prefs, interests: [...user.prefs.interests, tag] });
+  } else {
+    if (has(user.prefs.favourite_categories)) return null;
+    await saveUserPrefs(ctx.store, user, {
+      ...user.prefs,
+      favourite_categories: [...user.prefs.favourite_categories, tag],
+    });
+  }
+  return tag;
 }
