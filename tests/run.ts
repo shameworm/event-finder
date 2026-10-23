@@ -687,6 +687,18 @@ describe('scrapers, offline', () => {
     assert.equal(item.city, 'kharkiv');
   });
 
+  it('makes a card link absolute, so the button in Telegram is not dead', async () => {
+    const relative = `<!doctype html><html><body>
+      <div class="cat_item" itemscope itemtype="http://schema.org/Event">
+        <a itemprop="url" class="block-info__title" href="/uk/relative-123.html"><span itemprop="name">Відносне</span></a>
+        <meta itemprop="startDate" content="2026-10-21T18:30:00+03:00">
+      </div></body></html>`;
+    const res = await collectKontramarka({ query: wide, city: 'kharkiv', log, maxPages: 1, fetchText: serve(relative) });
+    const item = res.items.find((i) => i.title === 'Відносне');
+    assert.ok(item, 'the card was not read at all');
+    assert.equal(item.url, 'https://kharkiv.kontramarka.ua/uk/relative-123.html');
+  });
+
   it('reads Karabas JSON-LD into items', async () => {
     const page = `<html><head><script type="application/ld+json">${fixture('karabas-event.json')}</script></head><body></body></html>`;
     assert.equal(eventsFromJsonLd(page).length, 1, 'the fixture is one Event');

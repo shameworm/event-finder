@@ -24,12 +24,29 @@ export const SOURCE = 'kontramarka';
 
 const DEFAULT_CATEGORIES = ['concert', 'standUp', 'theatre', 'exhibition', 'festival', 'clubs', 'museum'];
 
-/** Read one `.cat_item` card's microdata into a plain schema.org-shaped object. */
-function cardToSchema($: cheerio.CheerioAPI, el: AnyNode): Record<string, unknown> | null {
+/** Resolve a card's href against the page it was found on; null if unusable. */
+function absolute(href: string, pageUrl: string): string | null {
+  try {
+    return new URL(href, pageUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read one `.cat_item` card's microdata into a plain schema.org-shaped object.
+ *
+ * `pageUrl` is what the card's href is resolved against: Kontramarka links its
+ * cards with site-relative paths, and a bare "/uk/event/123" in a Telegram
+ * message is a dead link.
+ */
+function cardToSchema($: cheerio.CheerioAPI, el: AnyNode, pageUrl: string): Record<string, unknown> | null {
   const card = $(el);
   const name = card.find('[itemprop="name"]').first().text().trim();
-  const url = card.find('a[itemprop="url"]').first().attr('href') ?? card.find('a.block-info__title').first().attr('href');
-  if (!name || !url) return null;
+  const href = card.find('a[itemprop="url"]').first().attr('href') ?? card.find('a.block-info__title').first().attr('href');
+  if (!name || !href) return null;
+  const url = absolute(href, pageUrl);
+  if (!url) return null;
 
   const meta = (prop: string): string | undefined => {
     const direct = card.find(`meta[itemprop="${prop}"]`).first().attr('content');
@@ -91,7 +108,7 @@ export async function collect(ctx: SourceContext): Promise<SourceResult> {
       ctx.log.info(`${SOURCE}: ${category} page ${page}: ${cards.length} events`);
 
       for (const el of cards) {
-        const obj = cardToSchema($, el);
+        const obj = cardToSchema($, el, url);
         if (!obj) continue;
         const item = fromSchemaEvent(obj, {
           city: ctx.city,
