@@ -458,7 +458,7 @@ describe('render', () => {
   });
 
   it('says what to do when there are no reminders', () => {
-    assert.ok(renderReminders([]).includes('Тапни ❤️'));
+    assert.ok(renderReminders([]).includes('⏰') && renderReminders([]).includes('❤️'));
   });
 
   it('numbers items in the order they are shown, which is what a "🔔 3" reply means', () => {
@@ -575,6 +575,18 @@ describe('messages', () => {
     );
     const msgs = buildMessages({ title: 'T', query, items: sameDay, format: 'text', maxPerDay: 2 });
     assert.equal(msgs.length, 3);
+  });
+
+  it('gives every event card the same four buttons, callback data and all', () => {
+    const msgs = buildMessages({ title: 'T', query, items: [earlier], format: 'text' });
+    assert.deepEqual(msgs[0]!.inlineKeyboard, undefined, 'the header is not an event');
+    const rows = msgs[1]!.inlineKeyboard!;
+    const labels = rows.flat().map((b) => b.text);
+    assert.deepEqual(labels, ['⏰ Нагадати', '👎 Не моє', '📅 В календар', '↗️ Поділитись']);
+    for (const b of rows.flat()) {
+      assert.ok('callback_data' in b && b.callback_data.startsWith('ev:'), JSON.stringify(b));
+      assert.ok(Buffer.byteLength((b as { callback_data: string }).callback_data) <= 64, (b as { callback_data: string }).callback_data);
+    }
   });
 
   it('sends one message per place too', () => {
@@ -1671,6 +1683,102 @@ describe('the heart', () => {
       const reply = await react(store, '3208', 783);
       assert.ok(reply.includes('немає часу початку'), reply.slice(0, 300));
       assert.equal((await store.listReminders('3208')).length, 0);
+    });
+  });
+});
+
+/* ------------------------------------------------------- the card buttons --- */
+
+describe('card buttons', () => {
+  /** A tap on a button under the event card we recorded as message 42. */
+  async function tapCard(store: StoreType, chatId: string, verb: string, itemId: string): Promise<string> {
+    return captureOutput(() =>
+      handleCallback({ store, log, dryRun: true }, {
+        id: 'cb',
+        data: `ev:${verb}:${itemId}`,
+        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' } },
+        from: { id: Number(chatId) },
+      } as never),
+    );
+  }
+
+  const gig = () =>
+    makeItem({ city: 'kharkiv', title: 'Вечір імпровізації', url: 'https://b/1', source: 's', category: 'standup', startsAt: '2026-11-01T19:00:00+02:00' })!;
+
+  it('sets the reminder when ⏰ is tapped, and redraws the card', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3401', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3401', 42, [item]);
+      const out = await tapCard(store, '3401', 'r', item.id);
+      const rows = await store.listReminders('3401');
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.title, 'Вечір імпровізації');
+      assert.ok(out.includes('edit 42'), 'the card is rewritten in place');
+      assert.ok(out.includes('⏰ Не нагадувати'), out.slice(-600));
+    });
+  });
+
+  it('cancels the reminder when ⏰ is tapped again', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3402', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3402', 42, [item]);
+      await tapCard(store, '3402', 'r', item.id);
+      const out = await tapCard(store, '3402', 'r', item.id);
+      assert.equal((await store.listReminders('3402')).length, 0);
+      assert.ok(out.includes('⏰ Нагадати'), out.slice(-600));
+    });
+  });
+
+  it('shares one reminder row with the ❤️, never a second', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3403', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3403', 42, [item]);
+      await captureOutput(() =>
+        handleReaction({ store, log, dryRun: true }, {
+          chat: { id: '3403', type: 'private' },
+          message_id: 42,
+          user: { id: 3403 },
+          old_reaction: [],
+          new_reaction: [{ type: 'emoji', emoji: '❤️' }],
+        } as never),
+      );
+      const hearted = await store.listReminders('3403');
+      assert.equal(hearted.length, 1);
+
+      // ⏰ is the same switch: it reads the heart's state and turns it off
+      await tapCard(store, '3403', 'r', item.id);
+      assert.equal((await store.listReminders('3403')).length, 0);
+
+      // and back on — into the very same row, not a duplicate
+      await tapCard(store, '3403', 'r', item.id);
+      const again = await store.listReminders('3403');
+      assert.equal(again.length, 1);
+      assert.equal(again[0]!.id, hearted[0]!.id);
+    });
+  });
+
+  it('answers the buttons that are not built yet without breaking', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3404', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3404', 42, [item]);
+      for (const verb of ['no', 'cal', 'share']) {
+        const out = await tapCard(store, '3404', verb, item.id);
+        assert.ok(out.includes('Скоро'), `${verb}: ${out.slice(0, 200)}`);
+      }
+      assert.equal((await store.listReminders('3404')).length, 0);
+    });
+  });
+
+  it('says it has forgotten a card it can no longer resolve', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3405', city: 'kharkiv' });
+      const out = await tapCard(store, '3405', 'r', 'deadbeef');
+      assert.ok(out.trim().length > 0, 'a tap always gets an answer');
+      assert.equal((await store.listReminders('3405')).length, 0);
     });
   });
 });
