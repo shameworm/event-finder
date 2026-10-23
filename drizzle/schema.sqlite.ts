@@ -6,7 +6,7 @@
  * is keyed by their Telegram chat id. Keep this in sync with
  * drizzle/schema.pg.ts; `src/db.ts` picks one at runtime.
  */
-import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 /** One row per person using the bot. `prefs` is their Preferences as JSON. */
 export const users = sqliteTable(
@@ -83,7 +83,10 @@ export const reminders = sqliteTable(
     fired3h: integer('fired_3h').notNull().default(0),
     cancelled: integer('cancelled').notNull().default(0),
   },
-  (t) => [index('idx_rem_start').on(t.startsAt), index('idx_rem_chat').on(t.chatId, t.itemId)],
+  // unique, and named exactly as src/db.ts bootstraps it: one reminder per
+  // chat per event is what makes a second ❤️ an update instead of a duplicate.
+  // src/db.ts's CREATE TABLE is the authority — these must not drift from it.
+  (t) => [index('idx_rem_start').on(t.startsAt), uniqueIndex('idx_rem_chat_item').on(t.chatId, t.itemId)],
 );
 
 /**

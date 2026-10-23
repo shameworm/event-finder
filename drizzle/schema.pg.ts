@@ -3,7 +3,7 @@
  * Mirrors drizzle/schema.sqlite.ts column for column; the boolean-ish columns
  * stay integers so one set of queries works against both dialects.
  */
-import { index, integer, pgTable, primaryKey, serial, text } from 'drizzle-orm/pg-core';
+import { index, integer, pgTable, primaryKey, serial, text, uniqueIndex } from 'drizzle-orm/pg-core';
 
 /** One row per person using the bot. `prefs` is their Preferences as JSON. */
 export const users = pgTable(
@@ -80,7 +80,10 @@ export const reminders = pgTable(
     fired3h: integer('fired_3h').notNull().default(0),
     cancelled: integer('cancelled').notNull().default(0),
   },
-  (t) => [index('idx_rem_start').on(t.startsAt), index('idx_rem_chat').on(t.chatId, t.itemId)],
+  // unique, and named exactly as src/db.ts bootstraps it: one reminder per
+  // chat per event is what makes a second ❤️ an update instead of a duplicate.
+  // src/db.ts's CREATE TABLE is the authority — these must not drift from it.
+  (t) => [index('idx_rem_start').on(t.startsAt), uniqueIndex('idx_rem_chat_item').on(t.chatId, t.itemId)],
 );
 
 /**
