@@ -45,17 +45,17 @@ const { describe, it, run } = await import('./harness.ts');
 const { normText, stemText, isoInZone, localDate, localTime, addDays, today, weekdayOf, titleKey } = await import('../src/util.ts');
 const { classify, canonicalTag, expandTag } = await import('../src/categories.ts');
 const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange, splitNegations } = await import('../src/request.ts');
-const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom } = await import('../src/normalize.ts');
+const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom, pickImage } = await import('../src/normalize.ts');
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
-const { buildDigest, buildMessages, renderReminders } = await import('../src/render.ts');
+const { buildDigest, buildMessages, renderReminders, renderItem, renderCaption, CAPTION_LIMIT } = await import('../src/render.ts');
 const { loadConfig, loadPrefs, resolveCity, cityLocalName } = await import('../src/config.ts');
 const { applyPrefsCommand, describePrefs } = await import('../src/prefs-engine.ts');
 const { tagLabel } = await import('../src/categories.ts');
 const { PreferencesSchema } = await import('../src/types.ts');
 const { parsePost, findDate, findTime, findVenue } = await import('../scripts/telegram.ts');
 const { resultToItem, buildQueries } = await import('../scripts/websearch.ts');
-const { collect: collectKontramarka } = await import('../scripts/kontramarka.ts');
+const { collect: collectKontramarka, cardToSchema } = await import('../scripts/kontramarka.ts');
 const { Store } = await import('../src/db.ts');
 const { splitForTelegram } = await import('../src/telegram-api.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs, newUserPrefs } = await import('../src/users.ts');
@@ -281,6 +281,37 @@ describe('normalization', () => {
     assert.deepEqual(parsePriceText('від 250 грн'), { priceMin: 250 });
   });
 
+  it('takes the poster off a Concert.ua event, at full size', () => {
+    const item = fromSchemaEvent(JSON.parse(fixture('concertua-soldout.json')), { city: 'kharkiv', source: 'concert.ua' });
+    assert.ok(item);
+    // the catalog's ":31-catalog-event_item-desktop" preset is a 270x200
+    // thumbnail; the bare path is the 1920x1080 poster
+    assert.equal(item.image, 'https://storage.concert.ua/JIX/20/gq/6ad7336a98acf/8ad2.jpg');
+  });
+
+  it('takes the poster out of a Karabas ImageObject', () => {
+    const item = fromSchemaEvent(JSON.parse(fixture('karabas-event.json')), { city: 'kharkiv', source: 'karabas' });
+    assert.ok(item);
+    assert.equal(item.image, 'https://images.karabas.com/external/0188/events/019f/2845364609_ImageBig639251718260197275.jpeg');
+  });
+
+  it('leaves an event with no usable poster as a text card', () => {
+    const base = JSON.parse(fixture('karabas-event.json'));
+    for (const image of [undefined, '', '   ', 'data:image/png;base64,AAAA', 'javascript:alert(1)', 42, {}, [], { url: 7 }]) {
+      const item = fromSchemaEvent({ ...base, image }, { city: 'kharkiv', source: 'karabas' });
+      assert.ok(item, `image ${JSON.stringify(image)} should not reject the event`);
+      assert.equal(item.image, undefined, `image ${JSON.stringify(image)} should not survive`);
+    }
+  });
+
+  it('resolves a relative poster against the event page', () => {
+    assert.equal(
+      pickImage('/uploads/poster.jpg', 'https://kharkiv.kontramarka.ua/uk/show-1.html'),
+      'https://kharkiv.kontramarka.ua/uploads/poster.jpg',
+    );
+    assert.equal(pickImage('//cdn.example.com/x.jpg', 'https://a.example/b'), 'https://cdn.example.com/x.jpg');
+  });
+
   it('parses Kontramarka microdata cards', async () => {
     const html = fixture('kontramarka-card.html');
     const cheerio = await import('cheerio');
@@ -289,6 +320,26 @@ describe('normalization', () => {
     assert.equal($('[itemprop="name"]').first().text().trim(), 'Василь Байдак');
     assert.equal($('meta[itemprop="startDate"]').attr('content'), '2026-10-21T18:30:00+03:00');
     assert.equal(typeof collectKontramarka, 'function');
+
+    const card = $('.cat_item[itemtype*="schema.org/Event"]').first()[0];
+    assert.ok(card);
+    const schema = cardToSchema($, card);
+    assert.ok(schema);
+    assert.equal(schema['image'], 'https://cdn.kontramarka.ua/uploads/resize/shows/logo/630x891_1787415980.webp');
+    const item = fromSchemaEvent(schema, { city: 'kharkiv', source: 'kontramarka' });
+    assert.ok(item);
+    assert.equal(item.image, 'https://cdn.kontramarka.ua/uploads/resize/shows/logo/630x891_1787415980.webp');
+  });
+
+  it('falls back to the card thumbnail when Kontramarka drops the image meta', async () => {
+    const cheerio = await import('cheerio');
+    const $ = cheerio.load(fixture('kontramarka-card.html').replace(/<meta itemprop="image"[^>]*>/, ''));
+    const card = $('.cat_item[itemtype*="schema.org/Event"]').first()[0];
+    assert.ok(card);
+    assert.equal(
+      cardToSchema($, card)?.['image'],
+      'https://cdn.kontramarka.ua/uploads/resize/shows/logo/630x891_thumb.webp',
+    );
   });
 });
 
@@ -318,6 +369,22 @@ describe('dedupe', () => {
     const a = makeItem({ ...base, title: 'Тест', url: 'https://x/a', source: 'karabas', status: 'scheduled' })!;
     const b = makeItem({ ...base, title: 'Тест', url: 'https://x/b', source: 'kontramarka', status: 'soldout' })!;
     assert.equal(dedupe([a, b])[0]!.status, 'soldout');
+  });
+
+  it('takes the better poster when merging, not the first one seen', () => {
+    const thumb = makeItem({ ...base, title: 'Тест', url: 'https://x/a', source: 'kontramarka', image: 'https://cdn/x.jpg:thumb-120' })!;
+    const poster = makeItem({ ...base, title: 'Тест', url: 'https://x/b', source: 'karabas', image: 'https://img/poster.jpeg' })!;
+    assert.equal(dedupe([thumb, poster])[0]!.image, 'https://img/poster.jpeg');
+    assert.equal(dedupe([poster, thumb])[0]!.image, 'https://img/poster.jpeg');
+  });
+
+  it('keeps the only poster there is, even from the less trusted source', () => {
+    // the richer item wins the facts; it must not drag the merge down to no picture
+    const rich = makeItem({ ...base, title: 'Тест', url: 'https://x/a', source: 'concert.ua', venue: 'ТКЦ', description: 'bla', priceMin: 300 })!;
+    const poor = makeItem({ ...base, title: 'Тест', url: 'https://x/b', source: 'telegram:@kh', image: 'https://img/poster.jpeg' })!;
+    const merged = dedupe([rich, poor])[0]!;
+    assert.equal(merged.image, 'https://img/poster.jpeg');
+    assert.equal(merged.venue, 'ТКЦ');
   });
 
   it('fingerprints the facts worth re-notifying about', () => {
@@ -487,6 +554,57 @@ describe('render', () => {
     assert.ok(buildDigest({ title: 'T', query, items, format: 'text' }).text.includes('дата уточнюється'));
   });
 
+  it('drops the description rather than overrun a caption', () => {
+    // renderItem already caps a title at 160 and a blurb at 140, so a normal
+    // card fits 1024 easily; escaping is what pushes one over ("&" -> "&amp;")
+    const long = makeItem({
+      city: 'kharkiv',
+      title: '&'.repeat(160),
+      url: 'https://x/caption',
+      source: 'karabas',
+      startsAt: '2026-10-24T19:00:00+03:00',
+      venue: 'Театрально-концертний центр',
+      description: '&'.repeat(400),
+      priceMin: 300,
+      image: 'https://img/p.jpg',
+    })!;
+    const full = renderItem(long, { format: 'html' });
+    const caption = renderCaption(long, { format: 'html' });
+    assert.ok(full.length > CAPTION_LIMIT, `the full card was only ${full.length} chars`);
+    assert.ok(caption, 'this card is renderable as a caption');
+    assert.ok(caption.length <= CAPTION_LIMIT, `caption was ${caption.length} chars`);
+    // the facts a caption exists for must survive; only the blurb goes
+    assert.ok(caption.includes('19:00'), caption);
+    assert.ok(caption.includes('300'), caption);
+    assert.ok(caption.includes('Театрально-концертний центр'), caption);
+    assert.ok(caption.includes('https://x/caption'), caption);
+  });
+
+  it('leaves a short card alone, description and all', () => {
+    const short = makeItem({ city: 'kharkiv', title: 'Коротко', url: 'https://x/s', source: 'karabas', startsAt: '2026-10-24T19:00:00+03:00', description: 'Два слова.', image: 'https://img/p.jpg' })!;
+    const caption = renderCaption(short, { format: 'html' });
+    assert.equal(caption, renderItem(short, { format: 'html' }));
+    assert.ok(caption!.includes('Два слова.'));
+  });
+
+  it('fits a caption even when escaping multiplies every character', () => {
+    // "&" becomes "&amp;": a 160-character title can render as 960
+    const hostile = makeItem({ city: 'kharkiv', title: '&'.repeat(160), url: 'https://x/h', source: 'karabas', startsAt: '2026-10-24T19:00:00+03:00', venue: '<'.repeat(120), image: 'https://img/p.jpg' })!;
+    const caption = renderCaption(hostile, { format: 'html' });
+    assert.ok(caption, 'should still fit after shrinking the fields');
+    assert.ok(caption.length <= CAPTION_LIMIT, `caption was ${caption.length} chars`);
+    assert.ok(!/<[a-z]*$/.test(caption), 'must never cut an HTML tag in half');
+  });
+
+  it('gives up on the caption rather than drop the link', () => {
+    const silly = makeItem({ city: 'kharkiv', title: 'Тест', url: `https://x/${'z'.repeat(2000)}`, source: 'karabas', startsAt: '2026-10-24T19:00:00+03:00', image: 'https://img/p.jpg' })!;
+    assert.equal(renderCaption(silly, { format: 'html' }), null);
+    // and the digest then sends it as an ordinary message
+    const msg = buildMessages({ title: 'T', query, items: [silly], format: 'html' })[1]!;
+    assert.equal(msg.image, undefined);
+    assert.ok(msg.text.includes('z'.repeat(2000)));
+  });
+
   it('escapes HTML coming from a site', () => {
     const items = [makeItem({ city: 'kharkiv', title: 'Rock & <b>Roll</b>', url: 'https://x/d?a=1&b=2', source: 's', startsAt: '2026-10-24T19:00:00+03:00' })!];
     const html = buildDigest({ title: 'T', query, items, format: 'html' }).text;
@@ -556,6 +674,25 @@ describe('messages', () => {
     const changeNotes = new Map([[earlier.id, 'sold out']]);
     const msgs = buildMessages({ title: 'T', query, items: [earlier], format: 'text', changeNotes });
     assert.ok(msgs[1]!.text.includes('🔁 квитки скінчилися'), msgs[1]!.text);
+  });
+
+  it('sends an event with a poster as a photo, and one without as text', () => {
+    const withPoster = makeItem({ city: 'kharkiv', title: 'З афішею', url: 'https://m/p', source: 'karabas', startsAt: '2026-10-23T19:00:00+03:00', image: 'https://img/poster.jpeg' })!;
+    const msgs = buildMessages({ title: 'T', query, items: [withPoster, earlier], format: 'html' });
+    const photo = msgs.find((m) => m.items[0]?.id === withPoster.id)!;
+    assert.equal(photo.image, 'https://img/poster.jpeg');
+    assert.ok(photo.caption && photo.caption.includes('З афішею'), photo.caption);
+    assert.ok(photo.caption!.length <= CAPTION_LIMIT);
+    const plainMsg = msgs.find((m) => m.items[0]?.id === earlier.id)!;
+    assert.equal(plainMsg.image, undefined);
+    assert.equal(plainMsg.caption, undefined);
+  });
+
+  it('keeps the full card as the message text, so a refused poster loses nothing', () => {
+    const item = makeItem({ city: 'kharkiv', title: 'Опис', url: 'https://m/d', source: 'karabas', startsAt: '2026-10-23T19:00:00+03:00', image: 'https://img/p.jpg', description: 'Довгий опис події.' })!;
+    const msg = buildMessages({ title: 'T', query, items: [item], format: 'html' })[1]!;
+    assert.ok(msg.text.includes('Довгий опис'), msg.text);
+    assert.ok(msg.image);
   });
 
   it('is a single message, carrying nothing, when nothing matched', () => {
@@ -909,6 +1046,20 @@ describe('store', () => {
       await store.putCache('k2', [item], 0);
       assert.equal(await store.getCache('k2'), null, 'a zero TTL entry is already stale');
       await store.pruneCache();
+    });
+  });
+
+  it('round-trips a poster, and still reads a cached scrape from before there were any', async () => {
+    await withTestStore(async (store) => {
+      const withPoster = makeItem({ ...item, id: undefined, url: 'https://x/poster', image: 'https://img/p.jpeg' })!;
+      await store.putCache('k-img', [withPoster, item], 60);
+      const back = await store.getCache('k-img');
+      assert.equal(back?.length, 2);
+      assert.equal(back![0]!.image, 'https://img/p.jpeg');
+      // the second one was serialized with no `image` key at all, exactly like
+      // every row written before this field existed — it must still parse
+      assert.ok(!JSON.stringify(item).includes('image'));
+      assert.equal(back![1]!.image, undefined);
     });
   });
 
@@ -1689,6 +1840,116 @@ describe('deliver', () => {
         deliver({ title: 'T', query, items, log, store, chatId: '3301', dryRun: true }),
       );
       assert.equal(printed.split('──────── to chat 3301').length - 1, 4, printed);
+    });
+  });
+
+  /**
+   * Both poster tests below go through a stubbed Bot API rather than a dry run:
+   * the point of each is what the *send* does, and a dry run never calls it.
+   */
+  interface FakeCall {
+    method: string;
+    body: Record<string, unknown>;
+  }
+
+  async function withFakeTelegram<T>(
+    reply: (call: FakeCall) => { ok: boolean; description?: string; status?: number },
+    body: (calls: FakeCall[]) => Promise<T>,
+  ): Promise<T> {
+    const calls: FakeCall[] = [];
+    const realFetch = globalThis.fetch;
+    const realToken = process.env['TELEGRAM_BOT_TOKEN'];
+    process.env['TELEGRAM_BOT_TOKEN'] = 'test:token';
+    let nextId = 500;
+    globalThis.fetch = (async (url: string, init: { body: string }) => {
+      const method = String(url).split('/').pop()!;
+      const call = { method, body: JSON.parse(init.body) as Record<string, unknown> };
+      calls.push(call);
+      const verdict = reply(call);
+      return {
+        json: async () =>
+          verdict.ok
+            ? { ok: true, result: { message_id: nextId++, date: 0, chat: { id: call.body['chat_id'] } } }
+            : { ok: false, description: verdict.description ?? 'Bad Request' },
+        status: verdict.ok ? 200 : verdict.status ?? 400,
+      };
+    }) as unknown as typeof globalThis.fetch;
+    try {
+      return await body(calls);
+    } finally {
+      globalThis.fetch = realFetch;
+      if (realToken === undefined) delete process.env['TELEGRAM_BOT_TOKEN'];
+      else process.env['TELEGRAM_BOT_TOKEN'] = realToken;
+    }
+  }
+
+  const withPoster = (n: number) =>
+    makeItem({
+      city: 'kharkiv',
+      title: `Афіша ${n}`,
+      url: `https://d/p${n}`,
+      source: 'karabas',
+      startsAt: `2026-10-2${2 + n}T19:00:00+03:00`,
+      image: `https://img/poster-${n}.jpeg`,
+    })!;
+
+  it('sends a poster as a photo and still records the id a ❤️ resolves through', async () => {
+    await withTestStore(async (store) => {
+      const item = withPoster(1);
+      const result = await withFakeTelegram(
+        () => ({ ok: true }),
+        async (calls) => {
+          const sent = await deliver({ title: 'T', query, items: [item], log, store, chatId: '7701' });
+          assert.deepEqual(calls.map((c) => c.method), ['sendMessage', 'sendPhoto']);
+          const photo = calls[1]!.body;
+          assert.equal(photo['photo'], 'https://img/poster-1.jpeg');
+          assert.ok(String(photo['caption']).includes('Афіша 1'), String(photo['caption']));
+          assert.equal(photo['parse_mode'], 'HTML');
+          return sent;
+        },
+      );
+      // the photo's own message id must be in `messages`, or the heart has
+      // nothing to resolve and no reminder can be set from a poster card
+      const photoId = result.messageIds[1]!;
+      const remembered = await store.itemsForMessage('7701', photoId);
+      assert.deepEqual(remembered.map((i) => i.id), [item.id]);
+    });
+  });
+
+  it('falls back to text when Telegram will not take the poster, and finishes the digest', async () => {
+    await withTestStore(async (store) => {
+      const items = [withPoster(1), withPoster(2)];
+      const result = await withFakeTelegram(
+        (call) =>
+          call.method === 'sendPhoto'
+            ? { ok: false, description: 'Bad Request: failed to get HTTP URL content' }
+            : { ok: true },
+        async (calls) => {
+          const sent = await deliver({ title: 'T', query, items, log, store, chatId: '7702' });
+          // header, then each card tried as a photo and re-sent as text
+          assert.deepEqual(calls.map((c) => c.method), [
+            'sendMessage', 'sendPhoto', 'sendMessage', 'sendPhoto', 'sendMessage',
+          ]);
+          return sent;
+        },
+      );
+      assert.equal(result.chatGone, false);
+      // one id per message that actually landed: header + both events
+      assert.equal(result.messageIds.length, 3);
+      for (const [n, item] of items.entries()) {
+        const remembered = await store.itemsForMessage('7702', result.messageIds[n + 1]!);
+        assert.deepEqual(remembered.map((i) => i.id), [item.id], `event ${n + 1} was not recorded`);
+      }
+    });
+  });
+
+  it('treats a blocked chat as a blocked chat, not a bad poster', async () => {
+    await withTestStore(async (store) => {
+      const result = await withFakeTelegram(
+        () => ({ ok: false, status: 403, description: 'Forbidden: bot was blocked by the user' }),
+        async () => deliver({ title: 'T', query, items: [withPoster(1)], log, store, chatId: '7703' }),
+      );
+      assert.equal(result.chatGone, true);
     });
   });
 });

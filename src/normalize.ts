@@ -38,6 +38,45 @@ export function pickCategory(schemaCat: Category | null, textCat: Category | nul
   return textCat ?? (slugCat && slugCat !== 'other' ? slugCat : undefined) ?? schemaCat ?? 'other';
 }
 
+/**
+ * One usable poster URL out of whatever a source published.
+ *
+ * Accepts a string, a schema.org ImageObject, or a list of either, and returns
+ * only an absolute http(s) URL — Telegram is the one fetching it, and anything
+ * else (a `data:` blob, a protocol-relative fragment, an empty attribute) would
+ * come back as an error on the whole message.
+ *
+ * `base` is the event's own page, so a site serving `/uploads/poster.jpg` still
+ * resolves. A URL that cannot be parsed yields undefined: an event with no
+ * poster is a text message, which is what it was before.
+ */
+export function pickImage(raw: unknown, base?: string): string | undefined {
+  for (const candidate of Array.isArray(raw) ? raw : [raw]) {
+    const value =
+      typeof candidate === 'string'
+        ? candidate
+        : candidate && typeof candidate === 'object'
+          ? ['url', 'contentUrl'].map((k) => (candidate as Record<string, unknown>)[k]).find((v) => typeof v === 'string')
+          : undefined;
+    if (typeof value !== 'string' || !value.trim()) continue;
+    let url: URL;
+    try {
+      url = new URL(value.trim(), base);
+    } catch {
+      continue;
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
+    // Concert.ua appends an imgproxy-style ":<preset>" to the file name, and the
+    // preset its catalog pages use is a 270x200 thumbnail. The bare path is the
+    // full-size poster, which is what belongs under a digest card.
+    if (/(^|\.)concert\.ua$/.test(url.hostname)) {
+      url.pathname = url.pathname.replace(/\.(jpe?g|png|webp):[\w.-]+$/i, '.$1');
+    }
+    return url.toString();
+  }
+  return undefined;
+}
+
 export interface NormalizeOpts {
   city: string;
   source: string;
@@ -97,6 +136,7 @@ function buildFromSchemaEvent(ev: SchemaEvent, opts: NormalizeOpts): Item | null
       currency: offer?.priceCurrency ?? 'UAH',
       free: ev.isAccessibleForFree === true || min === 0 ? true : undefined,
       url,
+      image: pickImage(ev.image, url),
       description: description ? truncate(description, 400) : undefined,
       source: opts.source,
       sources: [opts.source],
@@ -127,6 +167,7 @@ export function makeItem(
       category,
       currency: fields.currency ?? 'UAH',
       free: fields.free ?? (fields.priceMin === 0 ? true : undefined),
+      image: pickImage(fields.image, fields.url),
       description: fields.description ? truncate(fields.description, 400) : undefined,
       sources: fields.sources ?? [fields.source],
       status: fields.status ?? 'unknown',

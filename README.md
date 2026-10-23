@@ -29,6 +29,7 @@ web search ─┘                                            rank per user (thei
                                            user A digest       user B digest       user C digest
                                                  │                   │                   │
                                         header + one message per event, each one ❤️-able
+                                        (with its poster, when the source published one)
 ```
 
 The cache is the point: 200 people in Kharkiv asking about the same weekend cost
@@ -88,7 +89,14 @@ cache:
 `message_delay_ms` exists because every event is its own message: a ten-event
 week is eleven sends to the same chat, and Telegram throttles a sustained burst
 at roughly one message per second. Lower it and you will start seeing 429s
-(`sendMessage` retries once, then gives up on that message).
+(both `sendMessage` and `sendPhoto` retry once, then give up on that message).
+
+An event with a poster goes out as a photo, and Telegram fetches that file from
+the source's CDN itself — so a photo card takes it several hundred milliseconds
+longer to accept than a text one, which spaces a digest out further than this
+setting alone would. 400ms has held for text; if a photo-heavy digest starts
+logging 429s, `1000` is the value to move to, matching Telegram's own advice of
+one message per second per chat.
 
 Start with `public: false` and your own chat id on the allowlist while you try
 it out; flip it to `true` when you are ready for strangers.

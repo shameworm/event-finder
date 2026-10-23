@@ -41,6 +41,14 @@ export const ItemSchema = z.object({
   currency: z.string().optional(),
   free: z.boolean().optional(),
   url: z.string().min(1),
+  /**
+   * Poster URL, absolute http(s). Telegram fetches it itself when the card
+   * goes out as a photo, so nothing is ever downloaded here.
+   *
+   * Optional on purpose: it arrived after scrape_cache was already full of
+   * payloads without it, and those rows must keep parsing.
+   */
+  image: z.string().optional(),
   description: z.string().optional(),
   /** Source key: "concert.ua", "karabas", "kontramarka", "telegram:@channel", "websearch". */
   source: z.string().min(1),

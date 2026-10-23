@@ -115,6 +115,27 @@ function printButtons(rows: InlineButton[][] | undefined): void {
 }
 
 /**
+ * POST, and survive flood control once. Everything else is the caller's problem.
+ */
+async function callOrRetry<T extends z.ZodTypeAny>(
+  method: string,
+  body: Record<string, unknown>,
+  result: T,
+  opts: { log?: Logger; chatId?: string },
+): Promise<z.infer<T>> {
+  try {
+    return await call(method, body, result);
+  } catch (err) {
+    if (err instanceof TelegramError && err.retryAfter && !err.chatGone) {
+      opts.log?.warn(`flood control: waiting ${err.retryAfter}s before retrying chat ${opts.chatId}`);
+      await sleep((err.retryAfter + 1) * 1000);
+      return call(method, body, result);
+    }
+    throw err;
+  }
+}
+
+/**
  * Send one message. Long messages are split on blank lines so a digest never
  * trips Telegram's 4096-character limit. Returns the message ids that were sent
  * (empty on dry run).
@@ -143,23 +164,59 @@ export async function sendMessage(text: string, opts: SendOptions = {}): Promise
       ...(opts.replyTo ? { reply_to_message_id: opts.replyTo } : {}),
       ...replyMarkup(opts, i === chunks.length - 1),
     };
-    let msg;
-    try {
-      msg = await call('sendMessage', body, TgMessageSchema);
-    } catch (err) {
-      // one retry on flood control; everything else is the caller's problem
-      if (err instanceof TelegramError && err.retryAfter && !err.chatGone) {
-        opts.log?.warn(`flood control: waiting ${err.retryAfter}s before retrying chat ${chatId}`);
-        await sleep((err.retryAfter + 1) * 1000);
-        msg = await call('sendMessage', body, TgMessageSchema);
-      } else {
-        throw err;
-      }
-    }
+    const msg = await callOrRetry('sendMessage', body, TgMessageSchema, { log: opts.log, chatId });
     ids.push(msg.message_id);
     opts.log?.debug(`sent message ${msg.message_id} to ${chatId} (${chunk.length} chars)`);
   }
   return ids;
+}
+
+/** A caption under a photo gets 1024 characters, not a message's 4096. */
+export const CAPTION_LIMIT = 1024;
+
+export interface SendPhotoOptions extends SendOptions {
+  /** Already trimmed to CAPTION_LIMIT — a photo message is never split. */
+  caption?: string;
+}
+
+/**
+ * Send one photo **by URL**: Telegram downloads the file itself, so a digest
+ * with ten posters still costs this process ten small JSON posts.
+ *
+ * Returns the message id in an array, exactly like `sendMessage`, because
+ * src/deliver.ts records those ids against the event the message showed —
+ * which is what a ❤️ on a poster resolves through.
+ *
+ * Throws TelegramError when Telegram cannot fetch or will not accept the file
+ * ("wrong file identifier", "failed to get HTTP URL content", a 5MB-plus
+ * image). That is the whole message failing, not just the picture, so the
+ * caller has to be ready to send the card as text instead.
+ */
+export async function sendPhoto(photo: string, opts: SendPhotoOptions = {}): Promise<number[]> {
+  const cfg = loadConfig();
+  const chatId = opts.chatId ?? defaultChatId();
+  if (opts.dryRun || !chatId) {
+    if (!chatId && !opts.dryRun) opts.log?.warn('TELEGRAM_CHAT_ID is not set — printing instead of sending');
+    if (chatId) process.stdout.write(`\n──────── to chat ${chatId} ────────\n`);
+    process.stdout.write(`[photo ${photo}]\n${opts.caption ?? ''}\n`);
+    printButtons(opts.inlineKeyboard);
+    return [];
+  }
+  const msg = await callOrRetry(
+    'sendPhoto',
+    {
+      chat_id: chatId,
+      photo,
+      ...(opts.caption ? { caption: opts.caption, parse_mode: cfg.telegram.parse_mode } : {}),
+      disable_notification: opts.silent ?? false,
+      ...(opts.replyTo ? { reply_to_message_id: opts.replyTo } : {}),
+      ...replyMarkup(opts, true),
+    },
+    TgMessageSchema,
+    { log: opts.log, chatId },
+  );
+  opts.log?.debug(`sent photo ${msg.message_id} to ${chatId} (caption ${opts.caption?.length ?? 0} chars)`);
+  return [msg.message_id];
 }
 
 export function splitForTelegram(text: string, limit = 3800): string[] {
@@ -226,7 +283,7 @@ export async function deleteMessage(
   opts: { chatId: string; dryRun?: boolean; log?: Logger },
 ): Promise<void> {
   if (opts.dryRun) {
-    process.stdout.write(`\n──────── delete ${opts.messageId} in chat ${opts.chatId} ────────\n`);
+    process.stdout.write(`\n──────── delete ${messageId} in chat ${opts.chatId} ────────\n`);
     return;
   }
   try {
