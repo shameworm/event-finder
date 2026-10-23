@@ -375,6 +375,22 @@ describe('dedupe', () => {
     assert.equal(dedupe([a, b])[0]!.status, 'soldout');
   });
 
+  it('takes the better poster when merging, not the first one seen', () => {
+    const thumb = makeItem({ ...base, title: 'Тест', url: 'https://x/a', source: 'kontramarka', image: 'https://cdn/x.jpg:thumb-120' })!;
+    const poster = makeItem({ ...base, title: 'Тест', url: 'https://x/b', source: 'karabas', image: 'https://img/poster.jpeg' })!;
+    assert.equal(dedupe([thumb, poster])[0]!.image, 'https://img/poster.jpeg');
+    assert.equal(dedupe([poster, thumb])[0]!.image, 'https://img/poster.jpeg');
+  });
+
+  it('keeps the only poster there is, even from the less trusted source', () => {
+    // the richer item wins the facts; it must not drag the merge down to no picture
+    const rich = makeItem({ ...base, title: 'Тест', url: 'https://x/a', source: 'concert.ua', venue: 'ТКЦ', description: 'bla', priceMin: 300 })!;
+    const poor = makeItem({ ...base, title: 'Тест', url: 'https://x/b', source: 'telegram:@kh', image: 'https://img/poster.jpeg' })!;
+    const merged = dedupe([rich, poor])[0]!;
+    assert.equal(merged.image, 'https://img/poster.jpeg');
+    assert.equal(merged.venue, 'ТКЦ');
+  });
+
   it('fingerprints the facts worth re-notifying about', () => {
     const a = makeItem({ ...base, title: 'Тест', url: 'https://x/a', source: 'karabas', priceMin: 300 })!;
     assert.equal(fingerprint(a), fingerprint({ ...a, description: 'changed blurb' }));
