@@ -1015,7 +1015,8 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
  *   more          the next page of an answer, from the stash behind its
  *                 header; which answer comes from the message it is on
  *   ev:<verb>:<item id>  a button under an event card — ev:r toggles the
- *                 reminder, ev:no · ev:cal · ev:share are not built yet
+ *                 reminder, ev:no and ev:share are not built yet (📅 is a
+ *                 plain link and never calls back)
  *
  * Everything that changes a setting rewrites the panel it was tapped from, so
  * the chat keeps one settings screen rather than a stack of confirmations.
@@ -1206,10 +1207,9 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
   }
 }
 
-/** The three buttons other tasks will fill in; they answer rather than fail. */
+/** The buttons other tasks will fill in; they answer rather than fail. */
 const SOON: Record<string, string> = {
   no: 'Скоро навчуся прибирати такі події зі стрічки. Поки що скажи словами, що саме не твоє — я запишу.',
-  cal: 'Скоро віддам подію файлом для календаря. Поки що ⏰ нагадаю сам — за добу та за 3 години.',
   share: 'Скоро зроблю «поділитись» одним тапом. Поки що перешли саме це повідомлення — у ньому вже є посилання.',
 };
 
