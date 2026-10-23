@@ -45,7 +45,7 @@ const { describe, it, run } = await import('./harness.ts');
 const { normText, stemText, isoInZone, localDate, localTime, addDays, today, weekdayOf, titleKey } = await import('../src/util.ts');
 const { classify, canonicalTag, expandTag } = await import('../src/categories.ts');
 const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange, splitNegations } = await import('../src/request.ts');
-const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom } = await import('../src/normalize.ts');
+const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom, pickImage } = await import('../src/normalize.ts');
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
 const { buildDigest, buildMessages, renderReminders } = await import('../src/render.ts');
@@ -283,6 +283,37 @@ describe('normalization', () => {
     assert.deepEqual(parsePriceText('вхід вільний'), { free: true, priceMin: 0 });
     assert.deepEqual(parsePriceText('квитки 300-500 грн'), { priceMin: 300, priceMax: 500 });
     assert.deepEqual(parsePriceText('від 250 грн'), { priceMin: 250 });
+  });
+
+  it('takes the poster off a Concert.ua event, at full size', () => {
+    const item = fromSchemaEvent(JSON.parse(fixture('concertua-soldout.json')), { city: 'kharkiv', source: 'concert.ua' });
+    assert.ok(item);
+    // the catalog's ":31-catalog-event_item-desktop" preset is a 270x200
+    // thumbnail; the bare path is the 1920x1080 poster
+    assert.equal(item.image, 'https://storage.concert.ua/JIX/20/gq/6ad7336a98acf/8ad2.jpg');
+  });
+
+  it('takes the poster out of a Karabas ImageObject', () => {
+    const item = fromSchemaEvent(JSON.parse(fixture('karabas-event.json')), { city: 'kharkiv', source: 'karabas' });
+    assert.ok(item);
+    assert.equal(item.image, 'https://images.karabas.com/external/0188/events/019f/2845364609_ImageBig639251718260197275.jpeg');
+  });
+
+  it('leaves an event with no usable poster as a text card', () => {
+    const base = JSON.parse(fixture('karabas-event.json'));
+    for (const image of [undefined, '', '   ', 'data:image/png;base64,AAAA', 'javascript:alert(1)', 42, {}, [], { url: 7 }]) {
+      const item = fromSchemaEvent({ ...base, image }, { city: 'kharkiv', source: 'karabas' });
+      assert.ok(item, `image ${JSON.stringify(image)} should not reject the event`);
+      assert.equal(item.image, undefined, `image ${JSON.stringify(image)} should not survive`);
+    }
+  });
+
+  it('resolves a relative poster against the event page', () => {
+    assert.equal(
+      pickImage('/uploads/poster.jpg', 'https://kharkiv.kontramarka.ua/uk/show-1.html'),
+      'https://kharkiv.kontramarka.ua/uploads/poster.jpg',
+    );
+    assert.equal(pickImage('//cdn.example.com/x.jpg', 'https://a.example/b'), 'https://cdn.example.com/x.jpg');
   });
 
   it('parses Kontramarka microdata cards', async () => {
@@ -925,6 +956,20 @@ describe('store', () => {
       await store.putCache('k2', [item], 0);
       assert.equal(await store.getCache('k2'), null, 'a zero TTL entry is already stale');
       await store.pruneCache();
+    });
+  });
+
+  it('round-trips a poster, and still reads a cached scrape from before there were any', async () => {
+    await withTestStore(async (store) => {
+      const withPoster = makeItem({ ...item, id: undefined, url: 'https://x/poster', image: 'https://img/p.jpeg' })!;
+      await store.putCache('k-img', [withPoster, item], 60);
+      const back = await store.getCache('k-img');
+      assert.equal(back?.length, 2);
+      assert.equal(back![0]!.image, 'https://img/p.jpeg');
+      // the second one was serialized with no `image` key at all, exactly like
+      // every row written before this field existed — it must still parse
+      assert.ok(!JSON.stringify(item).includes('image'));
+      assert.equal(back![1]!.image, undefined);
     });
   });
 

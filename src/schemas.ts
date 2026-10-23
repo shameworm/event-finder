@@ -121,6 +121,20 @@ const unwrap = <T extends z.ZodTypeAny>(schema: T) =>
 
 const NameOnly = z.object({ name: z.string().optional() }).loose();
 
+/**
+ * schema.org `image`: a bare URL on Concert.ua, an ImageObject on Karabas, and
+ * sometimes a list of either. Anything else becomes undefined rather than a
+ * parse failure — a site changing this field must cost the poster, not the event.
+ */
+export const SchemaImageSchema = z
+  .union([
+    z.string(),
+    z.object({ url: z.string().optional(), contentUrl: z.string().optional() }).loose(),
+    z.array(z.union([z.string(), z.object({ url: z.string().optional(), contentUrl: z.string().optional() }).loose()])),
+  ])
+  .optional()
+  .catch(undefined);
+
 export const SchemaOfferSchema = z
   .object({
     price: LoosePrice,
@@ -153,6 +167,7 @@ export const SchemaEventSchema = z
     endDate: z.string().optional(),
     eventStatus: z.string().optional(),
     isAccessibleForFree: z.boolean().optional(),
+    image: SchemaImageSchema,
     location: unwrap(SchemaPlaceSchema.optional()),
     offers: unwrap(SchemaOfferSchema.optional()),
     performer: unwrap(NameOnly.optional()),
@@ -248,6 +263,8 @@ export const WebResultSchema = z.object({
   startsAt: z.string().optional(),
   price: z.string().optional(),
   status: StatusSchema.optional(),
+  /** Poster URL, if the result carried one. */
+  image: z.string().optional(),
 });
 
 export const WebIngestSchema = z.union([
