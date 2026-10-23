@@ -48,7 +48,7 @@ const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange
 const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom, pickImage } = await import('../src/normalize.ts');
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
-const { buildDigest, buildMessages, renderReminders, renderItem, renderCaption, CAPTION_LIMIT } = await import('../src/render.ts');
+const { buildDigest, buildMessages, eventKeyboard, renderReminders, renderItem, renderCaption, CAPTION_LIMIT } = await import('../src/render.ts');
 const { loadConfig, loadPrefs, resolveCity, cityLocalName } = await import('../src/config.ts');
 const { applyPrefsCommand, describePrefs } = await import('../src/prefs-engine.ts');
 const { tagLabel } = await import('../src/categories.ts');
@@ -58,6 +58,7 @@ const { resultToItem, buildQueries } = await import('../scripts/websearch.ts');
 const { collect: collectKontramarka, cardToSchema } = await import('../scripts/kontramarka.ts');
 const { Store } = await import('../src/db.ts');
 const { splitForTelegram } = await import('../src/telegram-api.ts');
+const { googleCalendarUrl } = await import('../src/calendar.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs, newUserPrefs } = await import('../src/users.ts');
 const { cacheKey } = await import('../src/cache.ts');
 const { fanout } = await import('../src/fanout.ts');
@@ -725,9 +726,22 @@ describe('messages', () => {
     const labels = rows.flat().map((b) => b.text);
     assert.deepEqual(labels, ['⏰ Нагадати', '👎 Не моє', '📅 В календар', '↗️ Поділитись']);
     for (const b of rows.flat()) {
-      assert.ok('callback_data' in b && b.callback_data.startsWith('ev:'), JSON.stringify(b));
-      assert.ok(Buffer.byteLength((b as { callback_data: string }).callback_data) <= 64, (b as { callback_data: string }).callback_data);
+      // 📅 is a link, every other button calls back
+      if ('url' in b) {
+        assert.equal(b.text, '📅 В календар');
+        assert.ok(b.url.startsWith('https://calendar.google.com/'), b.url);
+        continue;
+      }
+      assert.ok(b.callback_data.startsWith('ev:'), JSON.stringify(b));
+      assert.ok(Buffer.byteLength(b.callback_data) <= 64, b.callback_data);
     }
+  });
+
+  it('leaves 📅 off an event whose date is still unknown', () => {
+    const undated = makeItem({ city: 'kharkiv', title: 'Колись', url: 'https://m/c', source: 's' })!;
+    const labels = eventKeyboard(undated).flat().map((b) => b.text);
+    assert.deepEqual(labels, ['⏰ Нагадати', '👎 Не моє', '↗️ Поділитись']);
+    assert.equal(googleCalendarUrl(undated), undefined);
   });
 
   it('sends one message per place too', () => {
@@ -735,6 +749,62 @@ describe('messages', () => {
     const msgs = buildMessages({ title: 'Місця', query, items: [place], format: 'text' });
     assert.equal(msgs.length, 2);
     assert.ok(msgs[1]!.text.includes('вул. Сумська, 11'));
+  });
+});
+
+/* --------------------------------------------------------------- calendar --- */
+
+describe('calendar', () => {
+  const item = makeItem({
+    city: 'kharkiv',
+    title: 'Джаз, вино; і трохи сліз',
+    url: 'https://tickets.example/ua/jazz?id=7&utm=bot',
+    source: 's',
+    startsAt: '2026-10-23T19:30:00+03:00',
+    venue: 'Пивна дума, 2 поверх',
+    address: 'вул. Сумська, 11',
+    description: 'Квартет грає стандарти.',
+  })!;
+
+  const params = (url: string) => new URL(url).searchParams;
+
+  it('builds a TEMPLATE link with the title, the place and the ticket link', () => {
+    const url = googleCalendarUrl(item)!;
+    const u = new URL(url);
+    assert.equal(u.origin + u.pathname, 'https://calendar.google.com/calendar/render');
+    assert.equal(params(url).get('action'), 'TEMPLATE');
+    assert.equal(params(url).get('text'), 'Джаз, вино; і трохи сліз');
+    assert.equal(params(url).get('location'), 'Пивна дума, 2 поверх, вул. Сумська, 11');
+    assert.ok(params(url).get('details')!.includes('https://tickets.example/ua/jazz?id=7&utm=bot'));
+    // Ukrainian titles and their punctuation go through the encoder, not raw
+    assert.ok(!url.includes(' '), url);
+    assert.ok(url.includes('%2C'), url);
+  });
+
+  it('puts the time in as UTC, so Kyiv evenings stay Kyiv evenings', () => {
+    // 19:30 at +03:00 is 16:30 UTC
+    assert.equal(params(googleCalendarUrl(item)!).get('dates'), '20261023T163000Z/20261023T183000Z');
+  });
+
+  it('defaults the end to two hours out and says the length is a guess', () => {
+    const details = params(googleCalendarUrl(item)!).get('details')!;
+    assert.ok(details.includes('Тривалість приблизна'), details);
+  });
+
+  it('keeps a real endsAt, and then claims nothing about the length', () => {
+    const url = googleCalendarUrl({ ...item, endsAt: '2026-10-23T23:00:00+03:00' })!;
+    assert.equal(params(url).get('dates'), '20261023T163000Z/20261023T200000Z');
+    assert.ok(!params(url).get('details')!.includes('Тривалість приблизна'));
+  });
+
+  it('ignores an end that falls before the start', () => {
+    const url = googleCalendarUrl({ ...item, endsAt: '2026-10-23T10:00:00+03:00' })!;
+    assert.equal(params(url).get('dates'), '20261023T163000Z/20261023T183000Z');
+  });
+
+  it('has nothing to offer an event with no start time', () => {
+    assert.equal(googleCalendarUrl({ ...item, startsAt: undefined }), undefined);
+    assert.equal(googleCalendarUrl({ ...item, startsAt: 'колись у травні' }), undefined);
   });
 });
 
@@ -2254,7 +2324,7 @@ describe('card buttons', () => {
       await registerUser(store, { chatId: '3404', city: 'kharkiv' });
       const item = gig();
       await store.recordMessage('3404', 42, [item]);
-      for (const verb of ['no', 'cal', 'share']) {
+      for (const verb of ['no', 'share']) {
         const out = await tapCard(store, '3404', verb, item.id);
         assert.ok(out.includes('Скоро'), `${verb}: ${out.slice(0, 200)}`);
       }
