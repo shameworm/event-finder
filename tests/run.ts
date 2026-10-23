@@ -53,6 +53,9 @@ const { loadConfig, loadPrefs, resolveCity, cityLocalName, savePrefs } = await i
 const { applyPrefsCommand, describePrefs } = await import('../src/prefs-engine.ts');
 const { tagLabel } = await import('../src/categories.ts');
 const { PreferencesSchema } = await import('../src/types.ts');
+// the real Telegram schemas, so a handler fixture that drifts out of shape
+// fails here instead of being waved through by a cast
+const { TgMessageSchema, TgCallbackQuerySchema, TgReactionUpdateSchema } = await import('../src/schemas.ts');
 const { parsePost, findDate, findTime, findVenue } = await import('../scripts/telegram.ts');
 const { resultToItem, buildQueries } = await import('../scripts/websearch.ts');
 const { collect: collectKontramarka } = await import('../scripts/kontramarka.ts');
@@ -1906,16 +1909,19 @@ describe('the heart', () => {
     store: StoreType,
     chatId: string,
     messageId: number,
-    { from = [], to = ['❤️'] }: { from?: string[]; to?: string[] } = {},
+    { from = [], to = ['❤️'], chatType = 'private' }: { from?: string[]; to?: string[]; chatType?: string } = {},
   ): Promise<string> {
     return captureOutput(() =>
-      handleReaction({ store, log, dryRun: true }, {
-        chat: { id: chatId, type: 'private' },
-        message_id: messageId,
-        user: { id: Number(chatId) },
-        old_reaction: from.map((emoji) => ({ type: 'emoji', emoji })),
-        new_reaction: to.map((emoji) => ({ type: 'emoji', emoji })),
-      } as never),
+      handleReaction(
+        { store, log, dryRun: true },
+        TgReactionUpdateSchema.parse({
+          chat: { id: chatId, type: chatType },
+          message_id: messageId,
+          user: { id: Number(chatId) },
+          old_reaction: from.map((emoji) => ({ type: 'emoji', emoji })),
+          new_reaction: to.map((emoji) => ({ type: 'emoji', emoji })),
+        }),
+      ),
     );
   }
 
@@ -1946,6 +1952,25 @@ describe('the heart', () => {
       await react(store, '3202', 778);
       const user = await getUser(store, '3202');
       assert.ok(user?.prefs.favourite_categories.includes('standup'), JSON.stringify(user?.prefs.favourite_categories));
+    });
+  });
+
+  /**
+   * A group chat is one row in `users`: one member's ❤️ would rewrite the taste
+   * of everyone else in it, which is not what "a taste model per person" means.
+   */
+  it('sets a reminder but learns nothing from a heart in a group chat', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3290', city: 'kharkiv' });
+      const before = (await getUser(store, '3290'))!.prefs;
+      await store.recordMessage('3290', 779, [gig()]);
+      const said = await react(store, '3290', 779, { chatType: 'supergroup' });
+
+      assert.match(said, /нагада/i, 'the heart is still a bookmark for the group');
+      assert.equal((await store.listReminders('3290')).length, 1);
+      const after = (await getUser(store, '3290'))!.prefs;
+      assert.deepEqual(after.taste, before.taste, 'the shared profile is left alone');
+      assert.deepEqual(after.favourite_categories, before.favourite_categories);
     });
   });
 

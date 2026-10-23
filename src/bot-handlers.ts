@@ -1094,9 +1094,14 @@ export async function handleReaction(ctx: HandlerContext, update: TgReactionUpda
   const outcome = await ctx.store.addReminder(chatId, item);
   if (outcome === 'no-date') return reply(`У «${escapeHtml(item.title)}» ще немає часу початку.`);
 
-  const learned = await learnFromHeart(ctx, user, item);
+  // a group has a single row in `users`, so one member's ❤️ would rewrite the
+  // taste of everyone else in it. The reminder is the group's either way; the
+  // taste model stays whatever the group set itself.
+  const shared = (update.chat.type ?? 'private') !== 'private';
+  const learned = shared ? { tag: null, follow: null } : await learnFromHeart(ctx, user, item);
   ctx.log.info(
     `chat ${chatId} hearted "${item.title}" (reminder ${outcome}` +
+      `${shared ? ', shared chat: taste not touched' : ''}` +
       `${learned.tag ? `, learned ${learned.tag}` : ''}${learned.follow ? `, now following ${learned.follow}` : ''})`,
   );
   return reply(reminderSaid(outcome, item.title, learned));
