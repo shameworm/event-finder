@@ -10,7 +10,7 @@ import type { OptIn, Store } from './db.ts';
 import type { Logger } from './log.ts';
 import type { TgCallbackQuery, TgMessage, TgReactionUpdate } from './schemas.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
-import { answerCallbackQuery, editMessageText, escapeHtml, sendMessage, type InlineButton } from './telegram-api.ts';
+import { answerCallbackQuery, deleteMessage, editMessageText, escapeHtml, sendMessage, type InlineButton } from './telegram-api.ts';
 import { applyPrefsCommand, describePrefs, favouritesFromList } from './prefs-engine.ts';
 import { CATEGORY_LABEL, DISLIKE_SUGGESTIONS, EMOJI, EVENT_CATEGORIES, canonicalTag, tagLabel } from './categories.ts';
 import { parseRequest, thisWeekRange, weekendRange } from './request.ts';
@@ -587,7 +587,9 @@ export async function answerSearch(
     return 0;
   }
 
-  await opts.reply('⏳ Шукаю…');
+  // sent directly rather than through `reply`, because taking the hourglass
+  // back again needs the message id Telegram gives it
+  const placeholder = await sendMessage('⏳ Шукаю…', { chatId: user.chatId, dryRun: ctx.dryRun, log: ctx.log });
 
   const collected: Item[] = [];
   const failed: string[] = [];
@@ -636,6 +638,9 @@ export async function answerSearch(
             ? `Показав тільки те, що тобі заходить — ще ${offTaste} події відфільтрував. /prefs, якщо це занадто вузько.`
             : undefined,
   });
+  // the hourglass stood in for an answer that has now arrived
+  for (const id of placeholder) await deleteMessage(id, { chatId: user.chatId, dryRun: ctx.dryRun, log: ctx.log });
+
   if (failed.length && !outcome.chatGone) {
     await opts.reply(`(до речі: ${failed.join(', ')} не відповіли, тож список може бути неповним)`);
   }

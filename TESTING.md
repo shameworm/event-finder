@@ -105,8 +105,9 @@ conversation, `src/render.ts` for events), so that is where to look.
    `standup, jazz`.
 4. Type `/` → Telegram autocompletes the command list, and the ☰ button next
    to the text field shows the same menu.
-5. `/weekend` → «⏳ Шукаю…», then a header («🎉 На вихідних · Харків · … · 5
-   подій») followed by **one message per event**. Check the dates read like
+5. `/weekend` → «⏳ Шукаю…», which **disappears** when the answer lands, then a
+   header («🎉 На вихідних · Харків · … · 5 подій») followed by **one message
+   per event**. Check the dates read like
    «пт, 24 жовт. 19:00» and the price like «400–800 ₴».
 6. **Tap ❤️ on one of those event messages** → «⏰ Нагадування поставив — …» as
    a reply to that message, plus «(додав … до улюбленого)» the first time and
