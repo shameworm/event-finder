@@ -13,7 +13,8 @@ import { collectCity } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
 import { allUsers, citiesFor, type BotUser } from './users.ts';
-import { sleep, today } from './util.ts';
+import { digestDueNow, inQuietHours, wantsOnlyMine, type DigestKind } from './schedule.ts';
+import { localTime, localWeekday, sleep, today } from './util.ts';
 
 export interface FanoutJob {
   store: Store;
@@ -46,6 +47,23 @@ export interface FanoutJob {
   select?: (user: BotUser, ranked: Item[]) => Item[];
   /** Only these chat ids (used by --chat for testing). */
   onlyChats?: string[];
+  /**
+   * Which digest this is. Set it and the job becomes hour-aware: only people
+   * whose own `digest_hour` (and, for the weekly one, `digest_day`) is *now*
+   * are covered, and 'mine' people only hear from us when their ranked list
+   * did not have to be padded.
+   *
+   * Leave it unset for the jobs that are not a digest (follow alerts, place
+   * tips) — they keep their fixed cron time and are only held back by the
+   * recipient's quiet hours. Nothing is lost when they are: only what actually
+   * went out is recorded as sent, so the next tick picks the same items up.
+   */
+  digest?: DigestKind;
+  /**
+   * The local hour/weekday to treat as "now". Defaults to the real clock in
+   * `config.timezone`; `scripts/digest.ts --hour/--day` and the tests set it.
+   */
+  now?: { hour: number; weekday: number };
 }
 
 export interface FanoutResult {
@@ -58,18 +76,52 @@ export interface FanoutResult {
   failedSources: string[];
   /** Users whose own send failed; the rest of the job carried on. */
   failedUsers: number;
+  /** Opted in, but not at this hour / not on this day. */
+  notNow: number;
+  /** Held back by quiet hours (non-digest jobs only). */
+  quiet: number;
+  /** Wanted "only when there is something of mine" and there was not. */
+  notTheirs: number;
 }
 
 export async function fanout(job: FanoutJob): Promise<FanoutResult> {
   const cfg = loadConfig();
   const base = today(cfg.timezone);
   const kinds = job.kinds ?? ['event'];
+  const clock = new Date();
+  const now = job.now ?? { hour: Number(localTime(clock, cfg.timezone).slice(0, 2)), weekday: localWeekday(clock, cfg.timezone) };
+  const empty = (): FanoutResult => ({
+    users: 0, recipients: 0, items: 0, cities: 0, scrapes: 0, cacheHits: 0,
+    failedSources: [], failedUsers: 0, notNow: 0, quiet: 0, notTheirs: 0,
+  });
 
   let users = await allUsers(job.store, job.optIn, job.log);
   if (job.onlyChats?.length) users = users.filter((u) => job.onlyChats!.includes(u.chatId));
   if (users.length === 0) {
     job.log.info(`no users opted in to ${job.optIn}`);
-    return { users: 0, recipients: 0, items: 0, cities: 0, scrapes: 0, cacheHits: 0, failedSources: [], failedUsers: 0 };
+    return empty();
+  }
+
+  // The cron now ticks every hour; this is where "every hour" becomes
+  // "the handful of people who asked for this hour".
+  const total = users.length;
+  let notNow = 0;
+  let quiet = 0;
+  const due: BotUser[] = [];
+  for (const user of users) {
+    if (job.digest) {
+      if (digestDueNow(user.schedule, job.digest, now)) due.push(user);
+      else notNow++;
+    } else if (inQuietHours(now.hour, user.schedule)) quiet++;
+    else due.push(user);
+  }
+  users = due;
+  if (users.length === 0) {
+    job.log.info(
+      `${job.optIn}: nobody at ${String(now.hour).padStart(2, '0')}:00 ` +
+        `(${total} opted in; ${notNow} another hour, ${quiet} in quiet hours)`,
+    );
+    return { ...empty(), users: 0, notNow, quiet };
   }
 
   // which cities does this job need, and who wants each one
@@ -84,14 +136,11 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
   job.log.info(`${job.optIn}: ${users.length} user(s) across ${wanted.size} city/cities`);
 
   const result: FanoutResult = {
+    ...empty(),
+    notNow,
+    quiet,
     users: users.length,
-    recipients: 0,
-    items: 0,
     cities: wanted.size,
-    scrapes: 0,
-    cacheHits: 0,
-    failedSources: [],
-    failedUsers: 0,
   };
   const sentTo = new Set<string>();
 
@@ -152,6 +201,14 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
     };
 
     const ranked = rank(collected, { query, prefs: user.prefs, tz: cfg.timezone });
+    // "only when there is something really mine": a non-zero toppedUp means
+    // rank() had to let off-taste items back in to fill the list, i.e. there
+    // was not enough of their thing on. Saying nothing is the whole point.
+    if (job.digest && wantsOnlyMine(user.schedule) && ranked.toppedUp > 0) {
+      job.log.info(`${user.chatId}: nothing of theirs on (topped up ${ranked.toppedUp}) — staying quiet`);
+      result.notTheirs++;
+      return;
+    }
     let items = job.select ? job.select(user, ranked.items) : ranked.items;
     const changeNotes = new Map<string, string>();
 

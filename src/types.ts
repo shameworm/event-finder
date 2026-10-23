@@ -49,6 +49,14 @@ export const ItemSchema = z.object({
   currency: z.string().optional(),
   free: z.boolean().optional(),
   url: z.string().min(1),
+  /**
+   * Poster URL, absolute http(s). Telegram fetches it itself when the card
+   * goes out as a photo, so nothing is ever downloaded here.
+   *
+   * Optional on purpose: it arrived after scrape_cache was already full of
+   * payloads without it, and those rows must keep parsing.
+   */
+  image: z.string().optional(),
   description: z.string().optional(),
   /** Source key: "concert.ua", "karabas", "kontramarka", "telegram:@channel", "websearch". */
   source: z.string().min(1),
@@ -117,10 +125,18 @@ export const PreferencesSchema = z.object({
   /** Free-text interests used for ranking and place suggestions. */
   interests: z.array(z.string()).default([]),
   /**
-   * How many ❤️ each tag has collected, so a category someone keeps hearting
-   * outranks one they hearted once. Written by the bot, not by hand.
+   * The running tally for each tag: ❤️ adds a point, 👎 takes one away, so a
+   * category someone keeps hearting outranks one they hearted once and a
+   * category they keep waving off sinks towards the dislikes. Goes negative —
+   * that is the whole point of the 👎 side. Written by the bot, not by hand.
    */
-  taste: z.record(z.string(), z.number().nonnegative()).default({}),
+  taste: z.record(z.string(), z.number()).default({}),
+  /**
+   * Performers silenced by an explicit 👎. Stronger than `follow`: a name here
+   * is never shown even if the category is a favourite, and even if the same
+   * name wandered into the follow list from an earlier ❤️.
+   */
+  blocked_acts: z.array(z.string()).default([]),
   notes: z.array(z.string()).default([]),
 });
 export type Preferences = z.infer<typeof PreferencesSchema>;

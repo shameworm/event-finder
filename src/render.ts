@@ -4,7 +4,10 @@ import { cityLabel, loadConfig } from './config.ts';
 import { priceText } from './normalize.ts';
 import { dayLabel, localDate, localTime, truncate } from './util.ts';
 import { groupByDay } from './rank.ts';
-import { escapeHtml } from './telegram-api.ts';
+import { googleCalendarUrl } from './calendar.ts';
+import { CAPTION_LIMIT, escapeHtml, type InlineButton } from './telegram-api.ts';
+
+export { CAPTION_LIMIT };
 
 export type Format = 'html' | 'text';
 
@@ -23,9 +26,9 @@ export const countPlaces = (n: number): string => `${n} ${plural(n, ['місце
 
 export const countReminders = (n: number): string => `${n} ${plural(n, ['нагадування', 'нагадування', 'нагадувань'])}`;
 
-export const REMINDER_HINT = 'Тапни ❤️ на події — нагадаю за день і за 3 години до початку.';
-export const NO_REMINDERS = 'Нагадувань поки немає. Тапни ❤️ на події — і я поставлю.';
-export const CANCEL_HINT = 'Знімеш ❤️ з повідомлення про подію — скасую нагадування.';
+export const REMINDER_HINT = 'Тисни ⏰ під подією або ❤️ на ній — нагадаю за день і за 3 години до початку.';
+export const NO_REMINDERS = 'Нагадувань поки немає. Тисни ⏰ під подією або ❤️ на ній — і я поставлю.';
+export const CANCEL_HINT = 'Тисни ⏰ під подією ще раз або знімеш ❤️ — скасую нагадування.';
 export const PLACES_HINT = 'Скажи, як тобі — і я підлаштую підказки.';
 export const NOTHING_FOUND = 'Цього разу нічого не знайшлося. Спробуй ширший період або інше місто.';
 
@@ -71,6 +74,12 @@ export interface RenderItemOptions {
   withDay?: boolean;
   /** Reason this item is being (re)sent, e.g. "new date". */
   changeNote?: string;
+  /**
+   * Caption mode: drop the description and the ranking line. A photo's caption
+   * gets 1024 characters where a message gets 4096, and the poster above it is
+   * already doing the work a blurb would.
+   */
+  compact?: boolean;
 }
 
 /** One event/place line: emoji, title, venue, time, price, description, link. */
@@ -100,14 +109,47 @@ export function renderItem(item: Item, opts: RenderItemOptions = {}): string {
     `${num}${emoji} ${bold(item.title, format)}${STATUS_BADGE[item.status] ?? ''}${note ? ` — 🔁 ${note}` : ''}`,
     facts,
   ];
-  if (item.description) lines.push(plain(truncate(item.description, 140), format));
+  if (item.description && !opts.compact) lines.push(plain(truncate(item.description, 140), format));
   // "квитки" is a promise; a free event or one with no price has none to make
   const buyable = item.kind === 'event' && !item.free && (item.priceMin !== undefined || item.priceMax !== undefined);
   lines.push(link(buyable ? 'квитки →' : 'детальніше →', item.url, format));
-  if (opts.explain && item.reasons?.length) {
+  if (opts.explain && !opts.compact && item.reasons?.length) {
     lines.push(plain(`· ${item.reasons.slice(0, 4).join(', ')} (бали ${item.score})`, format));
   }
   return lines.filter(Boolean).join('\n');
+}
+
+/**
+ * The same card, as a caption that fits under its poster — or null when it
+ * cannot be made to fit, in which case the card goes out as a plain message.
+ *
+ * It tries the full card first, since most of them already fit; then compact,
+ * without the description; and only then shortens the item's own fields. The
+ * last part matters: HTML escaping can multiply a hostile title sixfold
+ * ("&" -> "&amp;"), and clamping *rendered* HTML would cut a tag in half and
+ * make Telegram reject the whole message.
+ */
+export function renderCaption(item: Item, opts: RenderItemOptions = {}): string | null {
+  for (const compact of [false, true]) {
+    const text = renderItem(item, { ...opts, compact });
+    if (text.length <= CAPTION_LIMIT) return text;
+  }
+  for (const len of [120, 60, 30, 12]) {
+    const text = renderItem(
+      {
+        ...item,
+        title: truncate(item.title, len),
+        venue: item.venue ? truncate(item.venue, len) : undefined,
+        address: item.address ? truncate(item.address, len) : undefined,
+        description: undefined,
+      },
+      { ...opts, compact: true },
+    );
+    if (text.length <= CAPTION_LIMIT) return text;
+  }
+  // an absurdly long url is the only way to get here, and it is worth more
+  // than the poster: let the caller send a message instead
+  return null;
 }
 
 /** What `renderReminders` needs of a reminder row, and nothing more. */
@@ -180,6 +222,8 @@ export interface DigestOptions {
   /** Number items continuously (console output only; Telegram gets one message each). */
   numbered?: boolean;
   changeNotes?: Map<string, string>;
+  /** How many ranked events did not fit; puts a "показати ще" button on the header. */
+  more?: number;
 }
 
 /**
@@ -255,6 +299,58 @@ export interface OutgoingMessage {
   text: string;
   /** What this message is about: exactly one item for an event, none for the header. */
   items: Item[];
+  /** The buttons under an event card; the header has none. */
+  inlineKeyboard?: InlineButton[][];
+  /**
+   * Poster to send this card as a photo, with `caption` under it. Both are set
+   * together, or neither is; `text` is always the full message-sized card, so a
+   * poster Telegram refuses costs nothing but the picture.
+   */
+  image?: string;
+  caption?: string;
+}
+
+/**
+ * The buttons under one event card.
+ *
+ * `callback_data` is `ev:<verb>:<item id>` — three bytes of prefix plus a
+ * 40-character sha1, which leaves room inside Telegram's 64-byte limit. The
+ * item is still resolved from the messages table (chat + message id), the same
+ * path a ❤️ takes; the id in the data is what tells a tap which card it came
+ * from when the message carried more than one.
+ *
+ * ⏰ is a toggle and says which way it is pointing, like a heart you can see.
+ *
+ * 📅 is the one button that never calls back: it is a link straight to Google's
+ * pre-filled form (see src/calendar.ts). It is also the one button that can be
+ * missing — "дата уточнюється" is nothing a calendar can hold, so an event
+ * without a start time gets no 📅 instead of a 📅 that apologises.
+ */
+export function eventKeyboard(item: Item, opts: { reminded?: boolean } = {}): InlineButton[][] {
+  const ev = (verb: string) => `ev:${verb}:${item.id}`;
+  const google = googleCalendarUrl(item);
+  return [
+    [
+      { text: opts.reminded ? '⏰ Не нагадувати' : '⏰ Нагадати', callback_data: ev('r') },
+      { text: '👎 Не моє', callback_data: ev('no') },
+    ],
+    [
+      ...(google ? [{ text: '📅 В календар', url: google }] : []),
+      { text: '↗️ Поділитись', callback_data: ev('share') },
+    ],
+  ];
+}
+
+/**
+ * The header's own button: the rest of the ranked list, one tap away.
+ *
+ * `callback_data` is the bare `more` — which message to continue comes from
+ * the callback itself (chat + the header's message id), so nothing has to be
+ * squeezed into Telegram's 64 bytes and an old button can never point at
+ * somebody else's page.
+ */
+export function moreButton(rest: number): InlineButton[][] {
+  return [[{ text: `📥 Показати ще ${rest}`, callback_data: 'more' }]];
 }
 
 /**
@@ -298,16 +394,23 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
   const header = `${bold(opts.title, format)}\n${plain(facts, format)}\n\n${plain(tail, format)}`;
 
   return [
-    { text: header, items: [] },
-    ...kept.map((item) => ({
-      text: renderItem(item, {
+    { text: header, items: [], ...(opts.more && opts.more > 0 ? { inlineKeyboard: moreButton(opts.more) } : {}) },
+    ...kept.map((item) => {
+      const itemOpts: RenderItemOptions = {
         format,
         withDay: !placesOnly,
         explain: opts.explain,
         changeNote: opts.changeNotes?.get(item.id),
-      }),
-      items: [item],
-    })),
+      };
+      const caption = item.image ? renderCaption(item, itemOpts) : null;
+      return {
+        text: renderItem(item, itemOpts),
+        items: [item],
+        // places have no start time to remind about and no ticket to share
+        ...(item.kind === 'event' ? { inlineKeyboard: eventKeyboard(item) } : {}),
+        ...(item.image && caption ? { image: item.image, caption } : {}),
+      };
+    }),
   ];
 }
 

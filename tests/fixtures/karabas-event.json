@@ -9,6 +9,12 @@
   "endDate": "2026-12-09T00:00:00+02:00",
   "eventStatus": "https://schema.org/EventScheduled",
   "isAccessibleForFree": false,
+  "image": {
+    "@type": "ImageObject",
+    "url": "https://images.karabas.com/external/0188/events/019f/2845364609_ImageBig639251718260197275.jpeg",
+    "width": 1200,
+    "height": 630
+  },
   "offers": {
     "@type": "AggregateOffer",
     "priceCurrency": "UAH",

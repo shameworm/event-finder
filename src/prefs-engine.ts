@@ -177,7 +177,11 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
   if (follow) {
     const who = cleanTag(follow[1] as string);
     const changed = add(prefs.follow, who);
-    return ok(changed ? [`стежу за «${who}»`] : [], changed ? undefined : `за «${who}» уже стежу`);
+    // asking for someone by name undoes a 👎 on them, or following would be a
+    // promise the ranker quietly breaks
+    const unblocked = drop(prefs.blocked_acts, who);
+    const changes = [...(changed ? [`стежу за «${who}»`] : []), ...(unblocked ? [`знову показую «${who}»`] : [])];
+    return ok(changes, changes.length ? undefined : `за «${who}» уже стежу`);
   }
 
   /* --- interests -------------------------------------------------------- */
@@ -236,12 +240,74 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
     if (tag) {
       const changed = add(prefs.favourite_categories, tag);
       const alsoDropped = drop(prefs.disliked_categories, tag);
+      // a category that fell to the 👎 threshold would fall again on the next
+      // one; saying you like it clears the debt rather than halving it
+      if (alsoDropped && (prefs.taste[tag] ?? 0) < 0) prefs.taste[tag] = 0;
       const changes = [...(changed ? [`улюблене + ${tagLabel(tag)}`] : []), ...(alsoDropped ? [`небажане − ${tagLabel(tag)}`] : [])];
       return ok(changes, changes.length ? undefined : 'це вже в улюбленому');
     }
   }
 
   return { changes: [], prefs: current, understood: false };
+}
+
+/** A category drops out of the favourites and into the dislikes at this tally. */
+export const DISLIKE_THRESHOLD = -3;
+
+export interface ThumbsDown {
+  prefs: Preferences;
+  /** The category the 👎 landed on, and its tally after the hit. */
+  tag: string | null;
+  score: number;
+  /** The tally crossed DISLIKE_THRESHOLD on this tap: the category is out. */
+  demoted: boolean;
+  /** The performer silenced by this tap, if there was a name to silence. */
+  blocked: string | null;
+  changes: string[];
+}
+
+/**
+ * The mirror of a ❤️: one 👎 on an event, applied to the profile.
+ *
+ * A single 👎 is not a verdict — it only takes a point off the tally that
+ * hearts raise, so a category someone liked twenty times survives one bad
+ * evening. Once that tally reaches DISLIKE_THRESHOLD the category leaves the
+ * favourites (or interests, for a place) and joins the dislikes for good.
+ *
+ * The performer is different: naming an act is explicit, so it goes straight
+ * to the stop list — and leaves `follow`, which a stray ❤️ may have put it on.
+ */
+export function applyThumbsDown(current: Preferences, opts: { tag: string; act?: string }): ThumbsDown {
+  const prefs = PreferencesSchema.parse(JSON.parse(JSON.stringify(current)));
+  const tag = canonicalTag(opts.tag);
+  const changes: string[] = [];
+  const act = opts.act?.trim();
+
+  let blocked: string | null = null;
+  if (act && act.length >= 3) {
+    if (add(prefs.blocked_acts, act)) {
+      blocked = act;
+      changes.push(`не показую «${act}»`);
+    }
+    if (drop(prefs.follow, act)) changes.push(`більше не стежу за «${act}»`);
+  }
+
+  if (!tag) return { prefs, tag: null, score: 0, demoted: false, blocked, changes };
+
+  const score = (prefs.taste[tag] ?? 0) - 1;
+  prefs.taste[tag] = score;
+  const demoted = score <= DISLIKE_THRESHOLD;
+  if (demoted) {
+    const fromFav = drop(prefs.favourite_categories, tag);
+    const fromInterests = drop(prefs.interests, tag);
+    if (fromFav) changes.push(`улюблене − ${tagLabel(tag)}`);
+    if (fromInterests) changes.push(`інтереси − ${tagLabel(tag)}`);
+    if (add(prefs.disliked_categories, tag)) changes.push(`небажане + ${tagLabel(tag)}`);
+  } else {
+    changes.push(`${tagLabel(tag)} важить менше (${score})`);
+  }
+
+  return { prefs, tag, score, demoted, blocked, changes };
 }
 
 /** The hryvnia has a sign; everything else is shown as its code. */
@@ -255,6 +321,7 @@ export function describePrefs(prefs: Preferences): string {
     `улюблене: ${prefs.favourite_categories.map(tagLabel).join(', ') || '—'}`,
     `небажане: ${prefs.disliked_categories.map(tagLabel).join(', ') || '—'}`,
     `стежу за: ${prefs.follow.join(', ') || '—'}`,
+    `не показую: ${(prefs.blocked_acts ?? []).join(', ') || '—'}`,
     `максимум за квиток: ${prefs.max_ticket_price ? `${prefs.max_ticket_price} ${money(prefs.currency)}` : 'без обмежень'}`,
     `інтереси: ${(prefs.interests ?? []).map(tagLabel).join(', ') || '—'}`,
   ];

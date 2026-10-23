@@ -134,6 +134,12 @@ npx tsx scripts/websearch.ts    --city kharkiv
 - **concert.ua** — `concert.ua/en/catalog/<slug>/<category>?page=N`, schema.org JSON-LD.
 - **karabas** — `<city>.karabas.com/?page=N`, JSON-LD with venue, price range, availability.
 - **kontramarka** — `<city>.kontramarka.ua/uk/<category>?page=N`, microdata via cheerio. Kyiv is on the bare domain.
+
+All three publish a poster on the very pages above — a URL on Concert.ua, an
+`ImageObject` on Karabas, a `<meta itemprop="image">` on Kontramarka — so an
+event carries `image` and is sent as a photo. The Telegram and websearch
+sources do not: channel posts carry media as a `file_id`, which is a different
+mechanism, and a search result carries no picture at all. Those stay text.
 - **telegram** — public channels per city via GramJS. One shared login (the operator's), used for everyone.
 - **websearch** — the two-step hand-off below.
 
@@ -167,8 +173,10 @@ date are dropped.
 ## Scheduled jobs (they fan out to every user)
 
 ```bash
-npx tsx scripts/digest.ts --week                # Monday 09:00 — this week, per user's city
-npx tsx scripts/digest.ts --weekend --top 5     # Thursday 18:00 — weekend picks
+npx tsx scripts/digest.ts --week                # hourly — whoever asked for this hour/day
+npx tsx scripts/digest.ts --weekend --top 5     # hourly on Thursday — weekend picks
+npx tsx scripts/digest.ts --week --hour 18 --day 5 --dry-run   # rehearse one slot
+npx tsx scripts/digest.ts --week --now          # ignore the schedule, send to everyone
 npx tsx scripts/follows.ts                      # every 6h — new shows by people they follow
 npx tsx scripts/follows.ts --queries            #   …run these first: tours are announced by name
 npx tsx scripts/places.ts                       # weekly — places to try
@@ -295,6 +303,10 @@ that is the first thing to check.
   fills in channel names. Ask for them rather than inventing names.
 - First GramJS use needs an interactive login: `npx tsx scripts/tg-login.ts`.
   Never run it from cron, and never print the session string.
+- **Posters are never downloaded here.** `image` is handed to Telegram as a URL
+  and Telegram fetches it. A URL it cannot fetch fails the whole message, so
+  `deliver` re-sends that card as text and logs `poster rejected` with the URL —
+  grep for that line before believing a source has stopped publishing posters.
 - Logs: `~/.hermes/data/events-finder/logs/events-finder.log`.
 - No build step; everything runs with `tsx`. `npm test` is offline and takes a
   couple of seconds — run it after editing anything in `src/`.

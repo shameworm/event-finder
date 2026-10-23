@@ -13,7 +13,7 @@
  */
 import { sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
-import { ItemSchema, type Item } from './types.ts';
+import { ItemSchema, QuerySchema, type Item } from './types.ts';
 import { DB_FILE, ensureDirs, loadEnv } from './paths.ts';
 import { fingerprint } from './dedupe.ts';
 import * as sqliteSchema from '../drizzle/schema.sqlite.ts';
@@ -78,6 +78,27 @@ async function createDriver(): Promise<Driver> {
 
 /* ------------------------------------------------------------- bootstrap --- */
 
+/**
+ * Add a column to an existing table, idempotently.
+ *
+ * Postgres has `ADD COLUMN IF NOT EXISTS`; SQLite has no such thing and errors
+ * with "duplicate column name", which on the second start-up is exactly the
+ * outcome we wanted. Table and column names come from the literals above,
+ * never from user input.
+ */
+async function addColumn(d: Driver, table: string, column: string, type: string): Promise<void> {
+  const ifNotExists = d.dialect === 'postgres' ? 'IF NOT EXISTS ' : '';
+  try {
+    await d.run(sql.raw(`ALTER TABLE ${table} ADD COLUMN ${ifNotExists}${column} ${type}`));
+  } catch (err) {
+    // drizzle wraps driver errors, so the real complaint is down the `cause`
+    // chain rather than in the top-level message
+    const messages: string[] = [];
+    for (let e: unknown = err; e instanceof Error; e = e.cause) messages.push(e.message);
+    if (!/duplicate column|already exists/i.test(messages.join(' | '))) throw err;
+  }
+}
+
 async function bootstrap(d: Driver): Promise<void> {
   const t = d.schema;
   const pk = d.dialect === 'postgres' ? sql`serial PRIMARY KEY` : sql`integer PRIMARY KEY AUTOINCREMENT`;
@@ -93,12 +114,31 @@ async function bootstrap(d: Driver): Promise<void> {
     weekend_digest integer NOT NULL DEFAULT 1,
     follow_alerts  integer NOT NULL DEFAULT 1,
     place_tips     integer NOT NULL DEFAULT 1,
+    digest_hour    integer NOT NULL DEFAULT 9,
+    digest_day     integer NOT NULL DEFAULT 1,
+    quiet_from     integer NOT NULL DEFAULT 23,
+    quiet_to       integer NOT NULL DEFAULT 8,
+    digest_freq    text NOT NULL DEFAULT 'twice',
     blocked        integer NOT NULL DEFAULT 0,
     last_seen_at   text,
     created_at     text NOT NULL,
     updated_at     text NOT NULL
   )`);
   await d.run(sql`CREATE INDEX IF NOT EXISTS idx_users_city ON ${t.users} (city)`);
+
+  // There are no migration files in this project, so a database created before
+  // the personal schedule existed has the old `users` shape and the CREATE
+  // TABLE above is a no-op for it. Add the columns by hand instead, with the
+  // defaults that reproduce the single hard-wired cron it was built around.
+  for (const [column, type] of [
+    ['digest_hour', `integer NOT NULL DEFAULT 9`],
+    ['digest_day', `integer NOT NULL DEFAULT 1`],
+    ['quiet_from', `integer NOT NULL DEFAULT 23`],
+    ['quiet_to', `integer NOT NULL DEFAULT 8`],
+    ['digest_freq', `text NOT NULL DEFAULT 'twice'`],
+  ] as const) {
+    await addColumn(d, 'users', column, type);
+  }
 
   await d.run(sql`CREATE TABLE IF NOT EXISTS ${t.deliveries} (
     chat_id       text NOT NULL,
@@ -206,6 +246,13 @@ export const UserRowSchema = z.object({
   weekend_digest: z.coerce.number().int(),
   follow_alerts: z.coerce.number().int(),
   place_tips: z.coerce.number().int(),
+  // the personal schedule; defaulted rather than required, so a row that
+  // predates these columns still parses and behaves as it always did
+  digest_hour: z.coerce.number().int().default(9),
+  digest_day: z.coerce.number().int().default(1),
+  quiet_from: z.coerce.number().int().default(23),
+  quiet_to: z.coerce.number().int().default(8),
+  digest_freq: z.string().default('twice'),
   blocked: z.coerce.number().int(),
 });
 export type UserRow = z.infer<typeof UserRowSchema>;
@@ -231,6 +278,22 @@ export interface SendDecision {
 }
 
 export type OptIn = 'weekly_digest' | 'weekend_digest' | 'follow_alerts' | 'place_tips';
+
+/**
+ * What one answer left over: the events it ranked but had no room to show,
+ * plus the header text they hang under so the "показати ще" button on it can
+ * be redrawn (or taken away) without rebuilding the answer from scratch.
+ */
+export const PendingPageSchema = z.object({
+  header: z.string(),
+  title: z.string(),
+  query: QuerySchema,
+  /** Ranked, in order, none of them shown yet. */
+  rest: z.array(ItemSchema),
+  /** How many to hand out per tap — the same page size the first answer used. */
+  size: z.number().int().positive(),
+});
+export type PendingPage = z.infer<typeof PendingPageSchema>;
 
 function itemsFromPayload(payload: unknown): Item[] {
   if (typeof payload !== 'string' || !payload) return [];
@@ -329,6 +392,27 @@ export class Store {
       : which === 'follow_alerts' ? sql`follow_alerts`
       : sql`place_tips`;
     await this.d.run(sql`UPDATE ${t.users} SET ${column} = ${value}, updated_at = ${ts} WHERE chat_id = ${chatId}`);
+  }
+
+  /**
+   * Change one piece of someone's delivery schedule. Each field is written
+   * through its own statement so the column list stays a closed set of
+   * literals rather than something assembled from input.
+   */
+  async setSchedule(
+    chatId: string,
+    patch: { hour?: number; day?: number; quietFrom?: number; quietTo?: number; frequency?: string },
+  ): Promise<void> {
+    const t = this.d.schema;
+    const ts = nowIso();
+    const set = async (column: SQL, value: number | string) => {
+      await this.d.run(sql`UPDATE ${t.users} SET ${column} = ${value}, updated_at = ${ts} WHERE chat_id = ${chatId}`);
+    };
+    if (patch.hour !== undefined) await set(sql`digest_hour`, patch.hour);
+    if (patch.day !== undefined) await set(sql`digest_day`, patch.day);
+    if (patch.quietFrom !== undefined) await set(sql`quiet_from`, patch.quietFrom);
+    if (patch.quietTo !== undefined) await set(sql`quiet_to`, patch.quietTo);
+    if (patch.frequency !== undefined) await set(sql`digest_freq`, patch.frequency);
   }
 
   /** 1 = the user pressed /stop or Telegram told us the chat is gone. */
@@ -528,6 +612,14 @@ export class Store {
     else await this.d.run(sql`UPDATE ${t.reminders} SET fired_1d = 1 WHERE id = ${id}`);
   }
 
+  /** Is a reminder standing for this event right now? — what ⏰ toggles on. */
+  async hasReminder(chatId: string, itemId: string): Promise<boolean> {
+    const rows = await this.d.all(
+      sql`SELECT id FROM ${this.d.schema.reminders} WHERE chat_id = ${chatId} AND item_id = ${itemId} AND cancelled = 0`,
+    );
+    return rows.length > 0;
+  }
+
   async cancelReminder(chatId: string, itemId: string): Promise<void> {
     await this.d.run(
       sql`UPDATE ${this.d.schema.reminders} SET cancelled = 1 WHERE chat_id = ${chatId} AND item_id = ${itemId}`,
@@ -560,6 +652,51 @@ export class Store {
         created_at = ${new Date(now).toISOString()},
         expires_at = ${new Date(now + ttlSeconds * 1000).toISOString()}
     `);
+  }
+
+  /* --------------------------------------------------- "show more" stash --- */
+
+  /**
+   * Park the ranked-but-unshown tail of one answer, so "показати ще" can hand
+   * out the next page without scraping anybody's site a second time.
+   *
+   * It lives in the scrape-cache table on purpose: that table already carries
+   * `expires_at`, and `pruneCache` already sweeps it, so a stash nobody comes
+   * back for disappears within the hour instead of growing forever.
+   */
+  async putPage(key: string, page: PendingPage, ttlSeconds: number): Promise<void> {
+    const t = this.d.schema;
+    const now = Date.now();
+    const payload = JSON.stringify(page);
+    await this.d.run(sql`
+      INSERT INTO ${t.scrapeCache} (key, payload, created_at, expires_at)
+      VALUES (${key}, ${payload}, ${new Date(now).toISOString()}, ${new Date(now + ttlSeconds * 1000).toISOString()})
+      ON CONFLICT (key) DO UPDATE SET
+        payload    = ${payload},
+        created_at = ${new Date(now).toISOString()},
+        expires_at = ${new Date(now + ttlSeconds * 1000).toISOString()}
+    `);
+  }
+
+  /** The stash for one answer, or null when it expired or was never there. */
+  async getPage(key: string): Promise<PendingPage | null> {
+    const rows = await this.d.all(
+      sql`SELECT payload, expires_at FROM ${this.d.schema.scrapeCache} WHERE key = ${key}`,
+    );
+    const row = rows[0];
+    if (!row) return null;
+    const expires = typeof row['expires_at'] === 'string' ? Date.parse(row['expires_at']) : 0;
+    if (!expires || expires <= Date.now()) return null;
+    try {
+      const parsed = PendingPageSchema.safeParse(JSON.parse(String(row['payload'] ?? 'null')));
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async dropPage(key: string): Promise<void> {
+    await this.d.run(sql`DELETE FROM ${this.d.schema.scrapeCache} WHERE key = ${key}`);
   }
 
   async pruneCache(): Promise<void> {

@@ -38,14 +38,14 @@ function absolute(href: string, pageUrl: string): string | null {
  *
  * `pageUrl` is what the card's href is resolved against: Kontramarka links its
  * cards with site-relative paths, and a bare "/uk/event/123" in a Telegram
- * message is a dead link.
+ * message is a dead link. Leave it out and the href is taken as published.
  */
-function cardToSchema($: cheerio.CheerioAPI, el: AnyNode, pageUrl: string): Record<string, unknown> | null {
+export function cardToSchema($: cheerio.CheerioAPI, el: AnyNode, pageUrl?: string): Record<string, unknown> | null {
   const card = $(el);
   const name = card.find('[itemprop="name"]').first().text().trim();
   const href = card.find('a[itemprop="url"]').first().attr('href') ?? card.find('a.block-info__title').first().attr('href');
   if (!name || !href) return null;
-  const url = absolute(href, pageUrl);
+  const url = pageUrl ? absolute(href, pageUrl) : href;
   if (!url) return null;
 
   const meta = (prop: string): string | undefined => {
@@ -67,6 +67,9 @@ function cardToSchema($: cheerio.CheerioAPI, el: AnyNode, pageUrl: string): Reco
     url,
     startDate: meta('startDate'),
     endDate: meta('endDate'),
+    // the poster is a <meta itemprop="image">; the card's own thumbnail is a
+    // lazy-loaded data-bg on the same block, used when the meta is missing
+    image: meta('image') ?? card.find('.cat_item__image[data-bg]').first().attr('data-bg')?.trim(),
     description: card.find('.block-info__descr').first().text().trim() || undefined,
     location: {
       '@type': 'Place',

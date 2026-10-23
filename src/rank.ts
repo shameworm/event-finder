@@ -137,10 +137,20 @@ export function rank(items: Item[], opts: RankOptions): Ranked {
       reasons.push(`interest "${tag}"`);
     }
 
-    const follows = (prefs.follow ?? []).filter((f) => matchesFollow(item, f));
+    // an explicit 👎 on an act is checked first and short-circuits everything
+    // below: a followed act beats every filter, so a name that is on both
+    // lists would otherwise come back through the follow bonus
+    const blocked = (prefs.blocked_acts ?? []).find((b) => matchesFollow(item, b));
+    if (blocked) {
+      if (!opts.keepDisliked) { dropped.push({ item, why: `blocked act: ${blocked}` }); continue; }
+      score -= 30;
+      reasons.push(`blocked act "${blocked}"`);
+    }
+
+    const follows = blocked ? [] : (prefs.follow ?? []).filter((f) => matchesFollow(item, f));
     if (follows.length) { score += 10; reasons.push(`you follow ${follows.join(', ')}`); }
 
-    const onTaste = follows.length > 0 || asked.some((tag) => matchesTag(item, tag));
+    const onTaste = !blocked && (follows.length > 0 || asked.some((tag) => matchesTag(item, tag)));
 
     const hitDislike = dislikes.find((tag) => matchesTag(item, tag));
     if (hitDislike && !follows.length) {

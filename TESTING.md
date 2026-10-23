@@ -14,14 +14,14 @@ cd ~/.hermes/skills/events-finder
 ## 0. Automated suite (start here)
 
 ```bash
-npm test          # 194 offline checks: parsing, classification, dedupe, ranking,
+npm test          # 260 offline checks: parsing, classification, dedupe, ranking,
                   # rendering, per-user store, users, fan-out, bot handlers,
                   # politeness/retries, page walking and the scrapers themselves
 npm run typecheck # tsc --noEmit
 ```
 
 Uses a temporary database and the committed example config, so it is safe at any
-time and needs no secrets. Expect `194/194 passed` and exit code 0.
+time and needs no secrets. Expect `260/260 passed` and exit code 0.
 
 Notable cases it covers, so you do not have to by hand: a city is scraped once
 and ranked per user; a muted user is skipped; an already-delivered item is not
@@ -214,8 +214,9 @@ from a second account: it should reply that the bot is private. Your own chat
 None of these send with `--dry-run`:
 
 ```bash
-npx tsx scripts/digest.ts  --week --dry-run                 # Monday 09:00 job
-npx tsx scripts/digest.ts  --weekend --top 5 --dry-run      # Thursday 18:00 job
+npx tsx scripts/digest.ts  --week --dry-run                 # hourly weekly job, this hour's slot
+npx tsx scripts/digest.ts  --week --dry-run --hour 9 --day 1  # rehearse the Monday 09:00 slot
+npx tsx scripts/digest.ts  --weekend --top 5 --dry-run      # hourly Thursday job
 npx tsx scripts/follows.ts --dry-run                        # every-6-hours job
 npx tsx scripts/places.ts  --dry-run                        # weekly job
 npx tsx scripts/reminders.ts --dry-run                      # every-15-minutes job

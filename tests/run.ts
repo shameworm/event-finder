@@ -50,12 +50,12 @@ const { describe, it, run } = await import('./harness.ts');
 const { normText, stemText, isoInZone, localDate, localTime, addDays, today, weekdayOf, titleKey, dayLabel } = await import('../src/util.ts');
 const { classify, canonicalTag, expandTag } = await import('../src/categories.ts');
 const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange, splitNegations } = await import('../src/request.ts');
-const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom } = await import('../src/normalize.ts');
+const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom, pickImage } = await import('../src/normalize.ts');
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
-const { buildDigest, buildMessages, renderReminders } = await import('../src/render.ts');
+const { buildDigest, buildMessages, eventKeyboard, renderReminders, renderItem, renderCaption, CAPTION_LIMIT } = await import('../src/render.ts');
 const { loadConfig, loadPrefs, resolveCity, cityLocalName, savePrefs } = await import('../src/config.ts');
-const { applyPrefsCommand, describePrefs } = await import('../src/prefs-engine.ts');
+const { applyPrefsCommand, applyThumbsDown, describePrefs } = await import('../src/prefs-engine.ts');
 const { tagLabel } = await import('../src/categories.ts');
 const { PreferencesSchema } = await import('../src/types.ts');
 // the real Telegram schemas, so a handler fixture that drifts out of shape
@@ -63,13 +63,18 @@ const { PreferencesSchema } = await import('../src/types.ts');
 const { TgMessageSchema, TgCallbackQuerySchema, TgReactionUpdateSchema } = await import('../src/schemas.ts');
 const { parsePost, findDate, findTime, findVenue } = await import('../scripts/telegram.ts');
 const { resultToItem, buildQueries } = await import('../scripts/websearch.ts');
-const { collect: collectKontramarka } = await import('../scripts/kontramarka.ts');
+const { collect: collectKontramarka, cardToSchema } = await import('../scripts/kontramarka.ts');
 const { Store } = await import('../src/db.ts');
 const { splitForTelegram, parseUpdates } = await import('../src/telegram-api.ts');
+const { googleCalendarUrl } = await import('../src/calendar.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs, newUserPrefs } = await import('../src/users.ts');
 const { cacheKey, collectCity } = await import('../src/cache.ts');
 const { parseArgs } = await import('../src/cli.ts');
 const { fanout } = await import('../src/fanout.ts');
+const {
+  DIGEST_HOURS, WEEKEND_DAY, digestDueNow, inQuietHours, reminderAllowedNow, scheduleOf, defaultSchedule,
+  describeSchedule, wantsOnlyMine,
+} = await import('../src/schedule.ts');
 const { handleMessage, handleCallback, handleReaction, parseBell, isHeart, isAllowed, BOT_COMMANDS } = await import(
   '../src/bot-handlers.ts'
 );
@@ -348,6 +353,37 @@ describe('normalization', () => {
     assert.equal(makeItem({ city: 'kharkiv', title: 'Gig', url: 'https://x/g', source: 's', startsAt: '2026-10-25T19:00:00+03:00' })!.startsAt, '2026-10-25T19:00:00+03:00');
   });
 
+  it('takes the poster off a Concert.ua event, at full size', () => {
+    const item = fromSchemaEvent(JSON.parse(fixture('concertua-soldout.json')), { city: 'kharkiv', source: 'concert.ua' });
+    assert.ok(item);
+    // the catalog's ":31-catalog-event_item-desktop" preset is a 270x200
+    // thumbnail; the bare path is the 1920x1080 poster
+    assert.equal(item.image, 'https://storage.concert.ua/JIX/20/gq/6ad7336a98acf/8ad2.jpg');
+  });
+
+  it('takes the poster out of a Karabas ImageObject', () => {
+    const item = fromSchemaEvent(JSON.parse(fixture('karabas-event.json')), { city: 'kharkiv', source: 'karabas' });
+    assert.ok(item);
+    assert.equal(item.image, 'https://images.karabas.com/external/0188/events/019f/2845364609_ImageBig639251718260197275.jpeg');
+  });
+
+  it('leaves an event with no usable poster as a text card', () => {
+    const base = JSON.parse(fixture('karabas-event.json'));
+    for (const image of [undefined, '', '   ', 'data:image/png;base64,AAAA', 'javascript:alert(1)', 42, {}, [], { url: 7 }]) {
+      const item = fromSchemaEvent({ ...base, image }, { city: 'kharkiv', source: 'karabas' });
+      assert.ok(item, `image ${JSON.stringify(image)} should not reject the event`);
+      assert.equal(item.image, undefined, `image ${JSON.stringify(image)} should not survive`);
+    }
+  });
+
+  it('resolves a relative poster against the event page', () => {
+    assert.equal(
+      pickImage('/uploads/poster.jpg', 'https://kharkiv.kontramarka.ua/uk/show-1.html'),
+      'https://kharkiv.kontramarka.ua/uploads/poster.jpg',
+    );
+    assert.equal(pickImage('//cdn.example.com/x.jpg', 'https://a.example/b'), 'https://cdn.example.com/x.jpg');
+  });
+
   it('parses Kontramarka microdata cards', async () => {
     const html = fixture('kontramarka-card.html');
     const cheerio = await import('cheerio');
@@ -356,6 +392,26 @@ describe('normalization', () => {
     assert.equal($('[itemprop="name"]').first().text().trim(), 'Василь Байдак');
     assert.equal($('meta[itemprop="startDate"]').attr('content'), '2026-10-21T18:30:00+03:00');
     assert.equal(typeof collectKontramarka, 'function');
+
+    const card = $('.cat_item[itemtype*="schema.org/Event"]').first()[0];
+    assert.ok(card);
+    const schema = cardToSchema($, card);
+    assert.ok(schema);
+    assert.equal(schema['image'], 'https://cdn.kontramarka.ua/uploads/resize/shows/logo/630x891_1787415980.webp');
+    const item = fromSchemaEvent(schema, { city: 'kharkiv', source: 'kontramarka' });
+    assert.ok(item);
+    assert.equal(item.image, 'https://cdn.kontramarka.ua/uploads/resize/shows/logo/630x891_1787415980.webp');
+  });
+
+  it('falls back to the card thumbnail when Kontramarka drops the image meta', async () => {
+    const cheerio = await import('cheerio');
+    const $ = cheerio.load(fixture('kontramarka-card.html').replace(/<meta itemprop="image"[^>]*>/, ''));
+    const card = $('.cat_item[itemtype*="schema.org/Event"]').first()[0];
+    assert.ok(card);
+    assert.equal(
+      cardToSchema($, card)?.['image'],
+      'https://cdn.kontramarka.ua/uploads/resize/shows/logo/630x891_thumb.webp',
+    );
   });
 });
 
@@ -387,6 +443,22 @@ describe('dedupe', () => {
     assert.equal(dedupe([a, b])[0]!.status, 'soldout');
   });
 
+  it('takes the better poster when merging, not the first one seen', () => {
+    const thumb = makeItem({ ...base, title: 'Тест', url: 'https://x/a', source: 'kontramarka', image: 'https://cdn/x.jpg:thumb-120' })!;
+    const poster = makeItem({ ...base, title: 'Тест', url: 'https://x/b', source: 'karabas', image: 'https://img/poster.jpeg' })!;
+    assert.equal(dedupe([thumb, poster])[0]!.image, 'https://img/poster.jpeg');
+    assert.equal(dedupe([poster, thumb])[0]!.image, 'https://img/poster.jpeg');
+  });
+
+  it('keeps the only poster there is, even from the less trusted source', () => {
+    // the richer item wins the facts; it must not drag the merge down to no picture
+    const rich = makeItem({ ...base, title: 'Тест', url: 'https://x/a', source: 'concert.ua', venue: 'ТКЦ', description: 'bla', priceMin: 300 })!;
+    const poor = makeItem({ ...base, title: 'Тест', url: 'https://x/b', source: 'telegram:@kh', image: 'https://img/poster.jpeg' })!;
+    const merged = dedupe([rich, poor])[0]!;
+    assert.equal(merged.image, 'https://img/poster.jpeg');
+    assert.equal(merged.venue, 'ТКЦ');
+  });
+
   it('fingerprints the facts worth re-notifying about', () => {
     const a = makeItem({ ...base, title: 'Тест', url: 'https://x/a', source: 'karabas', priceMin: 300 })!;
     assert.equal(fingerprint(a), fingerprint({ ...a, description: 'changed blurb' }));
@@ -407,6 +479,24 @@ describe('ranking', () => {
     const ranked = rank([other, followed], { query, prefs });
     assert.equal(ranked.items[0]!.title, 'Курган і Agregat');
     assert.ok(ranked.items[0]!.reasons?.some((r) => r.includes('follow')));
+  });
+
+  it('drops a blocked act even when the same name is in the follow list', () => {
+    const p = PreferencesSchema.parse({
+      home_city: 'kharkiv',
+      favourite_categories: ['concert'],
+      follow: ['Курган і Agregat'],
+      blocked_acts: ['Курган і Agregat'],
+    });
+    const gig = makeItem({ ...common, title: 'Курган і Agregat', url: 'https://x/b1', source: 'concert.ua', category: 'concert', priceMin: 900 })!;
+    const other = makeItem({ ...common, title: 'Хтось інший', url: 'https://x/b2', source: 'concert.ua', category: 'concert', priceMin: 300 })!;
+    const ranked = rank([gig, other], { query: parseRequest('', { prefs: p, base: '2026-10-20' }), prefs: p, tasteFloor: 0 });
+    assert.deepEqual(ranked.items.map((i) => i.title), ['Хтось інший']);
+    assert.ok(ranked.dropped.some((d) => d.why.includes('blocked act')), JSON.stringify(ranked.dropped.map((d) => d.why)));
+    // and the shared cache, which keeps dislikes, keeps it too — scored last
+    const cached = rank([gig], { query: parseRequest('', { prefs: p, base: '2026-10-20' }), prefs: p, keepDisliked: true, keepOffTaste: true });
+    assert.equal(cached.items.length, 1);
+    assert.ok(!cached.items[0]!.reasons?.some((r) => r.includes('you follow')), JSON.stringify(cached.items[0]!.reasons));
   });
 
   it('keeps only what the person likes, and says how much it hid', () => {
@@ -548,7 +638,7 @@ describe('render', () => {
   });
 
   it('says what to do when there are no reminders', () => {
-    assert.ok(renderReminders([]).includes('Тапни ❤️'));
+    assert.ok(renderReminders([]).includes('⏰') && renderReminders([]).includes('❤️'));
   });
 
   it('numbers items in the order they are shown, which is what a "🔔 3" reply means', () => {
@@ -575,6 +665,57 @@ describe('render', () => {
   it('says the date is unknown in Ukrainian', () => {
     const items = [makeItem({ city: 'kharkiv', title: 'Someday', url: 'https://x/c3', source: 's' })!];
     assert.ok(buildDigest({ title: 'T', query, items, format: 'text' }).text.includes('дата уточнюється'));
+  });
+
+  it('drops the description rather than overrun a caption', () => {
+    // renderItem already caps a title at 160 and a blurb at 140, so a normal
+    // card fits 1024 easily; escaping is what pushes one over ("&" -> "&amp;")
+    const long = makeItem({
+      city: 'kharkiv',
+      title: '&'.repeat(160),
+      url: 'https://x/caption',
+      source: 'karabas',
+      startsAt: '2026-10-24T19:00:00+03:00',
+      venue: 'Театрально-концертний центр',
+      description: '&'.repeat(400),
+      priceMin: 300,
+      image: 'https://img/p.jpg',
+    })!;
+    const full = renderItem(long, { format: 'html' });
+    const caption = renderCaption(long, { format: 'html' });
+    assert.ok(full.length > CAPTION_LIMIT, `the full card was only ${full.length} chars`);
+    assert.ok(caption, 'this card is renderable as a caption');
+    assert.ok(caption.length <= CAPTION_LIMIT, `caption was ${caption.length} chars`);
+    // the facts a caption exists for must survive; only the blurb goes
+    assert.ok(caption.includes('19:00'), caption);
+    assert.ok(caption.includes('300'), caption);
+    assert.ok(caption.includes('Театрально-концертний центр'), caption);
+    assert.ok(caption.includes('https://x/caption'), caption);
+  });
+
+  it('leaves a short card alone, description and all', () => {
+    const short = makeItem({ city: 'kharkiv', title: 'Коротко', url: 'https://x/s', source: 'karabas', startsAt: '2026-10-24T19:00:00+03:00', description: 'Два слова.', image: 'https://img/p.jpg' })!;
+    const caption = renderCaption(short, { format: 'html' });
+    assert.equal(caption, renderItem(short, { format: 'html' }));
+    assert.ok(caption!.includes('Два слова.'));
+  });
+
+  it('fits a caption even when escaping multiplies every character', () => {
+    // "&" becomes "&amp;": a 160-character title can render as 960
+    const hostile = makeItem({ city: 'kharkiv', title: '&'.repeat(160), url: 'https://x/h', source: 'karabas', startsAt: '2026-10-24T19:00:00+03:00', venue: '<'.repeat(120), image: 'https://img/p.jpg' })!;
+    const caption = renderCaption(hostile, { format: 'html' });
+    assert.ok(caption, 'should still fit after shrinking the fields');
+    assert.ok(caption.length <= CAPTION_LIMIT, `caption was ${caption.length} chars`);
+    assert.ok(!/<[a-z]*$/.test(caption), 'must never cut an HTML tag in half');
+  });
+
+  it('gives up on the caption rather than drop the link', () => {
+    const silly = makeItem({ city: 'kharkiv', title: 'Тест', url: `https://x/${'z'.repeat(2000)}`, source: 'karabas', startsAt: '2026-10-24T19:00:00+03:00', image: 'https://img/p.jpg' })!;
+    assert.equal(renderCaption(silly, { format: 'html' }), null);
+    // and the digest then sends it as an ordinary message
+    const msg = buildMessages({ title: 'T', query, items: [silly], format: 'html' })[1]!;
+    assert.equal(msg.image, undefined);
+    assert.ok(msg.text.includes('z'.repeat(2000)));
   });
 
   it('escapes HTML coming from a site', () => {
@@ -896,6 +1037,25 @@ describe('messages', () => {
     assert.ok(msgs[1]!.text.includes('🔁 квитки скінчилися'), msgs[1]!.text);
   });
 
+  it('sends an event with a poster as a photo, and one without as text', () => {
+    const withPoster = makeItem({ city: 'kharkiv', title: 'З афішею', url: 'https://m/p', source: 'karabas', startsAt: '2026-10-23T19:00:00+03:00', image: 'https://img/poster.jpeg' })!;
+    const msgs = buildMessages({ title: 'T', query, items: [withPoster, earlier], format: 'html' });
+    const photo = msgs.find((m) => m.items[0]?.id === withPoster.id)!;
+    assert.equal(photo.image, 'https://img/poster.jpeg');
+    assert.ok(photo.caption && photo.caption.includes('З афішею'), photo.caption);
+    assert.ok(photo.caption!.length <= CAPTION_LIMIT);
+    const plainMsg = msgs.find((m) => m.items[0]?.id === earlier.id)!;
+    assert.equal(plainMsg.image, undefined);
+    assert.equal(plainMsg.caption, undefined);
+  });
+
+  it('keeps the full card as the message text, so a refused poster loses nothing', () => {
+    const item = makeItem({ city: 'kharkiv', title: 'Опис', url: 'https://m/d', source: 'karabas', startsAt: '2026-10-23T19:00:00+03:00', image: 'https://img/p.jpg', description: 'Довгий опис події.' })!;
+    const msg = buildMessages({ title: 'T', query, items: [item], format: 'html' })[1]!;
+    assert.ok(msg.text.includes('Довгий опис'), msg.text);
+    assert.ok(msg.image);
+  });
+
   it('is a single message, carrying nothing, when nothing matched', () => {
     const msgs = buildMessages({ title: 'T', query, items: [], format: 'text' });
     assert.equal(msgs.length, 1);
@@ -915,11 +1075,92 @@ describe('messages', () => {
     assert.equal(msgs.length, 3);
   });
 
+  it('gives every event card the same four buttons, callback data and all', () => {
+    const msgs = buildMessages({ title: 'T', query, items: [earlier], format: 'text' });
+    assert.deepEqual(msgs[0]!.inlineKeyboard, undefined, 'the header is not an event');
+    const rows = msgs[1]!.inlineKeyboard!;
+    const labels = rows.flat().map((b) => b.text);
+    assert.deepEqual(labels, ['⏰ Нагадати', '👎 Не моє', '📅 В календар', '↗️ Поділитись']);
+    for (const b of rows.flat()) {
+      // 📅 is a link, every other button calls back
+      if ('url' in b) {
+        assert.equal(b.text, '📅 В календар');
+        assert.ok(b.url.startsWith('https://calendar.google.com/'), b.url);
+        continue;
+      }
+      assert.ok(b.callback_data.startsWith('ev:'), JSON.stringify(b));
+      assert.ok(Buffer.byteLength(b.callback_data) <= 64, b.callback_data);
+    }
+  });
+
+  it('leaves 📅 off an event whose date is still unknown', () => {
+    const undated = makeItem({ city: 'kharkiv', title: 'Колись', url: 'https://m/c', source: 's' })!;
+    const labels = eventKeyboard(undated).flat().map((b) => b.text);
+    assert.deepEqual(labels, ['⏰ Нагадати', '👎 Не моє', '↗️ Поділитись']);
+    assert.equal(googleCalendarUrl(undated), undefined);
+  });
+
   it('sends one message per place too', () => {
     const place = makeItem({ city: 'kharkiv', kind: 'place', title: 'Kofein Lab', url: 'https://m/e', source: 'websearch', category: 'cafe', address: 'вул. Сумська, 11' })!;
     const msgs = buildMessages({ title: 'Місця', query, items: [place], format: 'text' });
     assert.equal(msgs.length, 2);
     assert.ok(msgs[1]!.text.includes('вул. Сумська, 11'));
+  });
+});
+
+/* --------------------------------------------------------------- calendar --- */
+
+describe('calendar', () => {
+  const item = makeItem({
+    city: 'kharkiv',
+    title: 'Джаз, вино; і трохи сліз',
+    url: 'https://tickets.example/ua/jazz?id=7&utm=bot',
+    source: 's',
+    startsAt: '2026-10-23T19:30:00+03:00',
+    venue: 'Пивна дума, 2 поверх',
+    address: 'вул. Сумська, 11',
+    description: 'Квартет грає стандарти.',
+  })!;
+
+  const params = (url: string) => new URL(url).searchParams;
+
+  it('builds a TEMPLATE link with the title, the place and the ticket link', () => {
+    const url = googleCalendarUrl(item)!;
+    const u = new URL(url);
+    assert.equal(u.origin + u.pathname, 'https://calendar.google.com/calendar/render');
+    assert.equal(params(url).get('action'), 'TEMPLATE');
+    assert.equal(params(url).get('text'), 'Джаз, вино; і трохи сліз');
+    assert.equal(params(url).get('location'), 'Пивна дума, 2 поверх, вул. Сумська, 11');
+    assert.ok(params(url).get('details')!.includes('https://tickets.example/ua/jazz?id=7&utm=bot'));
+    // Ukrainian titles and their punctuation go through the encoder, not raw
+    assert.ok(!url.includes(' '), url);
+    assert.ok(url.includes('%2C'), url);
+  });
+
+  it('puts the time in as UTC, so Kyiv evenings stay Kyiv evenings', () => {
+    // 19:30 at +03:00 is 16:30 UTC
+    assert.equal(params(googleCalendarUrl(item)!).get('dates'), '20261023T163000Z/20261023T183000Z');
+  });
+
+  it('defaults the end to two hours out and says the length is a guess', () => {
+    const details = params(googleCalendarUrl(item)!).get('details')!;
+    assert.ok(details.includes('Тривалість приблизна'), details);
+  });
+
+  it('keeps a real endsAt, and then claims nothing about the length', () => {
+    const url = googleCalendarUrl({ ...item, endsAt: '2026-10-23T23:00:00+03:00' })!;
+    assert.equal(params(url).get('dates'), '20261023T163000Z/20261023T200000Z');
+    assert.ok(!params(url).get('details')!.includes('Тривалість приблизна'));
+  });
+
+  it('ignores an end that falls before the start', () => {
+    const url = googleCalendarUrl({ ...item, endsAt: '2026-10-23T10:00:00+03:00' })!;
+    assert.equal(params(url).get('dates'), '20261023T163000Z/20261023T183000Z');
+  });
+
+  it('has nothing to offer an event with no start time', () => {
+    assert.equal(googleCalendarUrl({ ...item, startsAt: undefined }), undefined);
+    assert.equal(googleCalendarUrl({ ...item, startsAt: 'колись у травні' }), undefined);
   });
 });
 
@@ -1183,6 +1424,56 @@ describe('preference commands', () => {
   });
 });
 
+describe('the 👎 side of the taste model', () => {
+  const liked = () => PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['standup'], taste: { standup: 2 } });
+
+  it('takes a point off the tally without touching the lists', () => {
+    const down = applyThumbsDown(liked(), { tag: 'standup' });
+    assert.equal(down.score, 1);
+    assert.equal(down.demoted, false);
+    assert.deepEqual(down.prefs.favourite_categories, ['standup']);
+    assert.deepEqual(down.prefs.disliked_categories, []);
+  });
+
+  it('moves the category across once the tally reaches the threshold', () => {
+    let down = applyThumbsDown(liked(), { tag: 'standup' });
+    for (let i = 0; i < 4; i++) down = applyThumbsDown(down.prefs, { tag: 'standup' });
+    assert.equal(down.score, -3);
+    assert.equal(down.demoted, true);
+    assert.deepEqual(down.prefs.favourite_categories, []);
+    assert.deepEqual(down.prefs.disliked_categories, ['standup']);
+    // and saying you like it again clears the debt, not just the list
+    const back = applyPrefsCommand('люблю стендап', down.prefs);
+    assert.deepEqual(back.prefs.disliked_categories, []);
+    assert.equal(back.prefs.taste['standup'], 0);
+  });
+
+  it('silences the performer and takes the name off the follow list', () => {
+    const following = PreferencesSchema.parse({ home_city: 'kharkiv', follow: ['Антон Тимошенко'] });
+    const down = applyThumbsDown(following, { tag: 'standup', act: 'Антон Тимошенко' });
+    assert.deepEqual(down.prefs.blocked_acts, ['Антон Тимошенко']);
+    assert.deepEqual(down.prefs.follow, []);
+    assert.equal(down.blocked, 'Антон Тимошенко');
+    // ...and asking for them by name again undoes it
+    const again = applyPrefsCommand('слідкуй за Антон Тимошенко', down.prefs);
+    assert.deepEqual(again.prefs.blocked_acts, []);
+    assert.deepEqual(again.prefs.follow, ['Антон Тимошенко']);
+  });
+
+  it('reads a profile saved before the stop list existed', () => {
+    const old = { home_city: 'kharkiv', favourite_categories: ['standup'], follow: ['Хтось'], taste: { standup: 3 } };
+    const parsed = PreferencesSchema.parse(old);
+    assert.deepEqual(parsed.blocked_acts, []);
+    // and a tally that has already gone negative survives the round-trip
+    assert.equal(PreferencesSchema.parse({ home_city: 'kharkiv', taste: { standup: -2 } }).taste['standup'], -2);
+  });
+
+  it('shows what it stopped showing, not only what it likes', () => {
+    const down = applyThumbsDown(liked(), { tag: 'standup', act: 'Антон Тимошенко' });
+    assert.ok(describePrefs(down.prefs).includes('не показую: Антон Тимошенко'), describePrefs(down.prefs));
+  });
+});
+
 /* ------------------------------------------------------------------ store --- */
 
 const log = makeLogger('test');
@@ -1346,6 +1637,20 @@ describe('store', () => {
     });
   });
 
+  it('round-trips a poster, and still reads a cached scrape from before there were any', async () => {
+    await withTestStore(async (store) => {
+      const withPoster = makeItem({ ...item, id: undefined, url: 'https://x/poster', image: 'https://img/p.jpeg' })!;
+      await store.putCache('k-img', [withPoster, item], 60);
+      const back = await store.getCache('k-img');
+      assert.equal(back?.length, 2);
+      assert.equal(back![0]!.image, 'https://img/p.jpeg');
+      // the second one was serialized with no `image` key at all, exactly like
+      // every row written before this field existed — it must still parse
+      assert.ok(!JSON.stringify(item).includes('image'));
+      assert.equal(back![1]!.image, undefined);
+    });
+  });
+
   it('keeps small state like the Telegram update offset', async () => {
     await withTestStore(async (store) => {
       await store.setState('offset', '17');
@@ -1492,10 +1797,127 @@ describe('the shared city scrape', () => {
   });
 });
 
+/* --------------------------------------------------------------- schedule --- */
+
+describe('schedule', () => {
+  it('reads the old cron out of a row that predates the schedule columns', () => {
+    // every pre-schedule user must keep behaving as the hard-wired cron did:
+    // Monday 09:00, plus the Thursday weekend picks
+    const legacy = scheduleOf({ chat_id: '1', city: 'kharkiv' } as never);
+    assert.deepEqual(legacy, defaultSchedule());
+    assert.equal(legacy.hour, 9);
+    assert.equal(legacy.day, 1, 'Monday');
+    assert.equal(legacy.frequency, 'twice');
+    assert.ok(digestDueNow(legacy, 'weekly', { hour: 9, weekday: 1 }));
+    assert.ok(digestDueNow(legacy, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
+  });
+
+  it('falls back to the default for a value outside the clock', () => {
+    assert.equal(scheduleOf({ digest_hour: 24 } as never).hour, 9);
+    assert.equal(scheduleOf({ digest_hour: -1 } as never).hour, 9);
+    assert.equal(scheduleOf({ digest_day: 7 } as never).day, 1);
+    assert.equal(scheduleOf({ digest_freq: 'hourly' } as never).frequency, 'twice');
+    assert.equal(scheduleOf(undefined).hour, 9);
+  });
+
+  it('matches a digest to one hour of one day and nothing else', () => {
+    const s = { ...defaultSchedule(), hour: 21, day: 5 };
+    assert.ok(digestDueNow(s, 'weekly', { hour: 21, weekday: 5 }));
+    assert.ok(!digestDueNow(s, 'weekly', { hour: 20, weekday: 5 }), 'an hour early is not their hour');
+    assert.ok(!digestDueNow(s, 'weekly', { hour: 22, weekday: 5 }), 'an hour late is not their hour');
+    assert.ok(!digestDueNow(s, 'weekly', { hour: 21, weekday: 4 }), 'right hour, wrong day');
+  });
+
+  it('holds the day boundaries: 00:00 and 23:00 are hours like any other', () => {
+    const midnight = { ...defaultSchedule(), hour: 0, day: 0 };
+    assert.ok(digestDueNow(midnight, 'weekly', { hour: 0, weekday: 0 }), 'Sunday 00:00 is a real slot');
+    assert.ok(!digestDueNow(midnight, 'weekly', { hour: 23, weekday: 6 }), 'the hour before does not roll over');
+    const lateSaturday = { ...defaultSchedule(), hour: 23, day: 6 };
+    assert.ok(digestDueNow(lateSaturday, 'weekly', { hour: 23, weekday: 6 }));
+    assert.ok(!digestDueNow(lateSaturday, 'weekly', { hour: 0, weekday: 0 }), 'and does not spill into Sunday');
+  });
+
+  it('keeps the weekend digest on Thursday whatever day the weekly one is on', () => {
+    const s = { ...defaultSchedule(), hour: 18, day: 6 };
+    assert.ok(digestDueNow(s, 'weekend', { hour: 18, weekday: WEEKEND_DAY }));
+    assert.ok(!digestDueNow(s, 'weekend', { hour: 18, weekday: 6 }), 'their own day does not move the weekend picks');
+  });
+
+  it('sends only the weekly digest to someone who asked for once a week', () => {
+    const s = { ...defaultSchedule(), frequency: 'weekly' as const };
+    assert.ok(digestDueNow(s, 'weekly', { hour: 9, weekday: 1 }));
+    assert.ok(!digestDueNow(s, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
+  });
+
+  it('leaves the timing alone for "only when there is something of mine"', () => {
+    const s = { ...defaultSchedule(), frequency: 'mine' as const };
+    assert.ok(wantsOnlyMine(s));
+    assert.ok(digestDueNow(s, 'weekly', { hour: 9, weekday: 1 }), 'it is a content rule, not a clock rule');
+    assert.ok(digestDueNow(s, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
+    assert.ok(!wantsOnlyMine(defaultSchedule()));
+  });
+
+  it('wraps a quiet window around midnight', () => {
+    const night = { quietFrom: 23, quietTo: 8 };
+    assert.ok(inQuietHours(23, night));
+    assert.ok(inQuietHours(0, night));
+    assert.ok(inQuietHours(7, night));
+    assert.ok(!inQuietHours(8, night), 'the window ends exclusively');
+    assert.ok(!inQuietHours(22, night));
+    assert.ok(!inQuietHours(12, night));
+  });
+
+  it('handles a daytime quiet window and an empty one', () => {
+    const daytime = { quietFrom: 9, quietTo: 17 };
+    assert.ok(inQuietHours(9, daytime));
+    assert.ok(inQuietHours(16, daytime));
+    assert.ok(!inQuietHours(17, daytime));
+    assert.ok(!inQuietHours(8, daytime));
+    // from === to means "switched off", not "all day"
+    for (let h = 0; h < 24; h++) assert.ok(!inQuietHours(h, { quietFrom: 0, quietTo: 0 }), `hour ${h}`);
+  });
+
+  it('only offers hours that are actually on the menu, and 9 among them', () => {
+    assert.ok(DIGEST_HOURS.includes(9), 'the default must be pickable, or it cannot be restored');
+    assert.ok(DIGEST_HOURS.every((h) => Number.isInteger(h) && h >= 0 && h <= 23));
+    assert.ok(DIGEST_HOURS.length <= 8, 'more slots means more scrapes per day — see the README');
+  });
+
+  it('never holds the 3-hour reminder for quiet hours, but does hold the 1-day one', () => {
+    const night = defaultSchedule(); // quiet 23:00–08:00
+    // a 21:00 gig whose "in ~3 hours" nudge is due at 18:00: not quiet anyway
+    assert.ok(reminderAllowedNow('3h', 18, night));
+    // a 02:00 after-party, or a reminder tick that runs at 01:00 — the whole
+    // point of the feature is that this still arrives
+    assert.ok(reminderAllowedNow('3h', 1, night), 'a late reminder is a useless reminder');
+    assert.ok(reminderAllowedNow('3h', 7, night));
+    // "tomorrow" can wait for the morning
+    assert.ok(!reminderAllowedNow('1d', 1, night));
+    assert.ok(!reminderAllowedNow('1d', 23, night));
+    assert.ok(reminderAllowedNow('1d', 8, night), 'and goes out as soon as the window ends');
+    assert.ok(reminderAllowedNow('1d', 12, night));
+    // quiet hours switched off: both go out whenever they are due
+    const always = { ...defaultSchedule(), quietFrom: 0, quietTo: 0 };
+    assert.ok(reminderAllowedNow('1d', 3, always));
+    assert.ok(reminderAllowedNow('3h', 3, always));
+  });
+
+  it('describes a schedule in Ukrainian', () => {
+    const line = describeSchedule({ ...defaultSchedule(), hour: 18, day: 5, frequency: 'weekly' });
+    assert.ok(line.includes('пʼятниця') && line.includes('18:00'), line);
+    assert.ok(describeSchedule(defaultSchedule()).includes('тихі години 23:00–08:00'));
+    assert.ok(
+      describeSchedule({ ...defaultSchedule(), quietFrom: 0, quietTo: 0 }).includes('тихі години вимкнено'),
+    );
+  });
+});
+
 /* ----------------------------------------------------------------- fanout --- */
 
 describe('fanout', () => {
   const window = { from: '2026-10-23', to: '2026-10-25', label: 'this weekend' };
+  /** Midday Thursday: outside everyone's default quiet hours, and the weekend-digest day. */
+  const noon = { hour: 12, weekday: WEEKEND_DAY };
   const standup = makeItem({ city: 'kharkiv', title: 'Антон Тимошенко. Стендап', url: 'https://x/su', source: 'concert.ua', category: 'standup', startsAt: '2026-10-24T19:00:00+03:00', priceMin: 400, status: 'scheduled' })!;
   const classical = makeItem({ city: 'kharkiv', title: 'Класична музика при свічках', url: 'https://x/cl', source: 'karabas', category: 'concert', startsAt: '2026-10-24T18:00:00+03:00', priceMin: 500, status: 'scheduled' })!;
 
@@ -1523,6 +1945,7 @@ describe('fanout', () => {
         log,
         optIn: 'weekend_digest',
         window,
+        now: noon,
         onlyChats: ['2001', '2002'],
         dryRun: true,
         title: () => 'Weekend',
@@ -1575,7 +1998,7 @@ describe('fanout', () => {
       await seed(store);
       await registerUser(store, { chatId: '2100', city: 'kharkiv' });
       await store.setOptIn('2100', 'weekend_digest', false);
-      const result = await fanout({ store, log, optIn: 'weekend_digest', window, onlyChats: ['2100'], dryRun: true, title: () => 'W' });
+      const result = await fanout({ store, log, optIn: 'weekend_digest', window, now: noon, onlyChats: ['2100'], dryRun: true, title: () => 'W' });
       assert.equal(result.users, 0);
     });
   });
@@ -1585,8 +2008,170 @@ describe('fanout', () => {
       await seed(store, [standup]);
       await registerUser(store, { chatId: '2200', city: 'kharkiv' });
       await store.recordSent('2200', [standup]);
-      const result = await fanout({ store, log, optIn: 'weekly_digest', window, onlyChats: ['2200'], dryRun: true, title: () => 'W' });
+      const result = await fanout({ store, log, optIn: 'weekly_digest', window, now: noon, onlyChats: ['2200'], dryRun: true, title: () => 'W' });
       assert.equal(result.items, 0, 'already delivered');
+    });
+  });
+
+  it('covers only the people whose hour and day it is', async () => {
+    await withTestStore(async (store) => {
+      await seed(store);
+      for (const chatId of ['2300', '2301', '2302']) await registerUser(store, { chatId, city: 'kharkiv' });
+      await store.setSchedule('2300', { hour: 9, day: 1 });
+      await store.setSchedule('2301', { hour: 18, day: 1 });
+      await store.setSchedule('2302', { hour: 9, day: 4 });
+      const chats = ['2300', '2301', '2302'];
+
+      const nine = new Set<string>();
+      const mondayNine = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true, title: () => 'W',
+        onlyChats: chats, now: { hour: 9, weekday: 1 },
+        select: (user, ranked) => (nine.add(user.chatId), ranked),
+      });
+      assert.deepEqual([...nine], ['2300'], 'only the 09:00 Monday person');
+      assert.equal(mondayNine.notNow, 2);
+
+      const six = new Set<string>();
+      await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true, title: () => 'W',
+        onlyChats: chats, now: { hour: 18, weekday: 1 },
+        select: (user, ranked) => (six.add(user.chatId), ranked),
+      });
+      assert.deepEqual([...six], ['2301'], 'the same job, three hours later, is a different mailing list');
+
+      const quiet = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true, title: () => 'W',
+        onlyChats: chats, now: { hour: 3, weekday: 1 },
+      });
+      assert.equal(quiet.users, 0, 'an hour nobody picked costs nothing');
+      assert.equal(quiet.scrapes + quiet.cacheHits, 0, 'and does not even touch the cache');
+    });
+  });
+
+  it('gives a pre-schedule user the Monday 09:00 digest they always got', async () => {
+    await withTestStore(async (store) => {
+      await seed(store);
+      // a row written before the schedule columns existed: no digest_hour at all
+      await registerUser(store, { chatId: '2400', city: 'kharkiv' });
+      await store.setSchedule('2400', {});
+      const user = (await getUser(store, '2400'))!;
+      assert.deepEqual(user.schedule, defaultSchedule());
+
+      const monday = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
+        title: () => 'W', onlyChats: ['2400'], now: { hour: 9, weekday: 1 },
+      });
+      assert.equal(monday.recipients, 1);
+      const thursday = await fanout({
+        store, log, optIn: 'weekend_digest', digest: 'weekend', window, dryRun: true, newOnly: false,
+        title: () => 'W', onlyChats: ['2400'], now: { hour: 9, weekday: WEEKEND_DAY },
+      });
+      assert.equal(thursday.recipients, 1);
+    });
+  });
+
+  it('stays quiet for "only when there is something of mine" when the list was padded', async () => {
+    await withTestStore(async (store) => {
+      // only classical is on, and this person likes stand-up: rank() can fill
+      // the list, but only by letting things they never asked for back in
+      await seed(store, [classical]);
+      await registerUser(store, { chatId: '2500', city: 'kharkiv' });
+      const user = (await getUser(store, '2500'))!;
+      await saveUserPrefs(store, user, { ...user.prefs, favourite_categories: ['standup'] });
+      await store.setSchedule('2500', { frequency: 'mine' });
+
+      const padded = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
+        title: () => 'W', onlyChats: ['2500'], now: { hour: 9, weekday: 1 },
+      });
+      assert.equal(padded.notTheirs, 1, 'nothing of theirs was on');
+      assert.equal(padded.recipients, 0, 'so they hear nothing');
+
+      // the same person, once there is enough of their own thing on to fill
+      // the list without padding it (bot.taste_floor items)
+      const standups = Array.from({ length: loadConfig().bot.taste_floor }, (_, i) =>
+        makeItem({ city: 'kharkiv', title: `Стендап №${i + 1}`, url: `https://x/su${i}`, source: 'concert.ua', category: 'standup', startsAt: '2026-10-24T19:00:00+03:00', priceMin: 300, status: 'scheduled' })!,
+      );
+      await seed(store, [...standups, classical]);
+      const theirs = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
+        title: () => 'W', onlyChats: ['2500'], now: { hour: 9, weekday: 1 },
+      });
+      assert.equal(theirs.notTheirs, 0);
+      assert.equal(theirs.recipients, 1);
+    });
+  });
+
+  it('still writes to an "only mine" user who has never said what theirs is', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, [classical]);
+      // an empty taste model gives rank() nothing to filter by, so it never
+      // pads anything and toppedUp stays 0. Staying silent here would mean a
+      // brand new user who tapped "тільки коли є моє" hears nothing, ever,
+      // with no way to tell why.
+      await registerUser(store, { chatId: '2502', city: 'kharkiv' });
+      await store.setSchedule('2502', { frequency: 'mine' });
+      const result = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
+        title: () => 'W', onlyChats: ['2502'], now: { hour: 9, weekday: 1 },
+      });
+      assert.equal(result.recipients, 1);
+      assert.equal(result.notTheirs, 0);
+    });
+  });
+
+  it('sends the same padded digest to everyone who did not ask for "only mine"', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, [classical]);
+      await registerUser(store, { chatId: '2501', city: 'kharkiv' });
+      const user = (await getUser(store, '2501'))!;
+      await saveUserPrefs(store, user, { ...user.prefs, favourite_categories: ['standup'] });
+
+      const result = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
+        title: () => 'W', onlyChats: ['2501'], now: { hour: 9, weekday: 1 },
+      });
+      assert.equal(result.recipients, 1, 'a short padded list still beats silence by default');
+      assert.equal(result.notTheirs, 0);
+    });
+  });
+
+  it('holds a non-digest job back during the recipient’s quiet hours', async () => {
+    await withTestStore(async (store) => {
+      await seed(store);
+      await registerUser(store, { chatId: '2600', city: 'kharkiv' });
+      // follow alerts and place tips keep their fixed cron time, so quiet
+      // hours are the only thing standing between them and 03:00
+      const night = await fanout({
+        store, log, optIn: 'weekly_digest', window, dryRun: true,
+        title: () => 'A', onlyChats: ['2600'], now: { hour: 3, weekday: 1 },
+      });
+      assert.equal(night.quiet, 1);
+      assert.equal(night.recipients, 0);
+
+      await store.setSchedule('2600', { quietFrom: 0, quietTo: 0 });
+      const anytime = await fanout({
+        store, log, optIn: 'weekly_digest', window, dryRun: true,
+        title: () => 'A', onlyChats: ['2600'], now: { hour: 3, weekday: 1 },
+      });
+      assert.equal(anytime.quiet, 0, 'quiet hours switched off means any hour is fine');
+      assert.equal(anytime.recipients, 1);
+    });
+  });
+
+  it('does not let quiet hours swallow a digest the person asked for', async () => {
+    await withTestStore(async (store) => {
+      await seed(store);
+      await registerUser(store, { chatId: '2700', city: 'kharkiv' });
+      // 07:00 is inside the default 23:00–08:00 window, and it is still what
+      // they picked — the hour button would otherwise look broken
+      await store.setSchedule('2700', { hour: 7, day: 1 });
+      const result = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
+        title: () => 'W', onlyChats: ['2700'], now: { hour: 7, weekday: 1 },
+      });
+      assert.equal(result.recipients, 1);
+      assert.equal(result.quiet, 0);
     });
   });
 });
@@ -1913,6 +2498,60 @@ describe('bot handlers', () => {
     });
   });
 
+  it('opens a "коли писати" screen with an hour, a day, a frequency and a quiet window', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3020', city: 'kharkiv' });
+      const panel = await say(store, '3020', '/settings');
+      assert.ok(panel.includes('(set:when)'), 'the panel needs a way in');
+      assert.ok(panel.includes('понеділок') && panel.includes('09:00'), panel.slice(0, 600));
+
+      const when = await tap(store, '3020', 'set:when');
+      assert.ok(when.includes('Коли писати'), when.slice(0, 300));
+      for (const hour of DIGEST_HOURS) assert.ok(when.includes(`(when:hour:${hour})`), `hour ${hour}`);
+      assert.ok(when.includes('(when:day:1)') && when.includes('(when:day:0)'), 'every weekday is pickable');
+      assert.ok(when.includes('(when:freq:mine)') && when.includes('(when:freq:weekly)'), when.slice(0, 900));
+      assert.ok(when.includes('(when:quiet:23-8)') && when.includes('(when:quiet:0-0)'), 'including switching it off');
+    });
+  });
+
+  it('picks an hour, a day and a frequency by button', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3021', city: 'kharkiv' });
+      const redraw = await tap(store, '3021', 'when:hour:18');
+      assert.equal((await store.getUser('3021'))?.digest_hour, 18);
+      assert.ok(redraw.includes('edit 42'), 'the screen is rewritten, not reposted');
+      assert.ok(redraw.includes('✅ 18:00'), redraw.slice(0, 600));
+
+      await tap(store, '3021', 'when:day:6');
+      assert.equal((await store.getUser('3021'))?.digest_day, 6);
+
+      await tap(store, '3021', 'when:freq:mine');
+      assert.equal((await store.getUser('3021'))?.digest_freq, 'mine');
+
+      await tap(store, '3021', 'when:quiet:0-0');
+      const off = (await store.getUser('3021'))!;
+      assert.equal(off.quiet_from, 0);
+      assert.equal(off.quiet_to, 0);
+
+      // and the schedule is what the fan-out will read back
+      assert.deepEqual((await getUser(store, '3021'))!.schedule, {
+        hour: 18, day: 6, quietFrom: 0, quietTo: 0, frequency: 'mine',
+      });
+    });
+  });
+
+  it('ignores an hour that is not on the menu', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3030', city: 'kharkiv' });
+      await tap(store, '3030', 'when:hour:4');
+      assert.equal((await store.getUser('3030'))?.digest_hour, 9, 'a hand-crafted callback changes nothing');
+      await tap(store, '3030', 'when:day:9');
+      assert.equal((await store.getUser('3030'))?.digest_day, 1);
+      await tap(store, '3030', 'when:freq:hourly');
+      assert.equal((await store.getUser('3030'))?.digest_freq, 'twice');
+    });
+  });
+
   it('changes the city from the panel', async () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3012', city: 'kharkiv' });
@@ -2216,6 +2855,236 @@ describe('the heart', () => {
   });
 });
 
+/* ------------------------------------------------------- the card buttons --- */
+
+describe('card buttons', () => {
+  /** A tap on a button under the event card we recorded as message 42. */
+  async function tapCard(store: StoreType, chatId: string, verb: string, itemId: string): Promise<string> {
+    return captureOutput(() =>
+      handleCallback({ store, log, dryRun: true }, {
+        id: 'cb',
+        data: `ev:${verb}:${itemId}`,
+        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' } },
+        from: { id: Number(chatId) },
+      } as never),
+    );
+  }
+
+  const gig = () =>
+    makeItem({ city: 'kharkiv', title: 'Вечір імпровізації', url: 'https://b/1', source: 's', category: 'standup', startsAt: '2026-11-01T19:00:00+02:00' })!;
+
+  it('sets the reminder when ⏰ is tapped, and redraws the card', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3401', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3401', 42, [item]);
+      const out = await tapCard(store, '3401', 'r', item.id);
+      const rows = await store.listReminders('3401');
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.title, 'Вечір імпровізації');
+      assert.ok(out.includes('edit 42'), 'the card is rewritten in place');
+      assert.ok(out.includes('⏰ Не нагадувати'), out.slice(-600));
+    });
+  });
+
+  it('cancels the reminder when ⏰ is tapped again', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3402', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3402', 42, [item]);
+      await tapCard(store, '3402', 'r', item.id);
+      const out = await tapCard(store, '3402', 'r', item.id);
+      assert.equal((await store.listReminders('3402')).length, 0);
+      assert.ok(out.includes('⏰ Нагадати'), out.slice(-600));
+    });
+  });
+
+  it('shares one reminder row with the ❤️, never a second', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3403', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3403', 42, [item]);
+      await captureOutput(() =>
+        handleReaction({ store, log, dryRun: true }, {
+          chat: { id: '3403', type: 'private' },
+          message_id: 42,
+          user: { id: 3403 },
+          old_reaction: [],
+          new_reaction: [{ type: 'emoji', emoji: '❤️' }],
+        } as never),
+      );
+      const hearted = await store.listReminders('3403');
+      assert.equal(hearted.length, 1);
+
+      // ⏰ is the same switch: it reads the heart's state and turns it off
+      await tapCard(store, '3403', 'r', item.id);
+      assert.equal((await store.listReminders('3403')).length, 0);
+
+      // and back on — into the very same row, not a duplicate
+      await tapCard(store, '3403', 'r', item.id);
+      const again = await store.listReminders('3403');
+      assert.equal(again.length, 1);
+      assert.equal(again[0]!.id, hearted[0]!.id);
+    });
+  });
+
+  it('answers the buttons that are not built yet without breaking', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3404', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3404', 42, [item]);
+      for (const verb of ['share']) {
+        const out = await tapCard(store, '3404', verb, item.id);
+        assert.ok(out.includes('Скоро'), `${verb}: ${out.slice(0, 200)}`);
+      }
+      assert.equal((await store.listReminders('3404')).length, 0);
+    });
+  });
+
+  it('says what a 👎 taught it, and takes a point off the category', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3406', city: 'kharkiv' });
+      const item = { ...gig(), performers: ['Антон Тимошенко'] };
+      await store.recordMessage('3406', 42, [item]);
+      const out = await tapCard(store, '3406', 'no', item.id);
+      const after = (await getUser(store, '3406', log))!;
+      assert.equal(after.prefs.taste['standup'], -1);
+      assert.ok(!after.prefs.disliked_categories.includes('standup'), 'one 👎 is not a verdict');
+      assert.ok(after.prefs.blocked_acts.includes('Антон Тимошенко'), JSON.stringify(after.prefs.blocked_acts));
+      assert.ok(out.includes('важить менше'), out.slice(0, 300));
+      assert.ok(out.includes('Антон Тимошенко'), out.slice(0, 300));
+    });
+  });
+
+  it('moves the category into the dislikes once 👎 reaches the threshold', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3407', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3407', 42, [item]);
+      const start = (await getUser(store, '3407', log))!;
+      await saveUserPrefs(store, start, { ...start.prefs, favourite_categories: ['standup'] });
+      let out = '';
+      for (let i = 0; i < 3; i++) out = await tapCard(store, '3407', 'no', item.id);
+      const after = (await getUser(store, '3407', log))!;
+      assert.equal(after.prefs.taste['standup'], -3);
+      assert.ok(after.prefs.disliked_categories.includes('standup'), JSON.stringify(after.prefs));
+      assert.ok(!after.prefs.favourite_categories.includes('standup'), 'and it leaves the favourites');
+      assert.ok(out.includes('більше не показуватиму'), out.slice(0, 300));
+    });
+  });
+
+  it('says it has forgotten a card it can no longer resolve', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3405', city: 'kharkiv' });
+      const out = await tapCard(store, '3405', 'r', 'deadbeef');
+      assert.ok(out.trim().length > 0, 'a tap always gets an answer');
+      assert.equal((await store.listReminders('3405')).length, 0);
+    });
+  });
+});
+
+/* ------------------------------------------------------------- показати ще --- */
+
+describe('показати ще', () => {
+  const query = parseRequest('', { prefs, base: '2026-10-20', from: '2026-10-23', to: '2026-10-25' });
+
+  /** Five ranked events nobody has seen yet, in the order rank() put them. */
+  const tail = (n: number) =>
+    [...Array(n)].map(
+      (_, i) =>
+        makeItem({
+          city: 'kharkiv',
+          title: `Подія ${i + 1}`,
+          url: `https://m/${i + 1}`,
+          source: 's',
+          category: 'standup',
+          startsAt: `2026-10-23T${10 + i}:00:00+03:00`,
+        })!,
+    );
+
+  async function tapMore(store: StoreType, chatId: string, text?: string): Promise<string> {
+    return captureOutput(() =>
+      handleCallback({ store, log, dryRun: true }, {
+        id: 'cb',
+        data: 'more',
+        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' }, ...(text ? { text } : {}) },
+        from: { id: Number(chatId) },
+      } as never),
+    );
+  }
+
+  const seed = async (store: StoreType, chatId: string, n: number, size: number) => {
+    await registerUser(store, { chatId, city: 'kharkiv' });
+    await store.putPage(`more:${chatId}:42`, { header: '🗓 Харків', title: '🗓 Харків', query, rest: tail(n), size }, 3600);
+  };
+
+  it('offers the button on the header only when something was left over', () => {
+    const items = tail(2);
+    const withRest = buildMessages({ title: 'T', query, items, format: 'text', more: 7 });
+    assert.deepEqual(withRest[0]!.inlineKeyboard, [[{ text: '📥 Показати ще 7', callback_data: 'more' }]]);
+    const whole = buildMessages({ title: 'T', query, items, format: 'text', more: 0 });
+    assert.equal(whole[0]!.inlineKeyboard, undefined, 'nothing left over, no button');
+  });
+
+  it('hands out the next page, one message per event, and counts the header down', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, '3501', 5, 2);
+
+      const first = await tapMore(store, '3501');
+      assert.ok(first.includes('Подія 1') && first.includes('Подія 2'), first.slice(0, 400));
+      assert.ok(!first.includes('Подія 3'), 'one page at a time');
+      assert.equal(first.split('──────── to chat 3501').length - 1, 2, 'each event is its own message');
+      assert.ok(first.includes('edit 42') && first.includes('📥 Показати ще 3'), first.slice(0, 600));
+
+      const second = await tapMore(store, '3501');
+      assert.ok(second.includes('Подія 3') && second.includes('Подія 4'), second.slice(0, 400));
+      assert.ok(!second.includes('Подія 1') && !second.includes('Подія 2'), 'nothing is shown twice');
+      assert.ok(second.includes('📥 Показати ще 1'), second.slice(0, 600));
+    });
+  });
+
+  it('takes the button away with the last page, and forgets the stash', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, '3502', 3, 3);
+      const out = await tapMore(store, '3502');
+      assert.ok(out.includes('Подія 3'), out.slice(0, 400));
+      assert.ok(out.includes('edit 42'), 'the header is redrawn');
+      assert.ok(!out.includes('Показати ще'), 'the last page leaves no button behind');
+      assert.equal(await store.getPage('more:3502:42'), null, 'the stash is cleaned up, not left to expire');
+    });
+  });
+
+  it('keeps the event buttons on a page that arrived late', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, '3503', 1, 5);
+      const out = await tapMore(store, '3503');
+      const id = tail(1)[0]!.id;
+      assert.ok(out.includes(`ev:r:${id}`), 'a late arrival carries its own ⏰, so a reminder still works');
+    });
+  });
+
+  it('does not spend a search from the hourly budget', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, '3504', 4, 2);
+      const before = await store.hitRateLimit('3504', 100);
+      await tapMore(store, '3504');
+      await tapMore(store, '3504');
+      const after = await store.hitRateLimit('3504', 100);
+      assert.equal(after.used, before.used + 1, 'paging is not searching; only these two probes count');
+    });
+  });
+
+  it('drops the button when the stash has expired', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3505', city: 'kharkiv' });
+      const out = await tapMore(store, '3505', '🗓 Харків');
+      assert.ok(out.includes('edit 42'), 'the stale button goes away');
+      assert.ok(!out.includes('Показати ще'), out.slice(0, 400));
+      assert.ok(out.includes('застарів'), out.slice(0, 400));
+    });
+  });
+});
+
 /* -------------------------------------------------------------------- deliver --- */
 
 describe('deliver', () => {
@@ -2230,6 +3099,116 @@ describe('deliver', () => {
         deliver({ title: 'T', query, items, log, store, chatId: '3301', dryRun: true }),
       );
       assert.equal(printed.split('──────── to chat 3301').length - 1, 4, printed);
+    });
+  });
+
+  /**
+   * Both poster tests below go through a stubbed Bot API rather than a dry run:
+   * the point of each is what the *send* does, and a dry run never calls it.
+   */
+  interface FakeCall {
+    method: string;
+    body: Record<string, unknown>;
+  }
+
+  async function withFakeTelegram<T>(
+    reply: (call: FakeCall) => { ok: boolean; description?: string; status?: number },
+    body: (calls: FakeCall[]) => Promise<T>,
+  ): Promise<T> {
+    const calls: FakeCall[] = [];
+    const realFetch = globalThis.fetch;
+    const realToken = process.env['TELEGRAM_BOT_TOKEN'];
+    process.env['TELEGRAM_BOT_TOKEN'] = 'test:token';
+    let nextId = 500;
+    globalThis.fetch = (async (url: string, init: { body: string }) => {
+      const method = String(url).split('/').pop()!;
+      const call = { method, body: JSON.parse(init.body) as Record<string, unknown> };
+      calls.push(call);
+      const verdict = reply(call);
+      return {
+        json: async () =>
+          verdict.ok
+            ? { ok: true, result: { message_id: nextId++, date: 0, chat: { id: call.body['chat_id'] } } }
+            : { ok: false, description: verdict.description ?? 'Bad Request' },
+        status: verdict.ok ? 200 : verdict.status ?? 400,
+      };
+    }) as unknown as typeof globalThis.fetch;
+    try {
+      return await body(calls);
+    } finally {
+      globalThis.fetch = realFetch;
+      if (realToken === undefined) delete process.env['TELEGRAM_BOT_TOKEN'];
+      else process.env['TELEGRAM_BOT_TOKEN'] = realToken;
+    }
+  }
+
+  const withPoster = (n: number) =>
+    makeItem({
+      city: 'kharkiv',
+      title: `Афіша ${n}`,
+      url: `https://d/p${n}`,
+      source: 'karabas',
+      startsAt: `2026-10-2${2 + n}T19:00:00+03:00`,
+      image: `https://img/poster-${n}.jpeg`,
+    })!;
+
+  it('sends a poster as a photo and still records the id a ❤️ resolves through', async () => {
+    await withTestStore(async (store) => {
+      const item = withPoster(1);
+      const result = await withFakeTelegram(
+        () => ({ ok: true }),
+        async (calls) => {
+          const sent = await deliver({ title: 'T', query, items: [item], log, store, chatId: '7701' });
+          assert.deepEqual(calls.map((c) => c.method), ['sendMessage', 'sendPhoto']);
+          const photo = calls[1]!.body;
+          assert.equal(photo['photo'], 'https://img/poster-1.jpeg');
+          assert.ok(String(photo['caption']).includes('Афіша 1'), String(photo['caption']));
+          assert.equal(photo['parse_mode'], 'HTML');
+          return sent;
+        },
+      );
+      // the photo's own message id must be in `messages`, or the heart has
+      // nothing to resolve and no reminder can be set from a poster card
+      const photoId = result.messageIds[1]!;
+      const remembered = await store.itemsForMessage('7701', photoId);
+      assert.deepEqual(remembered.map((i) => i.id), [item.id]);
+    });
+  });
+
+  it('falls back to text when Telegram will not take the poster, and finishes the digest', async () => {
+    await withTestStore(async (store) => {
+      const items = [withPoster(1), withPoster(2)];
+      const result = await withFakeTelegram(
+        (call) =>
+          call.method === 'sendPhoto'
+            ? { ok: false, description: 'Bad Request: failed to get HTTP URL content' }
+            : { ok: true },
+        async (calls) => {
+          const sent = await deliver({ title: 'T', query, items, log, store, chatId: '7702' });
+          // header, then each card tried as a photo and re-sent as text
+          assert.deepEqual(calls.map((c) => c.method), [
+            'sendMessage', 'sendPhoto', 'sendMessage', 'sendPhoto', 'sendMessage',
+          ]);
+          return sent;
+        },
+      );
+      assert.equal(result.chatGone, false);
+      // one id per message that actually landed: header + both events
+      assert.equal(result.messageIds.length, 3);
+      for (const [n, item] of items.entries()) {
+        const remembered = await store.itemsForMessage('7702', result.messageIds[n + 1]!);
+        assert.deepEqual(remembered.map((i) => i.id), [item.id], `event ${n + 1} was not recorded`);
+      }
+    });
+  });
+
+  it('treats a blocked chat as a blocked chat, not a bad poster', async () => {
+    await withTestStore(async (store) => {
+      const result = await withFakeTelegram(
+        () => ({ ok: false, status: 403, description: 'Forbidden: bot was blocked by the user' }),
+        async () => deliver({ title: 'T', query, items: [withPoster(1)], log, store, chatId: '7703' }),
+      );
+      assert.equal(result.chatGone, true);
     });
   });
 });
