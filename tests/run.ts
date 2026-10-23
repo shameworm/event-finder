@@ -59,7 +59,7 @@ const { collect: collectKontramarka } = await import('../scripts/kontramarka.ts'
 const { Store } = await import('../src/db.ts');
 const { splitForTelegram } = await import('../src/telegram-api.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs, newUserPrefs } = await import('../src/users.ts');
-const { cacheKey } = await import('../src/cache.ts');
+const { cacheKey, collectCity } = await import('../src/cache.ts');
 const { fanout } = await import('../src/fanout.ts');
 const { handleMessage, handleCallback, handleReaction, parseBell, isHeart, isAllowed, BOT_COMMANDS } = await import(
   '../src/bot-handlers.ts'
@@ -1229,6 +1229,54 @@ describe('users', () => {
   });
 });
 
+/* ------------------------------------------------------------ city cache --- */
+
+describe('the shared city scrape', () => {
+  const log = makeLogger('test');
+  const page = () => `<html><script type="application/ld+json">${fixture('karabas-event.json')}</script></html>`;
+
+  it('gives a deeper digest and a quick chat search their own cache entries', () => {
+    const window = { city: 'kharkiv', from: '2026-10-24', to: '2026-10-26', kinds: ['event' as const] };
+    assert.notEqual(
+      cacheKey(window, ALL_SOURCE_NAMES, 6),
+      cacheKey(window, ALL_SOURCE_NAMES, 2),
+      'a two-page search must not be served to a six-page digest',
+    );
+    assert.equal(cacheKey(window, ALL_SOURCE_NAMES, 6), cacheKey(window, [...ALL_SOURCE_NAMES].reverse(), 6));
+  });
+
+  it('scrapes once when two people ask for the same city at the same moment', async () => {
+    await withTestStore(async (store) => {
+      let fetches = 0;
+      const fetchText = async (url: string) => {
+        fetches++;
+        return url.includes('page=') ? '<html></html>' : page();
+      };
+      const ask = () =>
+        collectCity({
+          store,
+          log,
+          city: 'kharkiv',
+          from: '2026-12-08',
+          to: '2026-12-09',
+          kinds: ['event'],
+          sources: ['karabas'],
+          maxPages: 1,
+          fetchText,
+        });
+      const [a, b] = await Promise.all([ask(), ask()]);
+      assert.equal(fetches, 1, `both askers shared one crawl, not ${fetches}`);
+      assert.deepEqual(a.items.map((i) => i.id), b.items.map((i) => i.id));
+      assert.ok(a.items.length > 0);
+
+      // and the next ask comes off the cache without touching the site at all
+      const later = await ask();
+      assert.equal(fetches, 1);
+      assert.equal(later.cached, true);
+    });
+  });
+});
+
 /* ----------------------------------------------------------------- fanout --- */
 
 describe('fanout', () => {
@@ -1238,7 +1286,8 @@ describe('fanout', () => {
 
   /** Pre-seed the cache so the fan-out runs without touching the network. */
   async function seed(store: StoreType, items = [standup, classical]) {
-    const key = cacheKey({ city: 'kharkiv', from: window.from, to: window.to, kinds: ['event'] }, ALL_SOURCE_NAMES);
+    // the depth is part of the key: a digest scrapes deeper than a chat search
+    const key = cacheKey({ city: 'kharkiv', from: window.from, to: window.to, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().http.max_pages);
     await store.putCache(key, items, 600);
   }
 
@@ -1451,7 +1500,8 @@ describe('bot handlers', () => {
   /** An answer comes out of the shared cache, so these run without a network. */
   async function seedToday(store: StoreType, items: Item[]): Promise<void> {
     const base = today(loadConfig().timezone);
-    await store.putCache(cacheKey({ city: 'kharkiv', from: base, to: base, kinds: ['event'] }, ALL_SOURCE_NAMES), items, 600);
+    const key = cacheKey({ city: 'kharkiv', from: base, to: base, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().bot.interactive_pages);
+    await store.putCache(key, items, 600);
   }
   const onToday = (title: string, category: Item['category'], extra: Record<string, unknown> = {}) =>
     makeItem({

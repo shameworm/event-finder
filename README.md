@@ -32,7 +32,9 @@ web search ─┘                                            rank per user (thei
 ```
 
 The cache is the point: 200 people in Kharkiv asking about the same weekend cost
-**one** crawl of each site, not 200. Ranking, filtering and "already sent"
+**one** crawl of each site, not 200 — and two of them asking at the same second
+share the crawl that is already running. (The key includes how many pages were
+asked for, so a quick chat search never stands in for a deeper digest.) Ranking, filtering and "already sent"
 happen per user afterwards — and filtering means it: an answer holds what that
 person likes, not everything that is on (see §Taste).
 
