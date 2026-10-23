@@ -17,7 +17,7 @@ import { parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
-import { countEvents, eventKeyboard, renderItem, renderReminders } from './render.ts';
+import { countEvents, eventKeyboard, moreButton, renderItem, renderReminders } from './render.ts';
 import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
 import { DIGEST_DAYS, DIGEST_HOURS, FREQUENCIES, describeSchedule, hourLabel, isFrequency } from './schedule.ts';
 import { WORD_END, addDays, normText, today } from './util.ts';
@@ -614,6 +614,16 @@ function makeReply(ctx: HandlerContext, chatId: string, replyTo?: number): Reply
 }
 
 /**
+ * How long an answer's unshown tail stays pageable. Long enough to scroll back
+ * up and keep tapping, short enough that prices and sold-out flags in it have
+ * not gone stale — and short enough that `pruneCache` keeps the table small.
+ */
+const MORE_TTL_SECONDS = 3600;
+
+/** Where one answer's leftovers live: next to the header that paginates them. */
+const pageKey = (chatId: string, messageId: number): string => `more:${chatId}:${messageId}`;
+
+/**
  * Run a search for one user and send them the result.
  * Goes through the shared city cache, so several users asking the same thing
  * cost one scrape.
@@ -665,7 +675,10 @@ export async function answerSearch(
   }
 
   const ranked = rank(collected, { query, prefs: user.prefs, tz: cfg.timezone });
-  const items = ranked.items.slice(0, opts.top ?? cfg.bot.max_results);
+  const pageSize = opts.top ?? cfg.bot.max_results;
+  const items = ranked.items.slice(0, pageSize);
+  // what the page size cut off: kept for the "показати ще" button, not dropped
+  const rest = ranked.items.slice(pageSize);
   const offTaste = ranked.dropped.filter((d) => d.why === 'not in their taste').length;
 
   const title =
@@ -682,6 +695,7 @@ export async function answerSearch(
     chatId: user.chatId,
     dryRun: ctx.dryRun,
     maxPerDay: 0,
+    more: rest.length,
     // an on-demand answer is allowed to repeat things: they asked for it
     record: !ctx.dryRun,
     // the filter has to admit when it loosened, or a short list looks like a bug
@@ -695,10 +709,90 @@ export async function answerSearch(
             ? `Показав тільки те, що тобі заходить — ще ${offTaste} події відфільтрував. /prefs, якщо це занадто вузько.`
             : undefined,
   });
+  // park the tail next to the header it belongs to, so paging through it later
+  // costs a database read rather than another crawl of somebody's site
+  if (rest.length > 0 && outcome.headerMessageId !== undefined && !outcome.chatGone) {
+    await ctx.store.putPage(
+      pageKey(user.chatId, outcome.headerMessageId),
+      { header: outcome.headerText, title, query, rest, size: pageSize },
+      MORE_TTL_SECONDS,
+    );
+  }
+
   if (failed.length && !outcome.chatGone) {
     await opts.reply(`(до речі: ${failed.join(', ')} не відповіли, тож список може бути неповним)`);
   }
   return items.length;
+}
+
+/**
+ * Hand out the next page of an answer that did not fit.
+ *
+ * Nothing is scraped and nothing is re-ranked: the events come out of the
+ * stash `answerSearch` left behind, in the order it ranked them. They go out
+ * as one message each — the same shape as a first page, so a ❤️ or an ⏰ on a
+ * late arrival resolves to its own event exactly like on an early one — and
+ * the header is rewritten to count down, losing its button on the last page.
+ *
+ * This is paging, not searching, so `hitRateLimit` is deliberately not called.
+ */
+async function showMore(
+  ctx: HandlerContext,
+  user: BotUser,
+  messageId: number | undefined,
+  fallbackHeader: string | undefined,
+  reply: Reply,
+): Promise<void> {
+  if (messageId === undefined) return;
+  const key = pageKey(user.chatId, messageId);
+  const page = await ctx.store.getPage(key);
+
+  if (!page || page.rest.length === 0) {
+    // an hour has gone by, or another process already emptied it: take the
+    // button away rather than leave one that answers "nothing left"
+    const header = page?.header ?? fallbackHeader;
+    if (header) {
+      await editMessageText(header, {
+        chatId: user.chatId,
+        messageId,
+        inlineKeyboard: [],
+        dryRun: ctx.dryRun,
+        log: ctx.log,
+      });
+    }
+    await ctx.store.dropPage(key);
+    if (!page) await reply('Той список уже застарів — попроси свіжий, і погортаємо далі.');
+    return;
+  }
+
+  const batch = page.rest.slice(0, page.size);
+  const rest = page.rest.slice(page.size);
+
+  const outcome = await deliver({
+    title: page.title,
+    query: page.query,
+    items: batch,
+    log: ctx.log,
+    store: ctx.store,
+    chatId: user.chatId,
+    dryRun: ctx.dryRun,
+    maxPerDay: 0,
+    record: !ctx.dryRun,
+    // the header is already in the chat, a few messages up, being edited
+    withHeader: false,
+  });
+  if (outcome.chatGone) return;
+
+  if (rest.length > 0) await ctx.store.putPage(key, { ...page, rest }, MORE_TTL_SECONDS);
+  else await ctx.store.dropPage(key);
+
+  await editMessageText(page.header, {
+    chatId: user.chatId,
+    messageId,
+    inlineKeyboard: rest.length > 0 ? moreButton(rest.length) : [],
+    dryRun: ctx.dryRun,
+    log: ctx.log,
+  });
 }
 
 /** The canned searches, reachable both as a command and as a quick-action button. */
@@ -918,6 +1012,8 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
  *                 onb:unfollow:<index> · onb:next · onb:skip
  *                 onb:step:<step> · onb:taste · onb:start · onb:later
  *                 when:hour:<0-23> · when:day:<0-6> · when:freq:<key> · when:quiet:<from>-<to>
+ *   more          the next page of an answer, from the stash behind its
+ *                 header; which answer comes from the message it is on
  *   ev:<verb>:<item id>  a button under an event card — ev:r toggles the
  *                 reminder, ev:no · ev:cal · ev:share are not built yet
  *
@@ -970,6 +1066,8 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
       reply,
     });
   }
+
+  if (kind === 'more') return showMore(ctx, user, messageId, cq.message?.text, reply);
 
   if (kind === 'go') {
     if (arg === 'settings') return drawPanel(false);
