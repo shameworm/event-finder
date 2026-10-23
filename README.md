@@ -280,7 +280,8 @@ npx tsx scripts/telegram.ts --channel @some_channel --dump   # see raw posts
 ```bash
 npx tsx scripts/doctor.ts            # config, secrets, db, users, bot policy
 npx tsx scripts/doctor.ts --network  # also probe every source site
-npm test                             # 159 offline checks (~3s, no network)
+npm test                             # 194 offline checks (~4s, no network)
+npm run check                        # typecheck + tests, same as CI
 ```
 
 ## 8. Automate the digests
@@ -352,6 +353,7 @@ src/
   db.ts config.ts schemas.ts types.ts http.ts jsonld.ts log.ts …
 drizzle/                  database schema (sqlite + postgres)
 tests/                    offline suite and fixtures
+.github/workflows/ci.yml  typecheck + the offline suite, on push and PR
 ```
 
 Data is validated with zod at every boundary: YAML config, scraped schema.org

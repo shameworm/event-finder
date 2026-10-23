@@ -20,7 +20,8 @@
     "test": "tsx tests/run.ts",
     "typecheck": "tsc --noEmit",
     "db:push": "drizzle-kit push",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "check": "npm run typecheck && npm test"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
