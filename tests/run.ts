@@ -599,6 +599,10 @@ describe('render', () => {
   it('gives up on the caption rather than drop the link', () => {
     const silly = makeItem({ city: 'kharkiv', title: 'Тест', url: `https://x/${'z'.repeat(2000)}`, source: 'karabas', startsAt: '2026-10-24T19:00:00+03:00', image: 'https://img/p.jpg' })!;
     assert.equal(renderCaption(silly, { format: 'html' }), null);
+    // and the digest then sends it as an ordinary message
+    const msg = buildMessages({ title: 'T', query, items: [silly], format: 'html' })[1]!;
+    assert.equal(msg.image, undefined);
+    assert.ok(msg.text.includes('z'.repeat(2000)));
   });
 
   it('escapes HTML coming from a site', () => {
@@ -670,6 +674,25 @@ describe('messages', () => {
     const changeNotes = new Map([[earlier.id, 'sold out']]);
     const msgs = buildMessages({ title: 'T', query, items: [earlier], format: 'text', changeNotes });
     assert.ok(msgs[1]!.text.includes('🔁 квитки скінчилися'), msgs[1]!.text);
+  });
+
+  it('sends an event with a poster as a photo, and one without as text', () => {
+    const withPoster = makeItem({ city: 'kharkiv', title: 'З афішею', url: 'https://m/p', source: 'karabas', startsAt: '2026-10-23T19:00:00+03:00', image: 'https://img/poster.jpeg' })!;
+    const msgs = buildMessages({ title: 'T', query, items: [withPoster, earlier], format: 'html' });
+    const photo = msgs.find((m) => m.items[0]?.id === withPoster.id)!;
+    assert.equal(photo.image, 'https://img/poster.jpeg');
+    assert.ok(photo.caption && photo.caption.includes('З афішею'), photo.caption);
+    assert.ok(photo.caption!.length <= CAPTION_LIMIT);
+    const plainMsg = msgs.find((m) => m.items[0]?.id === earlier.id)!;
+    assert.equal(plainMsg.image, undefined);
+    assert.equal(plainMsg.caption, undefined);
+  });
+
+  it('keeps the full card as the message text, so a refused poster loses nothing', () => {
+    const item = makeItem({ city: 'kharkiv', title: 'Опис', url: 'https://m/d', source: 'karabas', startsAt: '2026-10-23T19:00:00+03:00', image: 'https://img/p.jpg', description: 'Довгий опис події.' })!;
+    const msg = buildMessages({ title: 'T', query, items: [item], format: 'html' })[1]!;
+    assert.ok(msg.text.includes('Довгий опис'), msg.text);
+    assert.ok(msg.image);
   });
 
   it('is a single message, carrying nothing, when nothing matched', () => {
@@ -1925,6 +1948,116 @@ describe('deliver', () => {
         deliver({ title: 'T', query, items, log, store, chatId: '3301', dryRun: true }),
       );
       assert.equal(printed.split('──────── to chat 3301').length - 1, 4, printed);
+    });
+  });
+
+  /**
+   * Both poster tests below go through a stubbed Bot API rather than a dry run:
+   * the point of each is what the *send* does, and a dry run never calls it.
+   */
+  interface FakeCall {
+    method: string;
+    body: Record<string, unknown>;
+  }
+
+  async function withFakeTelegram<T>(
+    reply: (call: FakeCall) => { ok: boolean; description?: string; status?: number },
+    body: (calls: FakeCall[]) => Promise<T>,
+  ): Promise<T> {
+    const calls: FakeCall[] = [];
+    const realFetch = globalThis.fetch;
+    const realToken = process.env['TELEGRAM_BOT_TOKEN'];
+    process.env['TELEGRAM_BOT_TOKEN'] = 'test:token';
+    let nextId = 500;
+    globalThis.fetch = (async (url: string, init: { body: string }) => {
+      const method = String(url).split('/').pop()!;
+      const call = { method, body: JSON.parse(init.body) as Record<string, unknown> };
+      calls.push(call);
+      const verdict = reply(call);
+      return {
+        json: async () =>
+          verdict.ok
+            ? { ok: true, result: { message_id: nextId++, date: 0, chat: { id: call.body['chat_id'] } } }
+            : { ok: false, description: verdict.description ?? 'Bad Request' },
+        status: verdict.ok ? 200 : verdict.status ?? 400,
+      };
+    }) as unknown as typeof globalThis.fetch;
+    try {
+      return await body(calls);
+    } finally {
+      globalThis.fetch = realFetch;
+      if (realToken === undefined) delete process.env['TELEGRAM_BOT_TOKEN'];
+      else process.env['TELEGRAM_BOT_TOKEN'] = realToken;
+    }
+  }
+
+  const withPoster = (n: number) =>
+    makeItem({
+      city: 'kharkiv',
+      title: `Афіша ${n}`,
+      url: `https://d/p${n}`,
+      source: 'karabas',
+      startsAt: `2026-10-2${2 + n}T19:00:00+03:00`,
+      image: `https://img/poster-${n}.jpeg`,
+    })!;
+
+  it('sends a poster as a photo and still records the id a ❤️ resolves through', async () => {
+    await withTestStore(async (store) => {
+      const item = withPoster(1);
+      const result = await withFakeTelegram(
+        () => ({ ok: true }),
+        async (calls) => {
+          const sent = await deliver({ title: 'T', query, items: [item], log, store, chatId: '7701' });
+          assert.deepEqual(calls.map((c) => c.method), ['sendMessage', 'sendPhoto']);
+          const photo = calls[1]!.body;
+          assert.equal(photo['photo'], 'https://img/poster-1.jpeg');
+          assert.ok(String(photo['caption']).includes('Афіша 1'), String(photo['caption']));
+          assert.equal(photo['parse_mode'], 'HTML');
+          return sent;
+        },
+      );
+      // the photo's own message id must be in `messages`, or the heart has
+      // nothing to resolve and no reminder can be set from a poster card
+      const photoId = result.messageIds[1]!;
+      const remembered = await store.itemsForMessage('7701', photoId);
+      assert.deepEqual(remembered.map((i) => i.id), [item.id]);
+    });
+  });
+
+  it('falls back to text when Telegram will not take the poster, and finishes the digest', async () => {
+    await withTestStore(async (store) => {
+      const items = [withPoster(1), withPoster(2)];
+      const result = await withFakeTelegram(
+        (call) =>
+          call.method === 'sendPhoto'
+            ? { ok: false, description: 'Bad Request: failed to get HTTP URL content' }
+            : { ok: true },
+        async (calls) => {
+          const sent = await deliver({ title: 'T', query, items, log, store, chatId: '7702' });
+          // header, then each card tried as a photo and re-sent as text
+          assert.deepEqual(calls.map((c) => c.method), [
+            'sendMessage', 'sendPhoto', 'sendMessage', 'sendPhoto', 'sendMessage',
+          ]);
+          return sent;
+        },
+      );
+      assert.equal(result.chatGone, false);
+      // one id per message that actually landed: header + both events
+      assert.equal(result.messageIds.length, 3);
+      for (const [n, item] of items.entries()) {
+        const remembered = await store.itemsForMessage('7702', result.messageIds[n + 1]!);
+        assert.deepEqual(remembered.map((i) => i.id), [item.id], `event ${n + 1} was not recorded`);
+      }
+    });
+  });
+
+  it('treats a blocked chat as a blocked chat, not a bad poster', async () => {
+    await withTestStore(async (store) => {
+      const result = await withFakeTelegram(
+        () => ({ ok: false, status: 403, description: 'Forbidden: bot was blocked by the user' }),
+        async () => deliver({ title: 'T', query, items: [withPoster(1)], log, store, chatId: '7703' }),
+      );
+      assert.equal(result.chatGone, true);
     });
   });
 });
