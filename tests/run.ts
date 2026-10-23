@@ -67,6 +67,7 @@ const { handleMessage, handleCallback, handleReaction, parseBell, isHeart, isAll
 const { deliver } = await import('../src/deliver.ts');
 const { makeLogger } = await import('../src/log.ts');
 const { ALL_SOURCE_NAMES } = await import('../src/pipeline.ts');
+const { politeFetch, HttpError } = await import('../src/http.ts');
 
 const TZ = 'Europe/Kyiv';
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
@@ -505,6 +506,99 @@ describe('render', () => {
     const chunks = splitForTelegram(Array.from({ length: 200 }, (_, i) => `block ${i}`).join('\n\n'), 500);
     assert.ok(chunks.length > 1);
     assert.ok(chunks.every((c) => c.length <= 500));
+  });
+});
+
+/* ----------------------------------------------------- the network layer --- */
+
+describe('politeFetch', () => {
+  /** Swap the global fetch for a canned responder; returns the urls it saw. */
+  async function withFetch(
+    handler: (url: string, hit: number) => { status?: number; body?: string; headers?: Record<string, string> },
+    body: (urls: string[], at: number[]) => Promise<void>,
+  ): Promise<void> {
+    const real = globalThis.fetch;
+    const urls: string[] = [];
+    const at: number[] = [];
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input);
+      urls.push(url);
+      at.push(Date.now());
+      const res = handler(url, urls.filter((u) => u === url).length);
+      const status = res.status ?? 200;
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        statusText: '',
+        headers: new Headers(res.headers ?? {}),
+        text: async () => res.body ?? '',
+      } as Response;
+    }) as typeof fetch;
+    try {
+      await body(urls, at);
+    } finally {
+      globalThis.fetch = real;
+    }
+  }
+
+  const fast = { delayMs: 1, retries: 2, timeoutMs: 2000 };
+
+  it('does not retry a 404: page seven of six says the same thing every time', async () => {
+    await withFetch(
+      () => ({ status: 404 }),
+      async (urls) => {
+        await assert.rejects(() => politeFetch('https://no-retry.test/page7', fast), (err: unknown) => {
+          assert.ok(err instanceof HttpError && err.status === 404 && !err.retryable);
+          return true;
+        });
+        assert.equal(urls.length, 1, 'a permanent answer is asked for once');
+      },
+    );
+  });
+
+  it('retries a 502 to the end of its budget', async () => {
+    await withFetch(
+      () => ({ status: 502 }),
+      async (urls) => {
+        await assert.rejects(() => politeFetch('https://flaky.test/x', fast));
+        assert.equal(urls.length, 3, 'the first attempt plus two retries');
+      },
+    );
+  });
+
+  it('comes back for the second attempt when the first one was a hiccup', async () => {
+    await withFetch(
+      (_url, hit) => (hit === 1 ? { status: 503 } : { body: '<html>ok</html>' }),
+      async (urls) => {
+        assert.equal(await politeFetch('https://second-time.test/x', fast), '<html>ok</html>');
+        assert.equal(urls.length, 2);
+      },
+    );
+  });
+
+  it('waits as long as Retry-After asks on a 429', async () => {
+    await withFetch(
+      (_url, hit) => (hit === 1 ? { status: 429, headers: { 'retry-after': '0.3' } } : { body: 'ok' }),
+      async (_urls, at) => {
+        await politeFetch('https://flood.test/x', { ...fast, delayMs: 1 });
+        // our own backoff for attempt 1 would have been 2ms; the server asked
+        // for 300, and ignoring that is how a bot gets banned
+        assert.ok((at[1] ?? 0) - (at[0] ?? 0) >= 250, `waited ${(at[1] ?? 0) - (at[0] ?? 0)}ms`);
+      },
+    );
+  });
+
+  it('spaces concurrent requests to one host instead of firing them at once', async () => {
+    await withFetch(
+      () => ({ body: 'ok' }),
+      async (_urls, at) => {
+        // runPipeline asks for every city × source at once: a plain
+        // read-the-clock-then-set-it check let all three through together
+        await Promise.all([1, 2, 3].map((n) => politeFetch(`https://polite.test/${n}`, { delayMs: 120, retries: 0 })));
+        const gaps = at.slice(1).map((t, i) => t - (at[i] as number));
+        for (const gap of gaps) assert.ok(gap >= 110, `requests were ${gap}ms apart`);
+      },
+    );
   });
 });
 

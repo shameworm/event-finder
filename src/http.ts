@@ -5,6 +5,62 @@ import type { Logger } from './log.ts';
 /** Last request time per host, so we stay polite even across several scripts in one process. */
 const lastHit = new Map<string, number>();
 
+/**
+ * One queue per host. `runPipeline` fires every city × source at once, so a
+ * plain "read the clock, then set it" check let five requests sail through the
+ * same 1.5s window and hit one site five times at once. Each request now waits
+ * for the previous one on that host to claim its slot before claiming its own.
+ */
+const hostQueue = new Map<string, Promise<void>>();
+
+/** Wait for this host's turn, then reserve the next slot. */
+function takeTurn(host: string, delayMs: number): Promise<void> {
+  const turn = (hostQueue.get(host) ?? Promise.resolve()).then(async () => {
+    const since = Date.now() - (lastHit.get(host) ?? 0);
+    if (since < delayMs) await sleep(delayMs - since);
+    lastHit.set(host, Date.now());
+  });
+  // a rejected slot must not poison every later request to the host
+  hostQueue.set(host, turn.catch(() => {}));
+  return turn;
+}
+
+/** Longest we will honour a `Retry-After`; beyond that the digest moves on. */
+const MAX_RETRY_AFTER_MS = 60_000;
+
+/** A non-OK HTTP response, with the status kept so retrying can be selective. */
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly url: string,
+    readonly statusText = '',
+    /** From the `Retry-After` header, when the server sent one. */
+    readonly retryAfterMs?: number,
+  ) {
+    super(`HTTP ${status}${statusText ? ` ${statusText}` : ''}`);
+    this.name = 'HttpError';
+  }
+
+  /**
+   * Worth another go? A 404 past the last page or a 403 block will say the
+   * same thing on the third attempt — only overload (429), a server-side
+   * timeout (408) and 5xx are worth the backoff.
+   */
+  get retryable(): boolean {
+    return this.status === 408 || this.status === 429 || this.status >= 500;
+  }
+}
+
+/** `Retry-After` in milliseconds: delta-seconds or an HTTP date, capped. */
+function retryAfterMs(res: Response): number | undefined {
+  const raw = res.headers.get('retry-after');
+  if (!raw) return undefined;
+  const seconds = Number(raw);
+  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(raw) - Date.now();
+  if (!Number.isFinite(ms) || ms <= 0) return undefined;
+  return Math.min(ms, MAX_RETRY_AFTER_MS);
+}
+
 export interface FetchOptions {
   log?: Logger;
   timeoutMs?: number;
@@ -26,9 +82,7 @@ export async function politeFetch(url: string, opts: FetchOptions = {}): Promise
 
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
-    const since = Date.now() - (lastHit.get(host) ?? 0);
-    if (since < delayMs) await sleep(delayMs - since);
-    lastHit.set(host, Date.now());
+    await takeTurn(host, delayMs);
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -43,13 +97,22 @@ export async function politeFetch(url: string, opts: FetchOptions = {}): Promise
           ...opts.headers,
         },
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      if (!res.ok) throw new HttpError(res.status, url, res.statusText, retryAfterMs(res));
       return await res.text();
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message : String(err);
+      // a permanent answer is not worth three attempts and two backoffs
+      if (err instanceof HttpError && !err.retryable) {
+        opts.log?.warn(`GET ${url} failed: ${msg} (not retrying)`);
+        throw err;
+      }
       opts.log?.warn(`GET ${url} failed (attempt ${attempt + 1}/${retries + 1}): ${msg}`);
-      if (attempt < retries) await sleep(delayMs * (attempt + 2));
+      if (attempt < retries) {
+        // the server's own number beats our guess when it bothered to send one
+        const wait = err instanceof HttpError && err.retryAfterMs ? err.retryAfterMs : delayMs * (attempt + 2);
+        await sleep(wait);
+      }
     } finally {
       clearTimeout(timer);
     }
