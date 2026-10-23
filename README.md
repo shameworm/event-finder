@@ -62,7 +62,9 @@ cp config.example.yaml config.yaml
 cp preferences.example.yaml preferences.yaml
 ```
 
-- **`config.yaml`** — sites, cities, politeness, bot policy and cache TTL. One
+- **`config.yaml`** — sites, cities, politeness, bot policy and cache TTL. An
+  unknown key is rejected with the file name and the key, rather than falling
+  back to a default you did not ask for. One
   section per city with the Concert.ua slug, the Karabas and Kontramarka
   subdomains, Telegram channels and place-search queries. All commented.
 - **`preferences.yaml`** — **your own** taste model, used by the CLI. New bot

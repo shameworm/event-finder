@@ -12,23 +12,29 @@ import { CategorySchema, KindSchema, StatusSchema } from './types.ts';
 
 /* ------------------------------------------------------------ config.yaml --- */
 
-export const ConcertUaCitySchema = z.object({
+/**
+ * Config objects are strict: an unknown key in config.yaml is a typo, and
+ * silently falling back to the default for the key the operator *meant* is
+ * how `delay_ms: 1500` written as `delay-ms` became "no delay at all, and no
+ * way to tell". Scraped data stays lenient (`.loose()`) — that is not ours.
+ */
+export const ConcertUaCitySchema = z.strictObject({
   slug: z.string().min(1),
   categories: z.array(z.string()).optional(),
 });
 
-export const KarabasCitySchema = z.object({
+export const KarabasCitySchema = z.strictObject({
   subdomain: z.string().min(1),
   paths: z.array(z.string()).optional(),
 });
 
-export const KontramarkaCitySchema = z.object({
+export const KontramarkaCitySchema = z.strictObject({
   /** Empty string means the bare domain (Kyiv). */
   subdomain: z.string().default(''),
   categories: z.array(z.string()).optional(),
 });
 
-export const CityConfigSchema = z.object({
+export const CityConfigSchema = z.strictObject({
   label: z.string().optional(),
   aliases: z.array(z.string()).default([]),
   concertua: ConcertUaCitySchema.optional(),
@@ -38,12 +44,12 @@ export const CityConfigSchema = z.object({
   place_queries: z.array(z.string()).default([]),
 });
 
-export const ConfigSchema = z.object({
+export const ConfigSchema = z.strictObject({
   timezone: z.string().default('Europe/Kyiv'),
   default_city: z.string().default('kharkiv'),
   locale: z.string().default('uk-UA'),
   http: z
-    .object({
+    .strictObject({
       delay_ms: z.number().int().nonnegative().default(1500),
       timeout_ms: z.number().int().positive().default(20000),
       retries: z.number().int().nonnegative().max(10).default(2),
@@ -54,13 +60,13 @@ export const ConfigSchema = z.object({
     })
     .prefault({}),
   telegram: z
-    .object({
+    .strictObject({
       parse_mode: z.enum(['HTML', 'MarkdownV2']).default('HTML'),
       disable_preview: z.boolean().default(true),
     })
     .prefault({}),
   digest: z
-    .object({
+    .strictObject({
       max_items_per_day: z.number().int().nonnegative().default(8),
       week_top: z.number().int().positive().default(15),
       weekend_top: z.number().int().positive().default(5),
@@ -68,7 +74,7 @@ export const ConfigSchema = z.object({
     })
     .prefault({}),
   bot: z
-    .object({
+    .strictObject({
       /** false = only chat ids on the allowlist may use the bot. */
       public: z.boolean().default(true),
       allowlist: z.array(z.coerce.string()).default([]),
@@ -91,7 +97,7 @@ export const ConfigSchema = z.object({
     })
     .prefault({}),
   cache: z
-    .object({
+    .strictObject({
       /** How long a scraped city/window stays reusable. 0 disables the cache. */
       ttl_seconds: z.number().int().nonnegative().default(1800),
     })

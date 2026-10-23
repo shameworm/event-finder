@@ -49,7 +49,7 @@ const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom } = awa
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
 const { buildDigest, buildMessages, renderReminders } = await import('../src/render.ts');
-const { loadConfig, loadPrefs, resolveCity, cityLocalName } = await import('../src/config.ts');
+const { loadConfig, loadPrefs, resolveCity, cityLocalName, savePrefs } = await import('../src/config.ts');
 const { applyPrefsCommand, describePrefs } = await import('../src/prefs-engine.ts');
 const { tagLabel } = await import('../src/categories.ts');
 const { PreferencesSchema } = await import('../src/types.ts');
@@ -2087,6 +2087,32 @@ describe('config', () => {
     const { ConfigSchema } = await import('../src/schemas.ts');
     const result = ConfigSchema.safeParse({ http: { retries: 'lots' } });
     assert.equal(result.success, false);
+  });
+
+  /**
+   * savePrefs once wrote ten of the eleven preference fields and dropped
+   * `taste`, so any CLI edit quietly erased the ❤️ tallies the bot had spent
+   * weeks learning. The round trip is the whole point of this test.
+   */
+  it('round-trips preferences through the file, taste tallies included', () => {
+    const original = readFileSync(process.env['EVENTS_FINDER_PREFS']!, 'utf8');
+    try {
+      const p = PreferencesSchema.parse({
+        home_city: 'kharkiv',
+        favourite_categories: ['standup'],
+        follow: ['Latexfauna'],
+        taste: { standup: 7, concert: 2 },
+        notes: ['сядає біля вікна'],
+      });
+      savePrefs(p);
+      assert.deepEqual(loadPrefs().taste, { standup: 7, concert: 2 }, 'the ❤️ tallies must survive a save');
+      assert.deepEqual(loadPrefs().follow, ['Latexfauna']);
+      // every field, not just the one that went missing: savePrefs lists its
+      // keys by hand, so the twelfth preference would drop just as quietly
+      assert.deepEqual(loadPrefs(), p, 'a save must not lose any preference field');
+    } finally {
+      writeFileSync(process.env['EVENTS_FINDER_PREFS']!, original);
+    }
   });
 });
 
