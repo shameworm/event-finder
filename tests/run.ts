@@ -55,7 +55,7 @@ const { tagLabel } = await import('../src/categories.ts');
 const { PreferencesSchema } = await import('../src/types.ts');
 const { parsePost, findDate, findTime, findVenue } = await import('../scripts/telegram.ts');
 const { resultToItem, buildQueries } = await import('../scripts/websearch.ts');
-const { collect: collectKontramarka } = await import('../scripts/kontramarka.ts');
+const { collect: collectKontramarka, cardToSchema } = await import('../scripts/kontramarka.ts');
 const { Store } = await import('../src/db.ts');
 const { splitForTelegram } = await import('../src/telegram-api.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs, newUserPrefs } = await import('../src/users.ts');
@@ -320,6 +320,26 @@ describe('normalization', () => {
     assert.equal($('[itemprop="name"]').first().text().trim(), 'Василь Байдак');
     assert.equal($('meta[itemprop="startDate"]').attr('content'), '2026-10-21T18:30:00+03:00');
     assert.equal(typeof collectKontramarka, 'function');
+
+    const card = $('.cat_item[itemtype*="schema.org/Event"]').first()[0];
+    assert.ok(card);
+    const schema = cardToSchema($, card);
+    assert.ok(schema);
+    assert.equal(schema['image'], 'https://cdn.kontramarka.ua/uploads/resize/shows/logo/630x891_1787415980.webp');
+    const item = fromSchemaEvent(schema, { city: 'kharkiv', source: 'kontramarka' });
+    assert.ok(item);
+    assert.equal(item.image, 'https://cdn.kontramarka.ua/uploads/resize/shows/logo/630x891_1787415980.webp');
+  });
+
+  it('falls back to the card thumbnail when Kontramarka drops the image meta', async () => {
+    const cheerio = await import('cheerio');
+    const $ = cheerio.load(fixture('kontramarka-card.html').replace(/<meta itemprop="image"[^>]*>/, ''));
+    const card = $('.cat_item[itemtype*="schema.org/Event"]').first()[0];
+    assert.ok(card);
+    assert.equal(
+      cardToSchema($, card)?.['image'],
+      'https://cdn.kontramarka.ua/uploads/resize/shows/logo/630x891_thumb.webp',
+    );
   });
 });
 

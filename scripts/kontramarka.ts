@@ -26,7 +26,7 @@ export const SOURCE = 'kontramarka';
 const DEFAULT_CATEGORIES = ['concert', 'standUp', 'theatre', 'exhibition', 'festival', 'clubs', 'museum'];
 
 /** Read one `.cat_item` card's microdata into a plain schema.org-shaped object. */
-function cardToSchema($: cheerio.CheerioAPI, el: AnyNode): Record<string, unknown> | null {
+export function cardToSchema($: cheerio.CheerioAPI, el: AnyNode): Record<string, unknown> | null {
   const card = $(el);
   const name = card.find('[itemprop="name"]').first().text().trim();
   const url = card.find('a[itemprop="url"]').first().attr('href') ?? card.find('a.block-info__title').first().attr('href');
@@ -51,6 +51,9 @@ function cardToSchema($: cheerio.CheerioAPI, el: AnyNode): Record<string, unknow
     url,
     startDate: meta('startDate'),
     endDate: meta('endDate'),
+    // the poster is a <meta itemprop="image">; the card's own thumbnail is a
+    // lazy-loaded data-bg on the same block, used when the meta is missing
+    image: meta('image') ?? card.find('.cat_item__image[data-bg]').first().attr('data-bg')?.trim(),
     description: card.find('.block-info__descr').first().text().trim() || undefined,
     location: {
       '@type': 'Place',
