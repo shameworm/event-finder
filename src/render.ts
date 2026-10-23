@@ -4,6 +4,7 @@ import { cityLabel, loadConfig } from './config.ts';
 import { priceText } from './normalize.ts';
 import { dayLabel, localDate, localTime, truncate } from './util.ts';
 import { groupByDay } from './rank.ts';
+import { googleCalendarUrl } from './calendar.ts';
 import { CAPTION_LIMIT, escapeHtml, type InlineButton } from './telegram-api.ts';
 
 export { CAPTION_LIMIT };
@@ -317,16 +318,22 @@ export interface OutgoingMessage {
  * from when the message carried more than one.
  *
  * ⏰ is a toggle and says which way it is pointing, like a heart you can see.
+ *
+ * 📅 is the one button that never calls back: it is a link straight to Google's
+ * pre-filled form (see src/calendar.ts). It is also the one button that can be
+ * missing — "дата уточнюється" is nothing a calendar can hold, so an event
+ * without a start time gets no 📅 instead of a 📅 that apologises.
  */
 export function eventKeyboard(item: Item, opts: { reminded?: boolean } = {}): InlineButton[][] {
   const ev = (verb: string) => `ev:${verb}:${item.id}`;
+  const google = googleCalendarUrl(item);
   return [
     [
       { text: opts.reminded ? '⏰ Не нагадувати' : '⏰ Нагадати', callback_data: ev('r') },
       { text: '👎 Не моє', callback_data: ev('no') },
     ],
     [
-      { text: '📅 В календар', callback_data: ev('cal') },
+      ...(google ? [{ text: '📅 В календар', url: google }] : []),
       { text: '↗️ Поділитись', callback_data: ev('share') },
     ],
   ];
