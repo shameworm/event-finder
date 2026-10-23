@@ -32,11 +32,21 @@ export interface DeliverOptions {
   replyTo?: number;
   /** Record the items as sent, so they are not repeated. Default: true when sending. */
   record?: boolean;
+  /** How many ranked items did not fit; puts a "показати ще" button on the header. */
+  more?: number;
+  /**
+   * Send the header. The second and later pages of an answer are events only —
+   * their header is already in the chat, being edited in place.
+   */
+  withHeader?: boolean;
 }
 
 export interface DeliverResult {
   messageIds: number[];
   text: string;
+  /** The header on its own, and the message it became — what "показати ще" edits. */
+  headerText: string;
+  headerMessageId?: number;
   /** True when Telegram said this chat is gone (blocked, deleted, never started). */
   chatGone: boolean;
 }
@@ -56,7 +66,14 @@ async function sendCard(
   opts: DeliverOptions,
   replyTo: number | undefined,
 ): Promise<number[]> {
-  const common = { chatId: opts.chatId, dryRun: opts.dryRun, log: opts.log, replyTo };
+  const common = {
+    chatId: opts.chatId,
+    dryRun: opts.dryRun,
+    log: opts.log,
+    replyTo,
+    // the buttons belong to the cards — a photo caption carries them too
+    inlineKeyboard: message.inlineKeyboard,
+  };
   if (message.image && message.caption) {
     try {
       return await sendPhoto(message.image, { ...common, caption: message.caption });
@@ -85,7 +102,11 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
     explain: opts.explain,
     footer: opts.footer,
     changeNotes: opts.changeNotes,
+    more: opts.more,
   });
+  const headerText = messages[0]?.text ?? '';
+  // a follow-up page has no header of its own: it continues one already sent
+  if (opts.withHeader === false) messages.splice(0, 1);
   const text = messages.map((m) => m.text).join('\n\n');
   const shouldRecord = opts.record ?? !opts.dryRun;
   const messageIds: number[] = [];
@@ -103,7 +124,7 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
       if (err instanceof TelegramError && err.chatGone) {
         opts.log.warn(`chat ${opts.chatId} is unreachable (${err.description ?? 'blocked'})`);
         if (opts.store && opts.chatId) await opts.store.setBlocked(opts.chatId, true);
-        return { messageIds, text, chatGone: true };
+        return { messageIds, text, headerText, headerMessageId: undefined, chatGone: true };
       }
       throw err;
     }
@@ -120,7 +141,13 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
   }
 
   opts.log.info(`${opts.dryRun ? 'dry-run' : `sent to ${opts.chatId}`}: ${opts.title} — ${summarize(opts.items)}`);
-  return { messageIds, text, chatGone: false };
+  return {
+    messageIds,
+    text,
+    headerText,
+    ...(opts.withHeader === false ? {} : { headerMessageId: messageIds[0] }),
+    chatGone: false,
+  };
 }
 
 /**

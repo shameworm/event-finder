@@ -17,8 +17,9 @@ import { parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
-import { countEvents, renderReminders } from './render.ts';
+import { countEvents, eventKeyboard, moreButton, renderItem, renderReminders } from './render.ts';
 import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
+import { DIGEST_DAYS, DIGEST_HOURS, FREQUENCIES, describeSchedule, hourLabel, isFrequency } from './schedule.ts';
 import { WORD_END, addDays, normText, today } from './util.ts';
 
 export interface HandlerContext {
@@ -40,7 +41,7 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: 'today', description: '📅 Що сьогодні' },
   { command: 'tomorrow', description: '📅 Що завтра' },
   { command: 'places', description: '📍 Нові кавʼярні, бари та галереї' },
-  { command: 'settings', description: '⚙️ Розсилки, місто і смаки' },
+  { command: 'settings', description: '⚙️ Розсилки, година, місто і смаки' },
   { command: 'setup', description: '🎛 Налаштувати смаки кнопками' },
   { command: 'city', description: '🏙 Змінити місто' },
   { command: 'prefs', description: '🎛 Що я думаю про твої смаки' },
@@ -54,7 +55,7 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
  * /settings text, its buttons and the /mute command all read from this list.
  */
 const OPT_INS: { key: OptIn; emoji: string; label: string; hint: string; names: string[] }[] = [
-  { key: 'weekly_digest', emoji: '🗓', label: 'Тиждень', hint: 'у понеділок — що буде цього тижня', names: ['week', 'weekly', 'тиждень'] },
+  { key: 'weekly_digest', emoji: '🗓', label: 'Тиждень', hint: 'що буде цього тижня', names: ['week', 'weekly', 'тиждень'] },
   { key: 'weekend_digest', emoji: '🎉', label: 'Вихідні', hint: 'у четвер — пʼятниця–неділя', names: ['weekend', 'вихідні'] },
   { key: 'follow_alerts', emoji: '⭐️', label: 'Стежу за', hint: 'нові події тих, за ким ти стежиш', names: ['follows', 'follow', 'стежу'] },
   { key: 'place_tips', emoji: '📍', label: 'Місця', hint: 'щотижня кавʼярні, бари та галереї', names: ['places', 'place', 'місця'] },
@@ -66,7 +67,7 @@ const COMMANDS = `<b>Що я вмію</b>
 /weekend — з пʼятниці по неділю
 /today · /tomorrow — просто зараз
 /places — нові кавʼярні, бари й галереї, куди варто зайти
-/settings — розсилки, місто і смаки, кнопками
+/settings — розсилки, коли писати, місто і смаки, кнопками
 /setup — зібрати смаки заново, крок за кроком
 /city — змінити місто
 /prefs — що я думаю про твої смаки
@@ -462,6 +463,62 @@ async function handleStepText(
   return show(tasteScreen(user, step, 'wizard'));
 }
 
+/* ------------------------------------------------------------- schedule --- */
+
+/**
+ * The quiet-hours windows on offer. A free pair of dials would be four taps
+ * and a lot of screens for a setting nobody wants to fine-tune; these cover
+ * "I go to bed early", "I go to bed late" and "do not bother".
+ */
+const QUIET_PRESETS: { from: number; to: number; label: string }[] = [
+  { from: 0, to: 0, label: 'вимкнено' },
+  { from: 22, to: 8, label: '22:00–08:00' },
+  { from: 23, to: 8, label: '23:00–08:00' },
+  { from: 0, to: 9, label: '00:00–09:00' },
+];
+
+/**
+ * "Коли писати" — the hour, the day, how often, and the quiet window.
+ *
+ * Only six hours are offered, and that is a deliberate limit rather than a
+ * shortage of buttons: every distinct hour someone picks is another fan-out
+ * that re-scrapes the cities it covers. See src/schedule.ts.
+ */
+function schedulePanel(user: BotUser): Screen {
+  const s = user.schedule;
+  const text =
+    `<b>🕘 Коли писати</b>\n\n` +
+    `Зараз: <b>${escapeHtml(describeSchedule(s))}</b>\n\n` +
+    `<b>Година</b> — о котрій приходить дайджест.\n` +
+    `<b>День</b> — коли приходить тижневий (вихідні — завжди в четвер).\n` +
+    `<b>Частота</b> — ${FREQUENCIES.map((f) => `<i>${escapeHtml(f.label.toLowerCase())}</i> — ${escapeHtml(f.hint)}`).join('; ')}.\n` +
+    `<b>Тихі години</b> — не пишу нічого несподіваного. Дайджест о ` +
+    `${hourLabel(s.hour)} це не скасовує — ти сам його попросив, — ` +
+    `і нагадування «за ~3 години» теж приходить завжди, інакше від нього нуль сенсу.`;
+  return {
+    text,
+    inlineKeyboard: [
+      ...rows(
+        DIGEST_HOURS.map((h) => ({ text: tick(s.hour === h, hourLabel(h)), callback_data: `when:hour:${h}` })),
+        3,
+      ),
+      ...rows(
+        DIGEST_DAYS.map((d) => ({ text: tick(s.day === d.day, d.short), callback_data: `when:day:${d.day}` })),
+        4,
+      ),
+      ...FREQUENCIES.map((f) => [{ text: tick(s.frequency === f.key, f.label), callback_data: `when:freq:${f.key}` }]),
+      ...rows(
+        QUIET_PRESETS.map((q) => ({
+          text: tick(s.quietFrom === q.from && s.quietTo === q.to, `🔇 ${q.label}`),
+          callback_data: `when:quiet:${q.from}-${q.to}`,
+        })),
+        2,
+      ),
+      [{ text: '⬅️ Назад', callback_data: 'set:back' }],
+    ],
+  };
+}
+
 /**
  * The settings screen: current state as text, every switch as a button.
  * Rendered the same way whether it is a fresh /settings or a redraw after a tap.
@@ -470,7 +527,8 @@ function settingsPanel(user: BotUser): { text: string; inlineKeyboard: InlineBut
   const on = (key: OptIn) => Boolean(user.row[key]);
   const text =
     `<b>⚙️ Налаштування</b>\n\n` +
-    `🏙 Місто — <b>${escapeHtml(cityLabel(user.city))}</b>\n\n` +
+    `🏙 Місто — <b>${escapeHtml(cityLabel(user.city))}</b>\n` +
+    `🕘 Коли — <b>${escapeHtml(describeSchedule(user.schedule))}</b>\n\n` +
     `<b>Розсилки</b>\n` +
     OPT_INS.map((o) => `${on(o.key) ? '✅' : '❌'} ${o.emoji} ${o.label} — <i>${o.hint}</i>`).join('\n') +
     `\n\nТисни кнопку, щоб змінити.`;
@@ -482,9 +540,10 @@ function settingsPanel(user: BotUser): { text: string; inlineKeyboard: InlineBut
         2,
       ),
       [
+        { text: '🕘 Коли писати', callback_data: 'set:when' },
         { text: '🏙 Змінити місто', callback_data: 'set:city' },
-        { text: '🎛 Мої смаки', callback_data: 'set:prefs' },
       ],
+      [{ text: '🎛 Мої смаки', callback_data: 'set:prefs' }],
       [{ text: '🔕 Відписатися', callback_data: 'set:stop' }],
     ],
   };
@@ -555,6 +614,16 @@ function makeReply(ctx: HandlerContext, chatId: string, replyTo?: number): Reply
 }
 
 /**
+ * How long an answer's unshown tail stays pageable. Long enough to scroll back
+ * up and keep tapping, short enough that prices and sold-out flags in it have
+ * not gone stale — and short enough that `pruneCache` keeps the table small.
+ */
+const MORE_TTL_SECONDS = 3600;
+
+/** Where one answer's leftovers live: next to the header that paginates them. */
+const pageKey = (chatId: string, messageId: number): string => `more:${chatId}:${messageId}`;
+
+/**
  * Run a search for one user and send them the result.
  * Goes through the shared city cache, so several users asking the same thing
  * cost one scrape.
@@ -606,7 +675,10 @@ export async function answerSearch(
   }
 
   const ranked = rank(collected, { query, prefs: user.prefs, tz: cfg.timezone });
-  const items = ranked.items.slice(0, opts.top ?? cfg.bot.max_results);
+  const pageSize = opts.top ?? cfg.bot.max_results;
+  const items = ranked.items.slice(0, pageSize);
+  // what the page size cut off: kept for the "показати ще" button, not dropped
+  const rest = ranked.items.slice(pageSize);
   const offTaste = ranked.dropped.filter((d) => d.why === 'not in their taste').length;
 
   const title =
@@ -623,6 +695,7 @@ export async function answerSearch(
     chatId: user.chatId,
     dryRun: ctx.dryRun,
     maxPerDay: 0,
+    more: rest.length,
     // an on-demand answer is allowed to repeat things: they asked for it
     record: !ctx.dryRun,
     // the filter has to admit when it loosened, or a short list looks like a bug
@@ -636,10 +709,90 @@ export async function answerSearch(
             ? `Показав тільки те, що тобі заходить — ще ${offTaste} події відфільтрував. /prefs, якщо це занадто вузько.`
             : undefined,
   });
+  // park the tail next to the header it belongs to, so paging through it later
+  // costs a database read rather than another crawl of somebody's site
+  if (rest.length > 0 && outcome.headerMessageId !== undefined && !outcome.chatGone) {
+    await ctx.store.putPage(
+      pageKey(user.chatId, outcome.headerMessageId),
+      { header: outcome.headerText, title, query, rest, size: pageSize },
+      MORE_TTL_SECONDS,
+    );
+  }
+
   if (failed.length && !outcome.chatGone) {
     await opts.reply(`(до речі: ${failed.join(', ')} не відповіли, тож список може бути неповним)`);
   }
   return items.length;
+}
+
+/**
+ * Hand out the next page of an answer that did not fit.
+ *
+ * Nothing is scraped and nothing is re-ranked: the events come out of the
+ * stash `answerSearch` left behind, in the order it ranked them. They go out
+ * as one message each — the same shape as a first page, so a ❤️ or an ⏰ on a
+ * late arrival resolves to its own event exactly like on an early one — and
+ * the header is rewritten to count down, losing its button on the last page.
+ *
+ * This is paging, not searching, so `hitRateLimit` is deliberately not called.
+ */
+async function showMore(
+  ctx: HandlerContext,
+  user: BotUser,
+  messageId: number | undefined,
+  fallbackHeader: string | undefined,
+  reply: Reply,
+): Promise<void> {
+  if (messageId === undefined) return;
+  const key = pageKey(user.chatId, messageId);
+  const page = await ctx.store.getPage(key);
+
+  if (!page || page.rest.length === 0) {
+    // an hour has gone by, or another process already emptied it: take the
+    // button away rather than leave one that answers "nothing left"
+    const header = page?.header ?? fallbackHeader;
+    if (header) {
+      await editMessageText(header, {
+        chatId: user.chatId,
+        messageId,
+        inlineKeyboard: [],
+        dryRun: ctx.dryRun,
+        log: ctx.log,
+      });
+    }
+    await ctx.store.dropPage(key);
+    if (!page) await reply('Той список уже застарів — попроси свіжий, і погортаємо далі.');
+    return;
+  }
+
+  const batch = page.rest.slice(0, page.size);
+  const rest = page.rest.slice(page.size);
+
+  const outcome = await deliver({
+    title: page.title,
+    query: page.query,
+    items: batch,
+    log: ctx.log,
+    store: ctx.store,
+    chatId: user.chatId,
+    dryRun: ctx.dryRun,
+    maxPerDay: 0,
+    record: !ctx.dryRun,
+    // the header is already in the chat, a few messages up, being edited
+    withHeader: false,
+  });
+  if (outcome.chatGone) return;
+
+  if (rest.length > 0) await ctx.store.putPage(key, { ...page, rest }, MORE_TTL_SECONDS);
+  else await ctx.store.dropPage(key);
+
+  await editMessageText(page.header, {
+    chatId: user.chatId,
+    messageId,
+    inlineKeyboard: rest.length > 0 ? moreButton(rest.length) : [],
+    dryRun: ctx.dryRun,
+    log: ctx.log,
+  });
 }
 
 /** The canned searches, reachable both as a command and as a quick-action button. */
@@ -858,6 +1011,12 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
  *                 onb:like:<cat> · onb:dis:<tag> · onb:budget:<n|none>
  *                 onb:unfollow:<index> · onb:next · onb:skip
  *                 onb:step:<step> · onb:taste · onb:start · onb:later
+ *                 when:hour:<0-23> · when:day:<0-6> · when:freq:<key> · when:quiet:<from>-<to>
+ *   more          the next page of an answer, from the stash behind its
+ *                 header; which answer comes from the message it is on
+ *   ev:<verb>:<item id>  a button under an event card — ev:r toggles the
+ *                 reminder, ev:no and ev:share are not built yet (📅 is a
+ *                 plain link and never calls back)
  *
  * Everything that changes a setting rewrites the panel it was tapped from, so
  * the chat keeps one settings screen rather than a stack of confirmations.
@@ -897,6 +1056,19 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
   };
   const drawPanel = async (inPlace = true) =>
     draw(settingsPanel((await getUser(ctx.store, chatId, ctx.log)) ?? user), inPlace);
+
+  if (kind === 'ev') {
+    const cut = arg.indexOf(':');
+    return handleCardButton(ctx, user, {
+      verb: cut < 0 ? arg : arg.slice(0, cut),
+      itemId: cut < 0 ? '' : arg.slice(cut + 1),
+      messageId,
+      draw,
+      reply,
+    });
+  }
+
+  if (kind === 'more') return showMore(ctx, user, messageId, cq.message?.text, reply);
 
   if (kind === 'go') {
     if (arg === 'settings') return drawPanel(false);
@@ -971,6 +1143,26 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
     return;
   }
 
+  if (kind === 'when') {
+    const cut = arg.indexOf(':');
+    const verb = cut < 0 ? arg : arg.slice(0, cut);
+    const payload = cut < 0 ? '' : arg.slice(cut + 1);
+
+    if (verb === 'hour' && (DIGEST_HOURS as readonly number[]).includes(Number(payload))) {
+      await ctx.store.setSchedule(chatId, { hour: Number(payload) });
+    } else if (verb === 'day' && DIGEST_DAYS.some((d) => d.day === Number(payload))) {
+      await ctx.store.setSchedule(chatId, { day: Number(payload) });
+    } else if (verb === 'freq' && isFrequency(payload)) {
+      await ctx.store.setSchedule(chatId, { frequency: payload });
+    } else if (verb === 'quiet') {
+      const hours = payload.split('-').map(Number);
+      const [from, to] = hours;
+      if (hours.length !== 2 || !hours.every((n) => Number.isInteger(n) && n >= 0 && n <= 23)) return;
+      await ctx.store.setSchedule(chatId, { quietFrom: from, quietTo: to });
+    }
+    return draw(schedulePanel((await getUser(ctx.store, chatId, ctx.log)) ?? user));
+  }
+
   if (kind !== 'set') return;
 
   const optIn = OPT_INS.find((o) => o.key === arg);
@@ -980,6 +1172,9 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
   }
 
   switch (arg) {
+    case 'when':
+      return draw(schedulePanel(user));
+
     case 'city':
       return draw({
         text: `<b>🏙 Змінити місто</b>\n\nЗараз у тебе <b>${escapeHtml(cityLabel(user.city))}</b>. Обери інше:`,
@@ -1010,6 +1205,68 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
     case 'back':
       return drawPanel();
   }
+}
+
+/** The buttons other tasks will fill in; they answer rather than fail. */
+const SOON: Record<string, string> = {
+  no: 'Скоро навчуся прибирати такі події зі стрічки. Поки що скажи словами, що саме не твоє — я запишу.',
+  share: 'Скоро зроблю «поділитись» одним тапом. Поки що перешли саме це повідомлення — у ньому вже є посилання.',
+};
+
+/**
+ * A tap on one of the buttons under an event card: `ev:<verb>:<item id>`.
+ *
+ * The event is resolved the way a ❤️ resolves one — through the messages
+ * table, from the chat and the message the button sits on — and the id in the
+ * callback data only picks the right one out when that message carried several.
+ *
+ * ⏰ is the same switch as the heart: it goes through `addReminder`, which
+ * un-cancels an existing row rather than adding a second one, so hearting and
+ * then tapping ⏰ leaves exactly one reminder. Tapping it again cancels.
+ */
+async function handleCardButton(
+  ctx: HandlerContext,
+  user: BotUser,
+  opts: {
+    verb: string;
+    itemId: string;
+    messageId?: number;
+    draw: (screen: { text: string; inlineKeyboard: InlineButton[][] }, inPlace?: boolean) => Promise<void>;
+    reply: Reply;
+  },
+): Promise<void> {
+  const { verb, itemId, messageId, draw, reply } = opts;
+  const chatId = user.chatId;
+
+  const items = messageId ? await ctx.store.itemsForMessage(chatId, messageId) : [];
+  const item = items.find((i) => i.id === itemId) ?? (items.length === 1 ? items[0] : undefined);
+  if (!item) {
+    return reply('Я вже не памʼятаю, про яку подію було те повідомлення — попроси свіжий список і спробуй там.');
+  }
+
+  if (verb !== 'r') {
+    const said = SOON[verb];
+    return said ? reply(said) : undefined;
+  }
+
+  const reminded = await ctx.store.hasReminder(chatId, item.id);
+  if (reminded) {
+    await ctx.store.cancelReminder(chatId, item.id);
+    ctx.log.info(`chat ${chatId} un-belled "${item.title}"`);
+  } else {
+    const outcome = await ctx.store.addReminder(chatId, item);
+    if (outcome === 'no-date') {
+      return reply(`У «${escapeHtml(item.title)}» ще немає часу початку, тож нагадування не поставлю.`);
+    }
+    const learned = await learnFromHeart(ctx, user, item);
+    ctx.log.info(`chat ${chatId} belled "${item.title}" (reminder ${outcome}${learned.tag ? `, learned ${learned.tag}` : ''})`);
+  }
+
+  // the card itself is the feedback: the same text, with ⏰ flipped over
+  return draw({
+    text: renderItem(item, { format: ctx.dryRun ? 'text' : 'html', withDay: true }),
+    inlineKeyboard: eventKeyboard(item, { reminded: !reminded }),
+  });
 }
 
 async function handleBell(ctx: HandlerContext, msg: TgMessage, chatId: string, index?: number): Promise<string> {

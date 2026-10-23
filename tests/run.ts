@@ -48,7 +48,7 @@ const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange
 const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom, pickImage } = await import('../src/normalize.ts');
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
-const { buildDigest, buildMessages, renderReminders, renderItem, renderCaption, CAPTION_LIMIT } = await import('../src/render.ts');
+const { buildDigest, buildMessages, eventKeyboard, renderReminders, renderItem, renderCaption, CAPTION_LIMIT } = await import('../src/render.ts');
 const { loadConfig, loadPrefs, resolveCity, cityLocalName } = await import('../src/config.ts');
 const { applyPrefsCommand, describePrefs } = await import('../src/prefs-engine.ts');
 const { tagLabel } = await import('../src/categories.ts');
@@ -58,9 +58,14 @@ const { resultToItem, buildQueries } = await import('../scripts/websearch.ts');
 const { collect: collectKontramarka, cardToSchema } = await import('../scripts/kontramarka.ts');
 const { Store } = await import('../src/db.ts');
 const { splitForTelegram } = await import('../src/telegram-api.ts');
+const { googleCalendarUrl } = await import('../src/calendar.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs, newUserPrefs } = await import('../src/users.ts');
 const { cacheKey } = await import('../src/cache.ts');
 const { fanout } = await import('../src/fanout.ts');
+const {
+  DIGEST_HOURS, WEEKEND_DAY, digestDueNow, inQuietHours, reminderAllowedNow, scheduleOf, defaultSchedule,
+  describeSchedule, wantsOnlyMine,
+} = await import('../src/schedule.ts');
 const { handleMessage, handleCallback, handleReaction, parseBell, isHeart, isAllowed, BOT_COMMANDS } = await import(
   '../src/bot-handlers.ts'
 );
@@ -525,7 +530,7 @@ describe('render', () => {
   });
 
   it('says what to do when there are no reminders', () => {
-    assert.ok(renderReminders([]).includes('Тапни ❤️'));
+    assert.ok(renderReminders([]).includes('⏰') && renderReminders([]).includes('❤️'));
   });
 
   it('numbers items in the order they are shown, which is what a "🔔 3" reply means', () => {
@@ -714,11 +719,92 @@ describe('messages', () => {
     assert.equal(msgs.length, 3);
   });
 
+  it('gives every event card the same four buttons, callback data and all', () => {
+    const msgs = buildMessages({ title: 'T', query, items: [earlier], format: 'text' });
+    assert.deepEqual(msgs[0]!.inlineKeyboard, undefined, 'the header is not an event');
+    const rows = msgs[1]!.inlineKeyboard!;
+    const labels = rows.flat().map((b) => b.text);
+    assert.deepEqual(labels, ['⏰ Нагадати', '👎 Не моє', '📅 В календар', '↗️ Поділитись']);
+    for (const b of rows.flat()) {
+      // 📅 is a link, every other button calls back
+      if ('url' in b) {
+        assert.equal(b.text, '📅 В календар');
+        assert.ok(b.url.startsWith('https://calendar.google.com/'), b.url);
+        continue;
+      }
+      assert.ok(b.callback_data.startsWith('ev:'), JSON.stringify(b));
+      assert.ok(Buffer.byteLength(b.callback_data) <= 64, b.callback_data);
+    }
+  });
+
+  it('leaves 📅 off an event whose date is still unknown', () => {
+    const undated = makeItem({ city: 'kharkiv', title: 'Колись', url: 'https://m/c', source: 's' })!;
+    const labels = eventKeyboard(undated).flat().map((b) => b.text);
+    assert.deepEqual(labels, ['⏰ Нагадати', '👎 Не моє', '↗️ Поділитись']);
+    assert.equal(googleCalendarUrl(undated), undefined);
+  });
+
   it('sends one message per place too', () => {
     const place = makeItem({ city: 'kharkiv', kind: 'place', title: 'Kofein Lab', url: 'https://m/e', source: 'websearch', category: 'cafe', address: 'вул. Сумська, 11' })!;
     const msgs = buildMessages({ title: 'Місця', query, items: [place], format: 'text' });
     assert.equal(msgs.length, 2);
     assert.ok(msgs[1]!.text.includes('вул. Сумська, 11'));
+  });
+});
+
+/* --------------------------------------------------------------- calendar --- */
+
+describe('calendar', () => {
+  const item = makeItem({
+    city: 'kharkiv',
+    title: 'Джаз, вино; і трохи сліз',
+    url: 'https://tickets.example/ua/jazz?id=7&utm=bot',
+    source: 's',
+    startsAt: '2026-10-23T19:30:00+03:00',
+    venue: 'Пивна дума, 2 поверх',
+    address: 'вул. Сумська, 11',
+    description: 'Квартет грає стандарти.',
+  })!;
+
+  const params = (url: string) => new URL(url).searchParams;
+
+  it('builds a TEMPLATE link with the title, the place and the ticket link', () => {
+    const url = googleCalendarUrl(item)!;
+    const u = new URL(url);
+    assert.equal(u.origin + u.pathname, 'https://calendar.google.com/calendar/render');
+    assert.equal(params(url).get('action'), 'TEMPLATE');
+    assert.equal(params(url).get('text'), 'Джаз, вино; і трохи сліз');
+    assert.equal(params(url).get('location'), 'Пивна дума, 2 поверх, вул. Сумська, 11');
+    assert.ok(params(url).get('details')!.includes('https://tickets.example/ua/jazz?id=7&utm=bot'));
+    // Ukrainian titles and their punctuation go through the encoder, not raw
+    assert.ok(!url.includes(' '), url);
+    assert.ok(url.includes('%2C'), url);
+  });
+
+  it('puts the time in as UTC, so Kyiv evenings stay Kyiv evenings', () => {
+    // 19:30 at +03:00 is 16:30 UTC
+    assert.equal(params(googleCalendarUrl(item)!).get('dates'), '20261023T163000Z/20261023T183000Z');
+  });
+
+  it('defaults the end to two hours out and says the length is a guess', () => {
+    const details = params(googleCalendarUrl(item)!).get('details')!;
+    assert.ok(details.includes('Тривалість приблизна'), details);
+  });
+
+  it('keeps a real endsAt, and then claims nothing about the length', () => {
+    const url = googleCalendarUrl({ ...item, endsAt: '2026-10-23T23:00:00+03:00' })!;
+    assert.equal(params(url).get('dates'), '20261023T163000Z/20261023T200000Z');
+    assert.ok(!params(url).get('details')!.includes('Тривалість приблизна'));
+  });
+
+  it('ignores an end that falls before the start', () => {
+    const url = googleCalendarUrl({ ...item, endsAt: '2026-10-23T10:00:00+03:00' })!;
+    assert.equal(params(url).get('dates'), '20261023T163000Z/20261023T183000Z');
+  });
+
+  it('has nothing to offer an event with no start time', () => {
+    assert.equal(googleCalendarUrl({ ...item, startsAt: undefined }), undefined);
+    assert.equal(googleCalendarUrl({ ...item, startsAt: 'колись у травні' }), undefined);
   });
 });
 
@@ -1161,10 +1247,127 @@ describe('users', () => {
   });
 });
 
+/* --------------------------------------------------------------- schedule --- */
+
+describe('schedule', () => {
+  it('reads the old cron out of a row that predates the schedule columns', () => {
+    // every pre-schedule user must keep behaving as the hard-wired cron did:
+    // Monday 09:00, plus the Thursday weekend picks
+    const legacy = scheduleOf({ chat_id: '1', city: 'kharkiv' } as never);
+    assert.deepEqual(legacy, defaultSchedule());
+    assert.equal(legacy.hour, 9);
+    assert.equal(legacy.day, 1, 'Monday');
+    assert.equal(legacy.frequency, 'twice');
+    assert.ok(digestDueNow(legacy, 'weekly', { hour: 9, weekday: 1 }));
+    assert.ok(digestDueNow(legacy, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
+  });
+
+  it('falls back to the default for a value outside the clock', () => {
+    assert.equal(scheduleOf({ digest_hour: 24 } as never).hour, 9);
+    assert.equal(scheduleOf({ digest_hour: -1 } as never).hour, 9);
+    assert.equal(scheduleOf({ digest_day: 7 } as never).day, 1);
+    assert.equal(scheduleOf({ digest_freq: 'hourly' } as never).frequency, 'twice');
+    assert.equal(scheduleOf(undefined).hour, 9);
+  });
+
+  it('matches a digest to one hour of one day and nothing else', () => {
+    const s = { ...defaultSchedule(), hour: 21, day: 5 };
+    assert.ok(digestDueNow(s, 'weekly', { hour: 21, weekday: 5 }));
+    assert.ok(!digestDueNow(s, 'weekly', { hour: 20, weekday: 5 }), 'an hour early is not their hour');
+    assert.ok(!digestDueNow(s, 'weekly', { hour: 22, weekday: 5 }), 'an hour late is not their hour');
+    assert.ok(!digestDueNow(s, 'weekly', { hour: 21, weekday: 4 }), 'right hour, wrong day');
+  });
+
+  it('holds the day boundaries: 00:00 and 23:00 are hours like any other', () => {
+    const midnight = { ...defaultSchedule(), hour: 0, day: 0 };
+    assert.ok(digestDueNow(midnight, 'weekly', { hour: 0, weekday: 0 }), 'Sunday 00:00 is a real slot');
+    assert.ok(!digestDueNow(midnight, 'weekly', { hour: 23, weekday: 6 }), 'the hour before does not roll over');
+    const lateSaturday = { ...defaultSchedule(), hour: 23, day: 6 };
+    assert.ok(digestDueNow(lateSaturday, 'weekly', { hour: 23, weekday: 6 }));
+    assert.ok(!digestDueNow(lateSaturday, 'weekly', { hour: 0, weekday: 0 }), 'and does not spill into Sunday');
+  });
+
+  it('keeps the weekend digest on Thursday whatever day the weekly one is on', () => {
+    const s = { ...defaultSchedule(), hour: 18, day: 6 };
+    assert.ok(digestDueNow(s, 'weekend', { hour: 18, weekday: WEEKEND_DAY }));
+    assert.ok(!digestDueNow(s, 'weekend', { hour: 18, weekday: 6 }), 'their own day does not move the weekend picks');
+  });
+
+  it('sends only the weekly digest to someone who asked for once a week', () => {
+    const s = { ...defaultSchedule(), frequency: 'weekly' as const };
+    assert.ok(digestDueNow(s, 'weekly', { hour: 9, weekday: 1 }));
+    assert.ok(!digestDueNow(s, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
+  });
+
+  it('leaves the timing alone for "only when there is something of mine"', () => {
+    const s = { ...defaultSchedule(), frequency: 'mine' as const };
+    assert.ok(wantsOnlyMine(s));
+    assert.ok(digestDueNow(s, 'weekly', { hour: 9, weekday: 1 }), 'it is a content rule, not a clock rule');
+    assert.ok(digestDueNow(s, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
+    assert.ok(!wantsOnlyMine(defaultSchedule()));
+  });
+
+  it('wraps a quiet window around midnight', () => {
+    const night = { quietFrom: 23, quietTo: 8 };
+    assert.ok(inQuietHours(23, night));
+    assert.ok(inQuietHours(0, night));
+    assert.ok(inQuietHours(7, night));
+    assert.ok(!inQuietHours(8, night), 'the window ends exclusively');
+    assert.ok(!inQuietHours(22, night));
+    assert.ok(!inQuietHours(12, night));
+  });
+
+  it('handles a daytime quiet window and an empty one', () => {
+    const daytime = { quietFrom: 9, quietTo: 17 };
+    assert.ok(inQuietHours(9, daytime));
+    assert.ok(inQuietHours(16, daytime));
+    assert.ok(!inQuietHours(17, daytime));
+    assert.ok(!inQuietHours(8, daytime));
+    // from === to means "switched off", not "all day"
+    for (let h = 0; h < 24; h++) assert.ok(!inQuietHours(h, { quietFrom: 0, quietTo: 0 }), `hour ${h}`);
+  });
+
+  it('only offers hours that are actually on the menu, and 9 among them', () => {
+    assert.ok(DIGEST_HOURS.includes(9), 'the default must be pickable, or it cannot be restored');
+    assert.ok(DIGEST_HOURS.every((h) => Number.isInteger(h) && h >= 0 && h <= 23));
+    assert.ok(DIGEST_HOURS.length <= 8, 'more slots means more scrapes per day — see the README');
+  });
+
+  it('never holds the 3-hour reminder for quiet hours, but does hold the 1-day one', () => {
+    const night = defaultSchedule(); // quiet 23:00–08:00
+    // a 21:00 gig whose "in ~3 hours" nudge is due at 18:00: not quiet anyway
+    assert.ok(reminderAllowedNow('3h', 18, night));
+    // a 02:00 after-party, or a reminder tick that runs at 01:00 — the whole
+    // point of the feature is that this still arrives
+    assert.ok(reminderAllowedNow('3h', 1, night), 'a late reminder is a useless reminder');
+    assert.ok(reminderAllowedNow('3h', 7, night));
+    // "tomorrow" can wait for the morning
+    assert.ok(!reminderAllowedNow('1d', 1, night));
+    assert.ok(!reminderAllowedNow('1d', 23, night));
+    assert.ok(reminderAllowedNow('1d', 8, night), 'and goes out as soon as the window ends');
+    assert.ok(reminderAllowedNow('1d', 12, night));
+    // quiet hours switched off: both go out whenever they are due
+    const always = { ...defaultSchedule(), quietFrom: 0, quietTo: 0 };
+    assert.ok(reminderAllowedNow('1d', 3, always));
+    assert.ok(reminderAllowedNow('3h', 3, always));
+  });
+
+  it('describes a schedule in Ukrainian', () => {
+    const line = describeSchedule({ ...defaultSchedule(), hour: 18, day: 5, frequency: 'weekly' });
+    assert.ok(line.includes('пʼятниця') && line.includes('18:00'), line);
+    assert.ok(describeSchedule(defaultSchedule()).includes('тихі години 23:00–08:00'));
+    assert.ok(
+      describeSchedule({ ...defaultSchedule(), quietFrom: 0, quietTo: 0 }).includes('тихі години вимкнено'),
+    );
+  });
+});
+
 /* ----------------------------------------------------------------- fanout --- */
 
 describe('fanout', () => {
   const window = { from: '2026-10-23', to: '2026-10-25', label: 'this weekend' };
+  /** Midday Thursday: outside everyone's default quiet hours, and the weekend-digest day. */
+  const noon = { hour: 12, weekday: WEEKEND_DAY };
   const standup = makeItem({ city: 'kharkiv', title: 'Антон Тимошенко. Стендап', url: 'https://x/su', source: 'concert.ua', category: 'standup', startsAt: '2026-10-24T19:00:00+03:00', priceMin: 400, status: 'scheduled' })!;
   const classical = makeItem({ city: 'kharkiv', title: 'Класична музика при свічках', url: 'https://x/cl', source: 'karabas', category: 'concert', startsAt: '2026-10-24T18:00:00+03:00', priceMin: 500, status: 'scheduled' })!;
 
@@ -1191,6 +1394,7 @@ describe('fanout', () => {
         log,
         optIn: 'weekend_digest',
         window,
+        now: noon,
         onlyChats: ['2001', '2002'],
         dryRun: true,
         title: () => 'Weekend',
@@ -1214,7 +1418,7 @@ describe('fanout', () => {
       await seed(store);
       await registerUser(store, { chatId: '2100', city: 'kharkiv' });
       await store.setOptIn('2100', 'weekend_digest', false);
-      const result = await fanout({ store, log, optIn: 'weekend_digest', window, onlyChats: ['2100'], dryRun: true, title: () => 'W' });
+      const result = await fanout({ store, log, optIn: 'weekend_digest', window, now: noon, onlyChats: ['2100'], dryRun: true, title: () => 'W' });
       assert.equal(result.users, 0);
     });
   });
@@ -1224,8 +1428,170 @@ describe('fanout', () => {
       await seed(store, [standup]);
       await registerUser(store, { chatId: '2200', city: 'kharkiv' });
       await store.recordSent('2200', [standup]);
-      const result = await fanout({ store, log, optIn: 'weekly_digest', window, onlyChats: ['2200'], dryRun: true, title: () => 'W' });
+      const result = await fanout({ store, log, optIn: 'weekly_digest', window, now: noon, onlyChats: ['2200'], dryRun: true, title: () => 'W' });
       assert.equal(result.items, 0, 'already delivered');
+    });
+  });
+
+  it('covers only the people whose hour and day it is', async () => {
+    await withTestStore(async (store) => {
+      await seed(store);
+      for (const chatId of ['2300', '2301', '2302']) await registerUser(store, { chatId, city: 'kharkiv' });
+      await store.setSchedule('2300', { hour: 9, day: 1 });
+      await store.setSchedule('2301', { hour: 18, day: 1 });
+      await store.setSchedule('2302', { hour: 9, day: 4 });
+      const chats = ['2300', '2301', '2302'];
+
+      const nine = new Set<string>();
+      const mondayNine = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true, title: () => 'W',
+        onlyChats: chats, now: { hour: 9, weekday: 1 },
+        select: (user, ranked) => (nine.add(user.chatId), ranked),
+      });
+      assert.deepEqual([...nine], ['2300'], 'only the 09:00 Monday person');
+      assert.equal(mondayNine.notNow, 2);
+
+      const six = new Set<string>();
+      await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true, title: () => 'W',
+        onlyChats: chats, now: { hour: 18, weekday: 1 },
+        select: (user, ranked) => (six.add(user.chatId), ranked),
+      });
+      assert.deepEqual([...six], ['2301'], 'the same job, three hours later, is a different mailing list');
+
+      const quiet = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true, title: () => 'W',
+        onlyChats: chats, now: { hour: 3, weekday: 1 },
+      });
+      assert.equal(quiet.users, 0, 'an hour nobody picked costs nothing');
+      assert.equal(quiet.scrapes + quiet.cacheHits, 0, 'and does not even touch the cache');
+    });
+  });
+
+  it('gives a pre-schedule user the Monday 09:00 digest they always got', async () => {
+    await withTestStore(async (store) => {
+      await seed(store);
+      // a row written before the schedule columns existed: no digest_hour at all
+      await registerUser(store, { chatId: '2400', city: 'kharkiv' });
+      await store.setSchedule('2400', {});
+      const user = (await getUser(store, '2400'))!;
+      assert.deepEqual(user.schedule, defaultSchedule());
+
+      const monday = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
+        title: () => 'W', onlyChats: ['2400'], now: { hour: 9, weekday: 1 },
+      });
+      assert.equal(monday.recipients, 1);
+      const thursday = await fanout({
+        store, log, optIn: 'weekend_digest', digest: 'weekend', window, dryRun: true, newOnly: false,
+        title: () => 'W', onlyChats: ['2400'], now: { hour: 9, weekday: WEEKEND_DAY },
+      });
+      assert.equal(thursday.recipients, 1);
+    });
+  });
+
+  it('stays quiet for "only when there is something of mine" when the list was padded', async () => {
+    await withTestStore(async (store) => {
+      // only classical is on, and this person likes stand-up: rank() can fill
+      // the list, but only by letting things they never asked for back in
+      await seed(store, [classical]);
+      await registerUser(store, { chatId: '2500', city: 'kharkiv' });
+      const user = (await getUser(store, '2500'))!;
+      await saveUserPrefs(store, user, { ...user.prefs, favourite_categories: ['standup'] });
+      await store.setSchedule('2500', { frequency: 'mine' });
+
+      const padded = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
+        title: () => 'W', onlyChats: ['2500'], now: { hour: 9, weekday: 1 },
+      });
+      assert.equal(padded.notTheirs, 1, 'nothing of theirs was on');
+      assert.equal(padded.recipients, 0, 'so they hear nothing');
+
+      // the same person, once there is enough of their own thing on to fill
+      // the list without padding it (bot.taste_floor items)
+      const standups = Array.from({ length: loadConfig().bot.taste_floor }, (_, i) =>
+        makeItem({ city: 'kharkiv', title: `Стендап №${i + 1}`, url: `https://x/su${i}`, source: 'concert.ua', category: 'standup', startsAt: '2026-10-24T19:00:00+03:00', priceMin: 300, status: 'scheduled' })!,
+      );
+      await seed(store, [...standups, classical]);
+      const theirs = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
+        title: () => 'W', onlyChats: ['2500'], now: { hour: 9, weekday: 1 },
+      });
+      assert.equal(theirs.notTheirs, 0);
+      assert.equal(theirs.recipients, 1);
+    });
+  });
+
+  it('still writes to an "only mine" user who has never said what theirs is', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, [classical]);
+      // an empty taste model gives rank() nothing to filter by, so it never
+      // pads anything and toppedUp stays 0. Staying silent here would mean a
+      // brand new user who tapped "тільки коли є моє" hears nothing, ever,
+      // with no way to tell why.
+      await registerUser(store, { chatId: '2502', city: 'kharkiv' });
+      await store.setSchedule('2502', { frequency: 'mine' });
+      const result = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
+        title: () => 'W', onlyChats: ['2502'], now: { hour: 9, weekday: 1 },
+      });
+      assert.equal(result.recipients, 1);
+      assert.equal(result.notTheirs, 0);
+    });
+  });
+
+  it('sends the same padded digest to everyone who did not ask for "only mine"', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, [classical]);
+      await registerUser(store, { chatId: '2501', city: 'kharkiv' });
+      const user = (await getUser(store, '2501'))!;
+      await saveUserPrefs(store, user, { ...user.prefs, favourite_categories: ['standup'] });
+
+      const result = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
+        title: () => 'W', onlyChats: ['2501'], now: { hour: 9, weekday: 1 },
+      });
+      assert.equal(result.recipients, 1, 'a short padded list still beats silence by default');
+      assert.equal(result.notTheirs, 0);
+    });
+  });
+
+  it('holds a non-digest job back during the recipient’s quiet hours', async () => {
+    await withTestStore(async (store) => {
+      await seed(store);
+      await registerUser(store, { chatId: '2600', city: 'kharkiv' });
+      // follow alerts and place tips keep their fixed cron time, so quiet
+      // hours are the only thing standing between them and 03:00
+      const night = await fanout({
+        store, log, optIn: 'weekly_digest', window, dryRun: true,
+        title: () => 'A', onlyChats: ['2600'], now: { hour: 3, weekday: 1 },
+      });
+      assert.equal(night.quiet, 1);
+      assert.equal(night.recipients, 0);
+
+      await store.setSchedule('2600', { quietFrom: 0, quietTo: 0 });
+      const anytime = await fanout({
+        store, log, optIn: 'weekly_digest', window, dryRun: true,
+        title: () => 'A', onlyChats: ['2600'], now: { hour: 3, weekday: 1 },
+      });
+      assert.equal(anytime.quiet, 0, 'quiet hours switched off means any hour is fine');
+      assert.equal(anytime.recipients, 1);
+    });
+  });
+
+  it('does not let quiet hours swallow a digest the person asked for', async () => {
+    await withTestStore(async (store) => {
+      await seed(store);
+      await registerUser(store, { chatId: '2700', city: 'kharkiv' });
+      // 07:00 is inside the default 23:00–08:00 window, and it is still what
+      // they picked — the hour button would otherwise look broken
+      await store.setSchedule('2700', { hour: 7, day: 1 });
+      const result = await fanout({
+        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
+        title: () => 'W', onlyChats: ['2700'], now: { hour: 7, weekday: 1 },
+      });
+      assert.equal(result.recipients, 1);
+      assert.equal(result.quiet, 0);
     });
   });
 });
@@ -1545,6 +1911,60 @@ describe('bot handlers', () => {
     });
   });
 
+  it('opens a "коли писати" screen with an hour, a day, a frequency and a quiet window', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3020', city: 'kharkiv' });
+      const panel = await say(store, '3020', '/settings');
+      assert.ok(panel.includes('(set:when)'), 'the panel needs a way in');
+      assert.ok(panel.includes('понеділок') && panel.includes('09:00'), panel.slice(0, 600));
+
+      const when = await tap(store, '3020', 'set:when');
+      assert.ok(when.includes('Коли писати'), when.slice(0, 300));
+      for (const hour of DIGEST_HOURS) assert.ok(when.includes(`(when:hour:${hour})`), `hour ${hour}`);
+      assert.ok(when.includes('(when:day:1)') && when.includes('(when:day:0)'), 'every weekday is pickable');
+      assert.ok(when.includes('(when:freq:mine)') && when.includes('(when:freq:weekly)'), when.slice(0, 900));
+      assert.ok(when.includes('(when:quiet:23-8)') && when.includes('(when:quiet:0-0)'), 'including switching it off');
+    });
+  });
+
+  it('picks an hour, a day and a frequency by button', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3021', city: 'kharkiv' });
+      const redraw = await tap(store, '3021', 'when:hour:18');
+      assert.equal((await store.getUser('3021'))?.digest_hour, 18);
+      assert.ok(redraw.includes('edit 42'), 'the screen is rewritten, not reposted');
+      assert.ok(redraw.includes('✅ 18:00'), redraw.slice(0, 600));
+
+      await tap(store, '3021', 'when:day:6');
+      assert.equal((await store.getUser('3021'))?.digest_day, 6);
+
+      await tap(store, '3021', 'when:freq:mine');
+      assert.equal((await store.getUser('3021'))?.digest_freq, 'mine');
+
+      await tap(store, '3021', 'when:quiet:0-0');
+      const off = (await store.getUser('3021'))!;
+      assert.equal(off.quiet_from, 0);
+      assert.equal(off.quiet_to, 0);
+
+      // and the schedule is what the fan-out will read back
+      assert.deepEqual((await getUser(store, '3021'))!.schedule, {
+        hour: 18, day: 6, quietFrom: 0, quietTo: 0, frequency: 'mine',
+      });
+    });
+  });
+
+  it('ignores an hour that is not on the menu', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3030', city: 'kharkiv' });
+      await tap(store, '3030', 'when:hour:4');
+      assert.equal((await store.getUser('3030'))?.digest_hour, 9, 'a hand-crafted callback changes nothing');
+      await tap(store, '3030', 'when:day:9');
+      assert.equal((await store.getUser('3030'))?.digest_day, 1);
+      await tap(store, '3030', 'when:freq:hourly');
+      assert.equal((await store.getUser('3030'))?.digest_freq, 'twice');
+    });
+  });
+
   it('changes the city from the panel', async () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3012', city: 'kharkiv' });
@@ -1822,6 +2242,204 @@ describe('the heart', () => {
       const reply = await react(store, '3208', 783);
       assert.ok(reply.includes('немає часу початку'), reply.slice(0, 300));
       assert.equal((await store.listReminders('3208')).length, 0);
+    });
+  });
+});
+
+/* ------------------------------------------------------- the card buttons --- */
+
+describe('card buttons', () => {
+  /** A tap on a button under the event card we recorded as message 42. */
+  async function tapCard(store: StoreType, chatId: string, verb: string, itemId: string): Promise<string> {
+    return captureOutput(() =>
+      handleCallback({ store, log, dryRun: true }, {
+        id: 'cb',
+        data: `ev:${verb}:${itemId}`,
+        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' } },
+        from: { id: Number(chatId) },
+      } as never),
+    );
+  }
+
+  const gig = () =>
+    makeItem({ city: 'kharkiv', title: 'Вечір імпровізації', url: 'https://b/1', source: 's', category: 'standup', startsAt: '2026-11-01T19:00:00+02:00' })!;
+
+  it('sets the reminder when ⏰ is tapped, and redraws the card', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3401', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3401', 42, [item]);
+      const out = await tapCard(store, '3401', 'r', item.id);
+      const rows = await store.listReminders('3401');
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.title, 'Вечір імпровізації');
+      assert.ok(out.includes('edit 42'), 'the card is rewritten in place');
+      assert.ok(out.includes('⏰ Не нагадувати'), out.slice(-600));
+    });
+  });
+
+  it('cancels the reminder when ⏰ is tapped again', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3402', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3402', 42, [item]);
+      await tapCard(store, '3402', 'r', item.id);
+      const out = await tapCard(store, '3402', 'r', item.id);
+      assert.equal((await store.listReminders('3402')).length, 0);
+      assert.ok(out.includes('⏰ Нагадати'), out.slice(-600));
+    });
+  });
+
+  it('shares one reminder row with the ❤️, never a second', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3403', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3403', 42, [item]);
+      await captureOutput(() =>
+        handleReaction({ store, log, dryRun: true }, {
+          chat: { id: '3403', type: 'private' },
+          message_id: 42,
+          user: { id: 3403 },
+          old_reaction: [],
+          new_reaction: [{ type: 'emoji', emoji: '❤️' }],
+        } as never),
+      );
+      const hearted = await store.listReminders('3403');
+      assert.equal(hearted.length, 1);
+
+      // ⏰ is the same switch: it reads the heart's state and turns it off
+      await tapCard(store, '3403', 'r', item.id);
+      assert.equal((await store.listReminders('3403')).length, 0);
+
+      // and back on — into the very same row, not a duplicate
+      await tapCard(store, '3403', 'r', item.id);
+      const again = await store.listReminders('3403');
+      assert.equal(again.length, 1);
+      assert.equal(again[0]!.id, hearted[0]!.id);
+    });
+  });
+
+  it('answers the buttons that are not built yet without breaking', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3404', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3404', 42, [item]);
+      for (const verb of ['no', 'share']) {
+        const out = await tapCard(store, '3404', verb, item.id);
+        assert.ok(out.includes('Скоро'), `${verb}: ${out.slice(0, 200)}`);
+      }
+      assert.equal((await store.listReminders('3404')).length, 0);
+    });
+  });
+
+  it('says it has forgotten a card it can no longer resolve', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3405', city: 'kharkiv' });
+      const out = await tapCard(store, '3405', 'r', 'deadbeef');
+      assert.ok(out.trim().length > 0, 'a tap always gets an answer');
+      assert.equal((await store.listReminders('3405')).length, 0);
+    });
+  });
+});
+
+/* ------------------------------------------------------------- показати ще --- */
+
+describe('показати ще', () => {
+  const query = parseRequest('', { prefs, base: '2026-10-20', from: '2026-10-23', to: '2026-10-25' });
+
+  /** Five ranked events nobody has seen yet, in the order rank() put them. */
+  const tail = (n: number) =>
+    [...Array(n)].map(
+      (_, i) =>
+        makeItem({
+          city: 'kharkiv',
+          title: `Подія ${i + 1}`,
+          url: `https://m/${i + 1}`,
+          source: 's',
+          category: 'standup',
+          startsAt: `2026-10-23T${10 + i}:00:00+03:00`,
+        })!,
+    );
+
+  async function tapMore(store: StoreType, chatId: string, text?: string): Promise<string> {
+    return captureOutput(() =>
+      handleCallback({ store, log, dryRun: true }, {
+        id: 'cb',
+        data: 'more',
+        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' }, ...(text ? { text } : {}) },
+        from: { id: Number(chatId) },
+      } as never),
+    );
+  }
+
+  const seed = async (store: StoreType, chatId: string, n: number, size: number) => {
+    await registerUser(store, { chatId, city: 'kharkiv' });
+    await store.putPage(`more:${chatId}:42`, { header: '🗓 Харків', title: '🗓 Харків', query, rest: tail(n), size }, 3600);
+  };
+
+  it('offers the button on the header only when something was left over', () => {
+    const items = tail(2);
+    const withRest = buildMessages({ title: 'T', query, items, format: 'text', more: 7 });
+    assert.deepEqual(withRest[0]!.inlineKeyboard, [[{ text: '📥 Показати ще 7', callback_data: 'more' }]]);
+    const whole = buildMessages({ title: 'T', query, items, format: 'text', more: 0 });
+    assert.equal(whole[0]!.inlineKeyboard, undefined, 'nothing left over, no button');
+  });
+
+  it('hands out the next page, one message per event, and counts the header down', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, '3501', 5, 2);
+
+      const first = await tapMore(store, '3501');
+      assert.ok(first.includes('Подія 1') && first.includes('Подія 2'), first.slice(0, 400));
+      assert.ok(!first.includes('Подія 3'), 'one page at a time');
+      assert.equal(first.split('──────── to chat 3501').length - 1, 2, 'each event is its own message');
+      assert.ok(first.includes('edit 42') && first.includes('📥 Показати ще 3'), first.slice(0, 600));
+
+      const second = await tapMore(store, '3501');
+      assert.ok(second.includes('Подія 3') && second.includes('Подія 4'), second.slice(0, 400));
+      assert.ok(!second.includes('Подія 1') && !second.includes('Подія 2'), 'nothing is shown twice');
+      assert.ok(second.includes('📥 Показати ще 1'), second.slice(0, 600));
+    });
+  });
+
+  it('takes the button away with the last page, and forgets the stash', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, '3502', 3, 3);
+      const out = await tapMore(store, '3502');
+      assert.ok(out.includes('Подія 3'), out.slice(0, 400));
+      assert.ok(out.includes('edit 42'), 'the header is redrawn');
+      assert.ok(!out.includes('Показати ще'), 'the last page leaves no button behind');
+      assert.equal(await store.getPage('more:3502:42'), null, 'the stash is cleaned up, not left to expire');
+    });
+  });
+
+  it('keeps the event buttons on a page that arrived late', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, '3503', 1, 5);
+      const out = await tapMore(store, '3503');
+      const id = tail(1)[0]!.id;
+      assert.ok(out.includes(`ev:r:${id}`), 'a late arrival carries its own ⏰, so a reminder still works');
+    });
+  });
+
+  it('does not spend a search from the hourly budget', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, '3504', 4, 2);
+      const before = await store.hitRateLimit('3504', 100);
+      await tapMore(store, '3504');
+      await tapMore(store, '3504');
+      const after = await store.hitRateLimit('3504', 100);
+      assert.equal(after.used, before.used + 1, 'paging is not searching; only these two probes count');
+    });
+  });
+
+  it('drops the button when the stash has expired', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3505', city: 'kharkiv' });
+      const out = await tapMore(store, '3505', '🗓 Харків');
+      assert.ok(out.includes('edit 42'), 'the stale button goes away');
+      assert.ok(!out.includes('Показати ще'), out.slice(0, 400));
+      assert.ok(out.includes('застарів'), out.slice(0, 400));
     });
   });
 });

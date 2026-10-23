@@ -3,8 +3,13 @@
 #
 # THE BOT ITSELF IS NOT A CRON JOB. Run `npx tsx scripts/bot.ts` as a long-lived
 # service (systemd / pm2 / launchd — see the README) so replies are instant.
-# These entries are the scheduled fan-outs: every one of them covers every
-# subscribed user, scraping each city once.
+# These entries are the scheduled fan-outs. The two digest jobs TICK EVERY HOUR
+# and deliver to whoever asked for that hour: the schedule lives on each user
+# (digest_hour / digest_day / digest_freq, set from /settings → 🕘 Коли писати),
+# not in this file. A tick that matches nobody exits without scraping anything.
+#
+# Do not "optimise" these back to `0 9 * * 1`: that would pin everybody to one
+# hour again and quietly ignore the hour they picked.
 #
 # Install:  copy these entries into your Hermes cron file (~/.hermes/cron.yaml)
 #           or add them one by one with the CLI (see the bottom of this file).
@@ -20,21 +25,30 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 cron:
-  # ── 1. Monday 09:00 — "this week in <their city>", for every subscriber ───
+  # ── 1. Every hour — "this week in <their city>", at each person's own hour ─
+  #
+  # Only the users whose digest_hour is this hour and whose digest_day is today
+  # are covered; the other 23 ticks are a no-op for them. Hours are limited to
+  # a six-slot menu (07, 09, 12, 15, 18, 21) on purpose — see the README for
+  # what a free choice of all 24 would cost the source sites.
   - name: events-finder-weekly-digest
-    schedule: "0 9 * * 1"
+    schedule: "0 * * * *"
     timezone: Europe/Kyiv
     cwd: ~/.hermes/skills/events-finder
     command: npx tsx scripts/digest.ts --week
-    description: This week's events, per user, in their own city.
+    description: This week's events, per user, in their own city, at their own hour.
 
-  # ── 2. Thursday 18:00 — weekend picks, top 5 ──────────────────────────────
+  # ── 2. Every hour on Thursday — weekend picks, top 5 ──────────────────────
+  #
+  # The weekend digest is about Fri–Sun, so the day is fixed; the user picks
+  # only the hour. `scripts/digest.ts --weekend` enforces the Thursday itself,
+  # so the `* * 4` here is belt and braces.
   - name: events-finder-weekend-picks
-    schedule: "0 18 * * 4"
+    schedule: "0 * * * 4"
     timezone: Europe/Kyiv
     cwd: ~/.hermes/skills/events-finder
     command: npx tsx scripts/digest.ts --weekend --top 5
-    description: The five best things this weekend (Fri–Sun), per user.
+    description: The five best things this weekend (Fri–Sun), per user, at their own hour.
 
   # ── 3. Every 6 hours — follow-list watch, alert immediately ───────────────
   #
@@ -92,6 +106,8 @@ cron:
     cwd: ~/.hermes/skills/events-finder
     command: npx tsx scripts/reminders.ts
     description: Fire everyone's due reminders (1 day and 3 hours before).
+    # The "in ~3 hours" reminder ignores quiet hours — held until morning it
+    # would be worthless. The "tomorrow" one waits for the window to end.
 
   # ── 6. OPTIONAL — only if you are NOT running scripts/bot.ts as a service ─
   #
@@ -109,8 +125,8 @@ cron:
 # CLI equivalent (if your Hermes build prefers `hermes cron add`):
 #
 #   cd ~/.hermes/skills/events-finder
-#   hermes cron add events-finder-weekly-digest  --schedule "0 9 * * 1"    --tz Europe/Kyiv --cwd "$PWD" --command "npx tsx scripts/digest.ts --week"
-#   hermes cron add events-finder-weekend-picks  --schedule "0 18 * * 4"   --tz Europe/Kyiv --cwd "$PWD" --command "npx tsx scripts/digest.ts --weekend --top 5"
+#   hermes cron add events-finder-weekly-digest  --schedule "0 * * * *"    --tz Europe/Kyiv --cwd "$PWD" --command "npx tsx scripts/digest.ts --week"
+#   hermes cron add events-finder-weekend-picks  --schedule "0 * * * 4"    --tz Europe/Kyiv --cwd "$PWD" --command "npx tsx scripts/digest.ts --weekend --top 5"
 #   hermes cron add events-finder-follow-alerts  --schedule "0 */6 * * *"  --tz Europe/Kyiv --cwd "$PWD" --command "npx tsx scripts/follows.ts"
 #   hermes cron add events-finder-places         --schedule "0 11 * * 0"   --tz Europe/Kyiv --cwd "$PWD" --command "npx tsx scripts/places.ts"
 #   hermes cron add events-finder-reminders      --schedule "*/15 * * * *" --tz Europe/Kyiv --cwd "$PWD" --command "npx tsx scripts/reminders.ts"
@@ -121,15 +137,17 @@ cron:
 # Plain crontab fallback (no Hermes cron):
 #
 #   CRON_TZ=Europe/Kyiv
-#   0  9    * * 1  cd ~/.hermes/skills/events-finder && npx tsx scripts/digest.ts --week             >> ~/.hermes/data/events-finder/logs/cron.log 2>&1
-#   0  18   * * 4  cd ~/.hermes/skills/events-finder && npx tsx scripts/digest.ts --weekend --top 5  >> ~/.hermes/data/events-finder/logs/cron.log 2>&1
+#   0  *    * * *  cd ~/.hermes/skills/events-finder && npx tsx scripts/digest.ts --week             >> ~/.hermes/data/events-finder/logs/cron.log 2>&1
+#   0  *    * * 4  cd ~/.hermes/skills/events-finder && npx tsx scripts/digest.ts --weekend --top 5  >> ~/.hermes/data/events-finder/logs/cron.log 2>&1
 #   0  */6  * * *  cd ~/.hermes/skills/events-finder && npx tsx scripts/follows.ts                   >> ~/.hermes/data/events-finder/logs/cron.log 2>&1
 #   0  11   * * 0  cd ~/.hermes/skills/events-finder && npx tsx scripts/places.ts                    >> ~/.hermes/data/events-finder/logs/cron.log 2>&1
 #   */15 *  * * *  cd ~/.hermes/skills/events-finder && npx tsx scripts/reminders.ts                 >> ~/.hermes/data/events-finder/logs/cron.log 2>&1
 #
 # Rehearse every job before trusting it (sends nothing):
 #
-#   npx tsx scripts/digest.ts --week --dry-run
+#   npx tsx scripts/digest.ts --week --dry-run                 # whoever's hour it is now
+#   npx tsx scripts/digest.ts --week --dry-run --hour 18 --day 1   # rehearse a slot hours away
+#   npx tsx scripts/digest.ts --week --dry-run --chat 123456789 --now  # ignore the schedule entirely
 #   npx tsx scripts/digest.ts --weekend --top 5 --dry-run
 #   npx tsx scripts/follows.ts --dry-run
 #   npx tsx scripts/places.ts --dry-run

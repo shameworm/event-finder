@@ -4,7 +4,8 @@ import { cityLabel, loadConfig } from './config.ts';
 import { priceText } from './normalize.ts';
 import { dayLabel, localDate, localTime, truncate } from './util.ts';
 import { groupByDay } from './rank.ts';
-import { CAPTION_LIMIT, escapeHtml } from './telegram-api.ts';
+import { googleCalendarUrl } from './calendar.ts';
+import { CAPTION_LIMIT, escapeHtml, type InlineButton } from './telegram-api.ts';
 
 export { CAPTION_LIMIT };
 
@@ -25,9 +26,9 @@ export const countPlaces = (n: number): string => `${n} ${plural(n, ['місце
 
 export const countReminders = (n: number): string => `${n} ${plural(n, ['нагадування', 'нагадування', 'нагадувань'])}`;
 
-export const REMINDER_HINT = 'Тапни ❤️ на події — нагадаю за день і за 3 години до початку.';
-export const NO_REMINDERS = 'Нагадувань поки немає. Тапни ❤️ на події — і я поставлю.';
-export const CANCEL_HINT = 'Знімеш ❤️ з повідомлення про подію — скасую нагадування.';
+export const REMINDER_HINT = 'Тисни ⏰ під подією або ❤️ на ній — нагадаю за день і за 3 години до початку.';
+export const NO_REMINDERS = 'Нагадувань поки немає. Тисни ⏰ під подією або ❤️ на ній — і я поставлю.';
+export const CANCEL_HINT = 'Тисни ⏰ під подією ще раз або знімеш ❤️ — скасую нагадування.';
 export const PLACES_HINT = 'Скажи, як тобі — і я підлаштую підказки.';
 export const NOTHING_FOUND = 'Цього разу нічого не знайшлося. Спробуй ширший період або інше місто.';
 
@@ -220,6 +221,8 @@ export interface DigestOptions {
   /** Number items continuously (console output only; Telegram gets one message each). */
   numbered?: boolean;
   changeNotes?: Map<string, string>;
+  /** How many ranked events did not fit; puts a "показати ще" button on the header. */
+  more?: number;
 }
 
 /**
@@ -294,6 +297,8 @@ export interface OutgoingMessage {
   text: string;
   /** What this message is about: exactly one item for an event, none for the header. */
   items: Item[];
+  /** The buttons under an event card; the header has none. */
+  inlineKeyboard?: InlineButton[][];
   /**
    * Poster to send this card as a photo, with `caption` under it. Both are set
    * together, or neither is; `text` is always the full message-sized card, so a
@@ -301,6 +306,49 @@ export interface OutgoingMessage {
    */
   image?: string;
   caption?: string;
+}
+
+/**
+ * The buttons under one event card.
+ *
+ * `callback_data` is `ev:<verb>:<item id>` — three bytes of prefix plus a
+ * 40-character sha1, which leaves room inside Telegram's 64-byte limit. The
+ * item is still resolved from the messages table (chat + message id), the same
+ * path a ❤️ takes; the id in the data is what tells a tap which card it came
+ * from when the message carried more than one.
+ *
+ * ⏰ is a toggle and says which way it is pointing, like a heart you can see.
+ *
+ * 📅 is the one button that never calls back: it is a link straight to Google's
+ * pre-filled form (see src/calendar.ts). It is also the one button that can be
+ * missing — "дата уточнюється" is nothing a calendar can hold, so an event
+ * without a start time gets no 📅 instead of a 📅 that apologises.
+ */
+export function eventKeyboard(item: Item, opts: { reminded?: boolean } = {}): InlineButton[][] {
+  const ev = (verb: string) => `ev:${verb}:${item.id}`;
+  const google = googleCalendarUrl(item);
+  return [
+    [
+      { text: opts.reminded ? '⏰ Не нагадувати' : '⏰ Нагадати', callback_data: ev('r') },
+      { text: '👎 Не моє', callback_data: ev('no') },
+    ],
+    [
+      ...(google ? [{ text: '📅 В календар', url: google }] : []),
+      { text: '↗️ Поділитись', callback_data: ev('share') },
+    ],
+  ];
+}
+
+/**
+ * The header's own button: the rest of the ranked list, one tap away.
+ *
+ * `callback_data` is the bare `more` — which message to continue comes from
+ * the callback itself (chat + the header's message id), so nothing has to be
+ * squeezed into Telegram's 64 bytes and an old button can never point at
+ * somebody else's page.
+ */
+export function moreButton(rest: number): InlineButton[][] {
+  return [[{ text: `📥 Показати ще ${rest}`, callback_data: 'more' }]];
 }
 
 /**
@@ -344,7 +392,7 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
   const header = `${bold(opts.title, format)}\n${plain(facts, format)}\n\n${plain(tail, format)}`;
 
   return [
-    { text: header, items: [] },
+    { text: header, items: [], ...(opts.more && opts.more > 0 ? { inlineKeyboard: moreButton(opts.more) } : {}) },
     ...kept.map((item) => {
       const itemOpts: RenderItemOptions = {
         format,
@@ -356,6 +404,8 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
       return {
         text: renderItem(item, itemOpts),
         items: [item],
+        // places have no start time to remind about and no ticket to share
+        ...(item.kind === 'event' ? { inlineKeyboard: eventKeyboard(item) } : {}),
         ...(item.image && caption ? { image: item.image, caption } : {}),
       };
     }),

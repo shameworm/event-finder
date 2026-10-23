@@ -24,6 +24,7 @@ import { cityLabel, loadPrefs, prefsFile, savePrefs } from '../src/config.ts';
 import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore } from '../src/db.ts';
+import { describeSchedule, scheduleOf } from '../src/schedule.ts';
 import { applyPrefsCommand, describePrefs } from '../src/prefs-engine.ts';
 import { getUser, ownerChatId, registerUser, saveUserPrefs } from '../src/users.ts';
 
@@ -73,7 +74,8 @@ await withStore(async (store) => {
       process.stdout.write(
         `${r.chat_id.padEnd(14)} ${cityLabel(r.city).padEnd(16)} ` +
           `${r.username ? '@' + r.username : '—'}  ` +
-          `[week:${r.weekly_digest} weekend:${r.weekend_digest} follows:${r.follow_alerts} places:${r.place_tips}]\n`,
+          `[week:${r.weekly_digest} weekend:${r.weekend_digest} follows:${r.follow_alerts} places:${r.place_tips}] ` +
+          `${describeSchedule(scheduleOf(r))}\n`,
       );
     }
     return;
