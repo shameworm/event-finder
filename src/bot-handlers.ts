@@ -10,14 +10,14 @@ import type { OptIn, Store } from './db.ts';
 import type { Logger } from './log.ts';
 import type { TgCallbackQuery, TgMessage, TgReactionUpdate } from './schemas.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
-import { answerCallbackQuery, deleteMessage, editMessageText, escapeHtml, sendMessage, type InlineButton } from './telegram-api.ts';
+import { answerCallbackQuery, deleteMessage, editMessageCaption, editMessageText, escapeHtml, sendMessage, type InlineButton } from './telegram-api.ts';
 import { applyPrefsCommand, applyThumbsDown, describePrefs, favouritesFromList } from './prefs-engine.ts';
 import { CATEGORY_LABEL, DISLIKE_SUGGESTIONS, EMOJI, EVENT_CATEGORIES, canonicalTag, tagLabel } from './categories.ts';
 import { parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
-import { countEvents, eventKeyboard, moreButton, renderItem, renderReminders } from './render.ts';
+import { countEvents, eventKeyboard, moreButton, renderCaption, renderItem, renderReminders } from './render.ts';
 import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
 import { DIGEST_DAYS, DIGEST_HOURS, FREQUENCIES, describeSchedule, hourLabel, isFrequency } from './schedule.ts';
 import { WORD_END, addDays, normText, today } from './util.ts';
@@ -1048,13 +1048,11 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
   /** Redraw the settings screen with whatever is in the database now. */
   const draw = async (screen: { text: string; inlineKeyboard: InlineButton[][] }, inPlace = true) => {
     if (inPlace && messageId) {
-      await editMessageText(screen.text, {
-        chatId,
-        messageId,
-        inlineKeyboard: screen.inlineKeyboard,
-        dryRun: ctx.dryRun,
-        log: ctx.log,
-      });
+      // a poster card went out as a photo, so its words are a caption —
+      // editMessageText on it is Bad Request: "there is no text in the message"
+      const opts = { chatId, messageId, inlineKeyboard: screen.inlineKeyboard, dryRun: ctx.dryRun, log: ctx.log };
+      if (cq.message?.photo?.length) await editMessageCaption(screen.text, opts);
+      else await editMessageText(screen.text, opts);
     } else {
       await reply(screen.text, { inlineKeyboard: screen.inlineKeyboard });
     }
@@ -1068,6 +1066,7 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
       verb: cut < 0 ? arg : arg.slice(0, cut),
       itemId: cut < 0 ? '' : arg.slice(cut + 1),
       messageId,
+      photo: (cq.message?.photo?.length ?? 0) > 0,
       draw,
       reply,
     });
@@ -1235,6 +1234,8 @@ async function handleCardButton(
     verb: string;
     itemId: string;
     messageId?: number;
+    /** The card went out as a photo, so its redraw has to be a caption. */
+    photo?: boolean;
     draw: (screen: { text: string; inlineKeyboard: InlineButton[][] }, inPlace?: boolean) => Promise<void>;
     reply: Reply;
   },
@@ -1276,11 +1277,20 @@ async function handleCardButton(
     ctx.log.info(`chat ${chatId} belled "${item.title}" (reminder ${outcome}${learned.tag ? `, learned ${learned.tag}` : ''})`);
   }
 
-  // the card itself is the feedback: the same text, with ⏰ flipped over
-  return draw({
-    text: renderItem(item, { format: ctx.dryRun ? 'text' : 'html', withDay: true }),
-    inlineKeyboard: eventKeyboard(item, { reminded: !reminded }),
-  });
+  // the card itself is the feedback: the same text, with ⏰ flipped over —
+  // as a caption under the poster when the card is a photo, where Telegram
+  // allows 1024 characters, not the 4096 a message gets
+  const itemOpts = { format: ctx.dryRun ? ('text' as const) : ('html' as const), withDay: true };
+  const keyboard = eventKeyboard(item, { reminded: !reminded });
+  if (opts.photo) {
+    const caption = renderCaption(item, itemOpts);
+    // renderCaption gives up only on an absurd URL; rather than edit the photo
+    // into a caption Telegram will reject, hand over a card of its own
+    return caption
+      ? draw({ text: caption, inlineKeyboard: keyboard })
+      : draw({ text: renderItem(item, itemOpts), inlineKeyboard: keyboard }, false);
+  }
+  return draw({ text: renderItem(item, itemOpts), inlineKeyboard: keyboard });
 }
 
 async function handleBell(ctx: HandlerContext, msg: TgMessage, chatId: string, index?: number): Promise<string> {

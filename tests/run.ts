@@ -2859,12 +2859,18 @@ describe('the heart', () => {
 
 describe('card buttons', () => {
   /** A tap on a button under the event card we recorded as message 42. */
-  async function tapCard(store: StoreType, chatId: string, verb: string, itemId: string): Promise<string> {
+  async function tapCard(store: StoreType, chatId: string, verb: string, itemId: string, photo = false): Promise<string> {
     return captureOutput(() =>
       handleCallback({ store, log, dryRun: true }, {
         id: 'cb',
         data: `ev:${verb}:${itemId}`,
-        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' } },
+        message: {
+          message_id: 42,
+          date: Math.floor(Date.now() / 1000),
+          chat: { id: chatId, type: 'private' },
+          // a poster card reaches Telegram as a photo: no `text` at all
+          ...(photo ? { photo: [{ file_id: 'f', file_unique_id: 'u', width: 1, height: 1 }] } : {}),
+        },
         from: { id: Number(chatId) },
       } as never),
     );
@@ -2883,6 +2889,22 @@ describe('card buttons', () => {
       assert.equal(rows.length, 1);
       assert.equal(rows[0]!.title, 'Вечір імпровізації');
       assert.ok(out.includes('edit 42'), 'the card is rewritten in place');
+      assert.ok(out.includes('⏰ Не нагадувати'), out.slice(-600));
+    });
+  });
+
+  it('redraws a poster card as a caption edit, not a doomed text edit', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3411', city: 'kharkiv' });
+      // the bug behind this test: a photo message has no `text`, so
+      // editMessageText on it is Bad Request "there is no text in the message
+      // to edit" — the ⏰ appeared to do nothing at all
+      const item = { ...gig(), image: 'https://img/p.jpg' };
+      await store.recordMessage('3411', 42, [item]);
+      const out = await tapCard(store, '3411', 'r', item.id, true);
+      assert.equal((await store.listReminders('3411')).length, 1, 'the reminder was never the problem');
+      assert.ok(out.includes('caption edit 42'), out.slice(-600));
+      assert.ok(!out.includes('──── edit 42'), 'a photo must not be sent editMessageText');
       assert.ok(out.includes('⏰ Не нагадувати'), out.slice(-600));
     });
   });

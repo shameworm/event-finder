@@ -279,6 +279,40 @@ export async function editMessageText(
 }
 
 /**
+ * The same rewrite for a message Telegram took as a photo: its words live in
+ * the *caption*, and `editMessageText` on one of those fails with "there is no
+ * text in the message to edit" — every poster card in a digest is one of these.
+ */
+export async function editMessageCaption(
+  text: string,
+  opts: { chatId: string; messageId: number; inlineKeyboard?: InlineButton[][]; dryRun?: boolean; log?: Logger },
+): Promise<void> {
+  if (opts.dryRun) {
+    process.stdout.write(`\n──────── caption edit ${opts.messageId} in chat ${opts.chatId} ────────\n${text}\n`);
+    printButtons(opts.inlineKeyboard);
+    return;
+  }
+  const cfg = loadConfig();
+  try {
+    await call(
+      'editMessageCaption',
+      {
+        chat_id: opts.chatId,
+        message_id: opts.messageId,
+        caption: text,
+        parse_mode: cfg.telegram.parse_mode,
+        ...(opts.inlineKeyboard ? { reply_markup: { inline_keyboard: opts.inlineKeyboard } } : {}),
+      },
+      TgMessageSchema,
+    );
+  } catch (err) {
+    // same as editMessageText: a double tap produces an identical caption
+    if (err instanceof TelegramError && (err.description ?? '').includes('message is not modified')) return;
+    throw err;
+  }
+}
+
+/**
  * Take a message back — used for the "⏳ Шукаю…" placeholder once the answer it
  * was standing in for has arrived.
  *

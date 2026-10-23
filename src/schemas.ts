@@ -193,6 +193,10 @@ export const TgMessageSchema = z
     date: z.number().int(),
     chat: z.object({ id: z.union([z.number(), z.string()]), type: z.string().optional() }).loose(),
     text: z.string().optional(),
+    /** A poster card arrives as a photo: its words are here, not in `text`. */
+    caption: z.string().optional(),
+    /** Present exactly when the message is a photo; the sizes, which we never read. */
+    photo: z.array(z.unknown()).optional(),
     reply_to_message: z.object({ message_id: z.number().int(), text: z.string().optional() }).loose().optional(),
     from: z.object({ id: z.number(), username: z.string().optional() }).loose().optional(),
   })
