@@ -377,11 +377,17 @@ npx tsx scripts/search.ts "stand-up in Lviv this weekend"    # answer by hand
   availability changed, and the line says which (`🔁 нова дата`).
 - **Card buttons**: every event message carries `⏰ Нагадати`, `👎 Не моє`,
   `📅 В календар` and `↗️ Поділитись` (`ev:<verb>:<item id>` callback data).
-  Only ⏰ is wired up so far; the other three answer "скоро" for now.
+  ⏰, 👎 and 📅 are wired up; ↗️ answers "скоро" for now.
 - **Reminders** are set by tapping ⏰ under an event message or ❤️ on it, and
   cancelled the same way — both go through the one reminder row, so a ❤️ then a
   ⏰ never leaves two. Typing `нагадай` still works for anyone who does neither.
   Either one also adds that event's category to the person's favourites.
+- **👎 Не моє** is the mirror of the ❤️: the event's category loses a point in
+  the `taste` tally, and at `-3` it moves from favourites to dislikes; the act
+  on stage goes to `blocked_acts`, a stop list that outranks `follow`. The reply
+  says what changed ("більше не показуватиму стендап"), and `/prefs` lists both
+  what the bot likes and what it has stopped showing. `люблю <категорія>` or
+  `слідкуй за <ім'я>` undoes either half.
 - **`/stats`** in the chat (owner only) shows user counts and table sizes.
 
 ### Being a good citizen
