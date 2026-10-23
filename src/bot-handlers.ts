@@ -17,7 +17,7 @@ import { parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
-import { countEvents, renderReminders } from './render.ts';
+import { countEvents, eventKeyboard, renderItem, renderReminders } from './render.ts';
 import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
 import { WORD_END, addDays, normText, today } from './util.ts';
 
@@ -858,6 +858,8 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
  *                 onb:like:<cat> · onb:dis:<tag> · onb:budget:<n|none>
  *                 onb:unfollow:<index> · onb:next · onb:skip
  *                 onb:step:<step> · onb:taste · onb:start · onb:later
+ *   ev:<verb>:<item id>  a button under an event card — ev:r toggles the
+ *                 reminder, ev:no · ev:cal · ev:share are not built yet
  *
  * Everything that changes a setting rewrites the panel it was tapped from, so
  * the chat keeps one settings screen rather than a stack of confirmations.
@@ -897,6 +899,17 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
   };
   const drawPanel = async (inPlace = true) =>
     draw(settingsPanel((await getUser(ctx.store, chatId, ctx.log)) ?? user), inPlace);
+
+  if (kind === 'ev') {
+    const cut = arg.indexOf(':');
+    return handleCardButton(ctx, user, {
+      verb: cut < 0 ? arg : arg.slice(0, cut),
+      itemId: cut < 0 ? '' : arg.slice(cut + 1),
+      messageId,
+      draw,
+      reply,
+    });
+  }
 
   if (kind === 'go') {
     if (arg === 'settings') return drawPanel(false);
@@ -1010,6 +1023,69 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
     case 'back':
       return drawPanel();
   }
+}
+
+/** The three buttons other tasks will fill in; they answer rather than fail. */
+const SOON: Record<string, string> = {
+  no: 'Скоро навчуся прибирати такі події зі стрічки. Поки що скажи словами, що саме не твоє — я запишу.',
+  cal: 'Скоро віддам подію файлом для календаря. Поки що ⏰ нагадаю сам — за добу та за 3 години.',
+  share: 'Скоро зроблю «поділитись» одним тапом. Поки що перешли саме це повідомлення — у ньому вже є посилання.',
+};
+
+/**
+ * A tap on one of the buttons under an event card: `ev:<verb>:<item id>`.
+ *
+ * The event is resolved the way a ❤️ resolves one — through the messages
+ * table, from the chat and the message the button sits on — and the id in the
+ * callback data only picks the right one out when that message carried several.
+ *
+ * ⏰ is the same switch as the heart: it goes through `addReminder`, which
+ * un-cancels an existing row rather than adding a second one, so hearting and
+ * then tapping ⏰ leaves exactly one reminder. Tapping it again cancels.
+ */
+async function handleCardButton(
+  ctx: HandlerContext,
+  user: BotUser,
+  opts: {
+    verb: string;
+    itemId: string;
+    messageId?: number;
+    draw: (screen: { text: string; inlineKeyboard: InlineButton[][] }, inPlace?: boolean) => Promise<void>;
+    reply: Reply;
+  },
+): Promise<void> {
+  const { verb, itemId, messageId, draw, reply } = opts;
+  const chatId = user.chatId;
+
+  const items = messageId ? await ctx.store.itemsForMessage(chatId, messageId) : [];
+  const item = items.find((i) => i.id === itemId) ?? (items.length === 1 ? items[0] : undefined);
+  if (!item) {
+    return reply('Я вже не памʼятаю, про яку подію було те повідомлення — попроси свіжий список і спробуй там.');
+  }
+
+  if (verb !== 'r') {
+    const said = SOON[verb];
+    return said ? reply(said) : undefined;
+  }
+
+  const reminded = await ctx.store.hasReminder(chatId, item.id);
+  if (reminded) {
+    await ctx.store.cancelReminder(chatId, item.id);
+    ctx.log.info(`chat ${chatId} un-belled "${item.title}"`);
+  } else {
+    const outcome = await ctx.store.addReminder(chatId, item);
+    if (outcome === 'no-date') {
+      return reply(`У «${escapeHtml(item.title)}» ще немає часу початку, тож нагадування не поставлю.`);
+    }
+    const learned = await learnFromHeart(ctx, user, item);
+    ctx.log.info(`chat ${chatId} belled "${item.title}" (reminder ${outcome}${learned.tag ? `, learned ${learned.tag}` : ''})`);
+  }
+
+  // the card itself is the feedback: the same text, with ⏰ flipped over
+  return draw({
+    text: renderItem(item, { format: ctx.dryRun ? 'text' : 'html', withDay: true }),
+    inlineKeyboard: eventKeyboard(item, { reminded: !reminded }),
+  });
 }
 
 async function handleBell(ctx: HandlerContext, msg: TgMessage, chatId: string, index?: number): Promise<string> {

@@ -70,6 +70,8 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
         log: opts.log,
         // only the header answers the request; the events stand on their own
         replyTo: i === 0 ? opts.replyTo : undefined,
+        // and the other way round: the buttons belong to the cards
+        inlineKeyboard: message.inlineKeyboard,
       });
     } catch (err) {
       if (err instanceof TelegramError && err.chatGone) {
