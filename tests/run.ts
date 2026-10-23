@@ -1535,6 +1535,35 @@ describe('fanout', () => {
     });
   });
 
+  /**
+   * One failing send used to take the whole job down with it: everybody after
+   * that person in the list got nothing until the next schedule.
+   */
+  it('carries on with the other users when one send fails', async () => {
+    await withTestStore(async (store) => {
+      await seed(store);
+      for (const chatId of ['2301', '2302', '2303']) await registerUser(store, { chatId, city: 'kharkiv' });
+      const reached: string[] = [];
+      const result = await fanout({
+        store,
+        log,
+        optIn: 'weekend_digest',
+        window,
+        onlyChats: ['2301', '2302', '2303'],
+        dryRun: true,
+        title: () => 'Weekend',
+        select: (user, ranked) => {
+          if (user.chatId === '2302') throw new Error('Telegram said no');
+          reached.push(user.chatId);
+          return ranked;
+        },
+      });
+      assert.deepEqual(reached, ['2301', '2303'], 'the person after the failure still got their digest');
+      assert.equal(result.failedUsers, 1);
+      assert.equal(result.recipients, 2);
+    });
+  });
+
   it('skips people who muted the job', async () => {
     await withTestStore(async (store) => {
       await seed(store);
