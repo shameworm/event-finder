@@ -497,6 +497,14 @@ export class Store {
     else await this.d.run(sql`UPDATE ${t.reminders} SET fired_1d = 1 WHERE id = ${id}`);
   }
 
+  /** Is a reminder standing for this event right now? — what ⏰ toggles on. */
+  async hasReminder(chatId: string, itemId: string): Promise<boolean> {
+    const rows = await this.d.all(
+      sql`SELECT id FROM ${this.d.schema.reminders} WHERE chat_id = ${chatId} AND item_id = ${itemId} AND cancelled = 0`,
+    );
+    return rows.length > 0;
+  }
+
   async cancelReminder(chatId: string, itemId: string): Promise<void> {
     await this.d.run(
       sql`UPDATE ${this.d.schema.reminders} SET cancelled = 1 WHERE chat_id = ${chatId} AND item_id = ${itemId}`,
