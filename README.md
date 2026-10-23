@@ -178,7 +178,9 @@ and reminders are still written, so point it at a throwaway database
 Then message it `/start`.
 
 **Only one copy may poll at a time** — Telegram gives each update to a single
-`getUpdates` caller, so a second instance steals messages.
+`getUpdates` caller, so a second instance steals messages. When that happens
+Telegram answers 409 and the bot stops with a message saying so, rather than
+looping on the error.
 
 ### Taste
 

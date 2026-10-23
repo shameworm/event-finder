@@ -26,7 +26,7 @@ import { loadConfig } from '../src/config.ts';
 import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore, type Store } from '../src/db.ts';
-import { botToken, getMe, getUpdates, setMyCommands } from '../src/telegram-api.ts';
+import { TelegramError, answerCallbackQuery, botToken, getMe, getUpdates, setMyCommands } from '../src/telegram-api.ts';
 import { BOT_COMMANDS, handleCallback, handleMessage, handleReaction, type HandlerContext } from '../src/bot-handlers.ts';
 import { sleep } from '../src/util.ts';
 
@@ -41,11 +41,39 @@ if (!botToken()) {
   process.exit(1);
 }
 
+/**
+ * Where the poll is up to while --dry-run is on. A dry run must not write to
+ * the database, but it must still move forward: without this, every poll
+ * re-fetched and re-printed the same updates for ever.
+ */
+let dryOffset: number | null = null;
+
+/** Telegram 409: a second poller stole the stream. Spinning on it is pointless. */
+function conflicted(err: unknown): boolean {
+  if (!(err instanceof TelegramError) || err.status !== 409) return false;
+  log.error('another instance of this bot is already polling this token — stop that one, then start this again');
+  process.stderr.write('Telegram says another getUpdates poller is running for this token. Stopping.\n');
+  process.exitCode = 1;
+  return true;
+}
+
 /** Process one batch of updates. Returns how many were handled. */
 async function drain(store: Store, timeout: number): Promise<number> {
   const ctx: HandlerContext = { store, log, dryRun };
-  const offset = Number((await store.getState(OFFSET_KEY)) ?? 0);
-  const updates = await getUpdates(offset, timeout);
+  const stored = Number((await store.getState(OFFSET_KEY)) ?? 0);
+  const offset = dryRun ? (dryOffset ?? stored) : stored;
+  const advanceTo = async (next: number): Promise<void> => {
+    if (dryRun) dryOffset = next;
+    else await store.setState(OFFSET_KEY, String(next));
+  };
+  const { updates, lastUpdateId } = await getUpdates(offset, timeout, log);
+
+  // Telegram spins the button until the tap is acknowledged, and the updates
+  // below are handled strictly one at a time — a tap sitting behind a
+  // 60-second search used to spin for the whole search. Ack the batch first.
+  for (const update of updates) {
+    if (update.callback_query) await answerCallbackQuery(update.callback_query.id, { dryRun, log });
+  }
 
   for (const update of updates) {
     const msg = update.message ?? update.edited_message;
@@ -69,8 +97,11 @@ async function drain(store: Store, timeout: number): Promise<number> {
       }
     }
     // advance past the update even if it threw, or we would retry it forever
-    if (!dryRun) await store.setState(OFFSET_KEY, String(update.update_id + 1));
+    await advanceTo(update.update_id + 1);
   }
+  // malformed updates are skipped above but still occupy ids; advance past
+  // them too, or a poison batch at the tail would be re-fetched forever
+  if (lastUpdateId >= offset) await advanceTo(lastUpdateId + 1);
   return updates.length;
 }
 
@@ -95,8 +126,12 @@ await withStore(async (store) => {
   }
 
   if (args.has('once')) {
-    const n = await drain(store, args.num('timeout') ?? 0);
-    process.stdout.write(`${n} update(s) processed\n`);
+    try {
+      const n = await drain(store, args.num('timeout') ?? 0);
+      process.stdout.write(`${n} update(s) processed\n`);
+    } catch (err) {
+      if (!conflicted(err)) throw err;
+    }
     return;
   }
 
@@ -115,6 +150,8 @@ await withStore(async (store) => {
     try {
       await drain(store, 25);
     } catch (err) {
+      // two pollers cannot share one token, and no amount of waiting fixes it
+      if (conflicted(err)) return;
       // network blips, Telegram hiccups: wait and carry on
       log.error(`poll failed: ${err instanceof Error ? err.message : String(err)}`);
       await sleep(5000);
@@ -122,4 +159,4 @@ await withStore(async (store) => {
   }
 });
 
-process.exit(0);
+process.exit(process.exitCode ?? 0);

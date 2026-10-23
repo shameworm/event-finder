@@ -60,7 +60,7 @@ const { parsePost, findDate, findTime, findVenue } = await import('../scripts/te
 const { resultToItem, buildQueries } = await import('../scripts/websearch.ts');
 const { collect: collectKontramarka } = await import('../scripts/kontramarka.ts');
 const { Store } = await import('../src/db.ts');
-const { splitForTelegram } = await import('../src/telegram-api.ts');
+const { splitForTelegram, parseUpdates } = await import('../src/telegram-api.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs, newUserPrefs } = await import('../src/users.ts');
 const { cacheKey, collectCity } = await import('../src/cache.ts');
 const { fanout } = await import('../src/fanout.ts');
@@ -589,6 +589,39 @@ describe('render', () => {
     const chunks = splitForTelegram(Array.from({ length: 200 }, (_, i) => `block ${i}`).join('\n\n'), 500);
     assert.ok(chunks.length > 1);
     assert.ok(chunks.every((c) => c.length <= 500));
+  });
+});
+
+/* ---------------------------------------------------------- getUpdates --- */
+
+describe('getUpdates parsing', () => {
+  // a well-formed message update, as Telegram sends it
+  const good = (id: number, text: string) => ({
+    update_id: id,
+    message: { message_id: id, date: 1, chat: { id: 42, type: 'private' }, text, from: { id: 42 } },
+  });
+
+  it('skips one malformed update without losing the rest of the batch', () => {
+    const poison = { update_id: 6, message: { message_id: 'not-a-number', date: 1, chat: { id: 42 } } };
+    const { updates, lastUpdateId } = parseUpdates([good(5, 'hi'), poison, good(7, 'again')]);
+    assert.deepEqual(updates.map((u) => u.update_id), [5, 7]);
+    // the offset must still advance past the poison, or the poll loop would
+    // re-fetch the same bad batch forever and the bot would serve nobody
+    assert.equal(lastUpdateId, 7);
+  });
+
+  it('reports the highest raw id even when every update is garbage', () => {
+    // update_id 99 is a number (so it advances the offset) but its message is
+    // the wrong shape, so nothing is dispatched
+    const { updates, lastUpdateId } = parseUpdates([{ nonsense: true }, 'string', { update_id: 99, message: 5 }]);
+    assert.equal(updates.length, 0);
+    assert.equal(lastUpdateId, 99);
+  });
+
+  it('stays quiet on an empty batch', () => {
+    const { updates, lastUpdateId } = parseUpdates([]);
+    assert.equal(updates.length, 0);
+    assert.equal(lastUpdateId, -1);
   });
 });
 
