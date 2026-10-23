@@ -305,9 +305,13 @@ npx tsx scripts/search.ts "stand-up in Lviv this weekend"    # answer by hand
   so they stop receiving everything. `/start` brings them back.
 - **No repeats**: an event is re-sent to a person only when its date, price or
   availability changed, and the line says which (`🔁 нова дата`).
-- **Reminders** are set by tapping ❤️ on an event message, and cancelled by
-  taking the ❤️ off. Typing `нагадай` still works for anyone who does not react.
-  A heart also adds that event's category to the person's favourites.
+- **Card buttons**: every event message carries `⏰ Нагадати`, `👎 Не моє`,
+  `📅 В календар` and `↗️ Поділитись` (`ev:<verb>:<item id>` callback data).
+  Only ⏰ is wired up so far; the other three answer "скоро" for now.
+- **Reminders** are set by tapping ⏰ under an event message or ❤️ on it, and
+  cancelled the same way — both go through the one reminder row, so a ❤️ then a
+  ⏰ never leaves two. Typing `нагадай` still works for anyone who does neither.
+  Either one also adds that event's category to the person's favourites.
 - **`/stats`** in the chat (owner only) shows user counts and table sizes.
 
 ### Being a good citizen
