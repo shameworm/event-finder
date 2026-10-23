@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { ItemSchema, QuerySchema, type Item } from './types.ts';
 import { DB_FILE, ensureDirs, loadEnv } from './paths.ts';
 import { fingerprint } from './dedupe.ts';
+import { daysMask } from './schedule.ts';
 import * as sqliteSchema from '../drizzle/schema.sqlite.ts';
 import * as pgSchema from '../drizzle/schema.pg.ts';
 
@@ -116,6 +117,7 @@ async function bootstrap(d: Driver): Promise<void> {
     place_tips     integer NOT NULL DEFAULT 1,
     digest_hour    integer NOT NULL DEFAULT 9,
     digest_day     integer NOT NULL DEFAULT 1,
+    digest_days    integer,
     quiet_from     integer NOT NULL DEFAULT 23,
     quiet_to       integer NOT NULL DEFAULT 8,
     digest_freq    text NOT NULL DEFAULT 'twice',
@@ -133,6 +135,10 @@ async function bootstrap(d: Driver): Promise<void> {
   for (const [column, type] of [
     ['digest_hour', `integer NOT NULL DEFAULT 9`],
     ['digest_day', `integer NOT NULL DEFAULT 1`],
+    // deliberately nullable and defaultless: NULL is what says "use the
+    // digest_day/freq above", and giving it a default would silently move
+    // every existing user onto Monday-and-Thursday
+    ['digest_days', `integer`],
     ['quiet_from', `integer NOT NULL DEFAULT 23`],
     ['quiet_to', `integer NOT NULL DEFAULT 8`],
     ['digest_freq', `text NOT NULL DEFAULT 'twice'`],
@@ -250,6 +256,12 @@ export const UserRowSchema = z.object({
   // predates these columns still parses and behaves as it always did
   digest_hour: z.coerce.number().int().default(9),
   digest_day: z.coerce.number().int().default(1),
+  /**
+   * The days a digest arrives, as one bit per weekday (bit 0 = Sunday). NULL
+   * means nobody has touched this row since it existed — the legacy
+   * `digest_day` + `digest_freq` below still say what they want.
+   */
+  digest_days: z.coerce.number().int().nullable().default(null),
   quiet_from: z.coerce.number().int().default(23),
   quiet_to: z.coerce.number().int().default(8),
   digest_freq: z.string().default('twice'),
@@ -398,10 +410,13 @@ export class Store {
    * Change one piece of someone's delivery schedule. Each field is written
    * through its own statement so the column list stays a closed set of
    * literals rather than something assembled from input.
+   *
+   * `days` is the weekday set as a bitmask (bit 0 = Sunday), and writing it is
+   * what retires the legacy `digest_day`/`digest_freq` for that user.
    */
   async setSchedule(
     chatId: string,
-    patch: { hour?: number; day?: number; quietFrom?: number; quietTo?: number; frequency?: string },
+    patch: { hour?: number; days?: number[]; quietFrom?: number; quietTo?: number; frequency?: string },
   ): Promise<void> {
     const t = this.d.schema;
     const ts = nowIso();
@@ -409,7 +424,7 @@ export class Store {
       await this.d.run(sql`UPDATE ${t.users} SET ${column} = ${value}, updated_at = ${ts} WHERE chat_id = ${chatId}`);
     };
     if (patch.hour !== undefined) await set(sql`digest_hour`, patch.hour);
-    if (patch.day !== undefined) await set(sql`digest_day`, patch.day);
+    if (patch.days !== undefined) await set(sql`digest_days`, daysMask(patch.days));
     if (patch.quietFrom !== undefined) await set(sql`quiet_from`, patch.quietFrom);
     if (patch.quietTo !== undefined) await set(sql`quiet_to`, patch.quietTo);
     if (patch.frequency !== undefined) await set(sql`digest_freq`, patch.frequency);

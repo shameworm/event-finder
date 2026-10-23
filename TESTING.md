@@ -14,14 +14,14 @@ cd ~/.hermes/skills/events-finder
 ## 0. Automated suite (start here)
 
 ```bash
-npm test          # 261 offline checks: parsing, classification, dedupe, ranking,
+npm test          # 269 offline checks: parsing, classification, dedupe, ranking,
                   # rendering, per-user store, users, fan-out, bot handlers,
                   # politeness/retries, page walking and the scrapers themselves
 npm run typecheck # tsc --noEmit
 ```
 
 Uses a temporary database and the committed example config, so it is safe at any
-time and needs no secrets. Expect `261/261 passed` and exit code 0.
+time and needs no secrets. Expect `269/269 passed` and exit code 0.
 
 Notable cases it covers, so you do not have to by hand: a city is scraped once
 and ranked per user; a muted user is skipped; an already-delivered item is not

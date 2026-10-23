@@ -31,8 +31,14 @@ export const users = sqliteTable(
      * read, and must behave exactly as it did.
      */
     digestHour: integer('digest_hour').notNull().default(9),
-    /** 0 = Sunday … 6 = Saturday, for the weekly digest. */
+    /** The legacy single weekday — see `digestDays`, which supersedes it. */
     digestDay: integer('digest_day').notNull().default(1),
+    /**
+     * The days a digest arrives: one bit per weekday, bit 0 = Sunday. NULL
+     * means the user has never touched the schedule, so the legacy
+     * `digestDay` + `digestFreq` pair still decides. See src/schedule.ts.
+     */
+    digestDays: integer('digest_days'),
     /** Quiet window, local hours; from === to means "no quiet hours". */
     quietFrom: integer('quiet_from').notNull().default(23),
     quietTo: integer('quiet_to').notNull().default(8),

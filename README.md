@@ -288,7 +288,7 @@ npx tsx scripts/telegram.ts --channel @some_channel --dump   # see raw posts
 ```bash
 npx tsx scripts/doctor.ts            # config, secrets, db, users, bot policy
 npx tsx scripts/doctor.ts --network  # also probe every source site
-npm test                             # 261 offline checks (~4s, no network)
+npm test                             # 269 offline checks (~4s, no network)
 npm run check                        # typecheck + tests, same as CI
 ```
 
@@ -306,7 +306,7 @@ them with `hermes cron add` (both forms are there, plus a crontab fallback):
 | every 15 minutes | `reminders.ts` | everyone's ❤️ reminders |
 
 The two digest jobs tick **hourly** and the schedule lives on the user, not in
-the cron: each person picks their hour, their weekday and how often from
+the cron: each person picks their hour and the days they want a digest from
 `/settings → 🕘 Коли писати`. A tick that matches nobody logs one line and
 exits without scraping anything, so 23 of every 24 runs are free.
 
@@ -321,12 +321,18 @@ npx tsx scripts/digest.ts --week --dry-run --chat 123 --now   # ignore the sched
 
 ### Each person's own schedule
 
+The whole schedule is **an hour and the days of the week**, set from
+`/settings` → 🕘 Коли писати. Tick the days you want a digest on; Thursday's
+digest covers Friday–Sunday, so ticking Thursday is how you ask for the
+weekend picks. There is no separate "how often" — ticking two days *is* twice
+a week.
+
 | Setting | Default | What it does |
 |---|---|---|
 | `digest_hour` | `9` | the hour digests arrive, in `config.timezone` |
-| `digest_day` | `1` (Monday) | the weekday for the *weekly* digest |
-| `digest_freq` | `twice` | `weekly` · `twice` (weekly + weekend) · `mine` |
-| `quiet_from` / `quiet_to` | `23` → `8` | the window the bot keeps quiet in; equal values switch it off |
+| `digest_days` | Mon + Thu | the weekdays a digest arrives, as one bit per day (bit 0 = Sunday). Written the first time someone taps the panel |
+| `digest_day` / `digest_freq` | `1` / `twice` | **legacy only** — what a row that predates `digest_days` meant. Read when `digest_days` is still NULL, and ignored for good once that user taps a day |
+| `quiet_from` / `quiet_to` | `23` → `8` | the window the bot keeps quiet in; equal values switch it off. Not on the panel — set the columns by hand if the default does not suit you |
 
 Three things worth knowing:
 
@@ -335,7 +341,8 @@ Three things worth knowing:
   `bot.taste_floor`. Someone on `mine` in a quiet week hears nothing at all,
   which is the request. It only has teeth once there is a taste model to judge
   against: with an empty profile `rank()` has nothing to filter by, never pads
-  anything, and `mine` behaves like `twice`.
+  anything, and `mine` behaves like any other schedule. Nothing on the panel
+  sets it any more; the column still decides for whoever has it.
 - **Quiet hours do not cancel a digest.** Pick 07:00 and you get it at 07:00
   even though the default quiet window covers it — you asked for that hour, and
   swallowing the choice would make the button look broken. Quiet hours gate the
@@ -429,7 +436,7 @@ src/
   users.ts                chat id ↔ taste model
   cache.ts                one scrape per city
   fanout.ts               scheduled jobs across all users
-  schedule.ts             each person's hour, day, frequency and quiet hours
+  schedule.ts             each person's hour and days, and when to keep quiet
   pipeline.ts request.ts rank.ts dedupe.ts normalize.ts render.ts
   db.ts config.ts schemas.ts types.ts http.ts jsonld.ts log.ts …
 drizzle/                  database schema (sqlite + postgres)

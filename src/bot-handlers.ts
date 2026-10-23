@@ -19,7 +19,7 @@ import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
 import { countEvents, eventKeyboard, moreButton, renderCaption, renderItem, renderReminders } from './render.ts';
 import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
-import { DIGEST_DAYS, DIGEST_HOURS, FREQUENCIES, describeSchedule, hourLabel, isFrequency } from './schedule.ts';
+import { DIGEST_DAYS, DIGEST_HOURS, describeSchedule, hourLabel, toggleDay } from './schedule.ts';
 import { WORD_END, addDays, normText, today } from './util.ts';
 
 export interface HandlerContext {
@@ -466,19 +466,10 @@ async function handleStepText(
 /* ------------------------------------------------------------- schedule --- */
 
 /**
- * The quiet-hours windows on offer. A free pair of dials would be four taps
- * and a lot of screens for a setting nobody wants to fine-tune; these cover
- * "I go to bed early", "I go to bed late" and "do not bother".
- */
-const QUIET_PRESETS: { from: number; to: number; label: string }[] = [
-  { from: 0, to: 0, label: 'вимкнено' },
-  { from: 22, to: 8, label: '22:00–08:00' },
-  { from: 23, to: 8, label: '23:00–08:00' },
-  { from: 0, to: 9, label: '00:00–09:00' },
-];
-
-/**
- * "Коли писати" — the hour, the day, how often, and the quiet window.
+ * "Коли писати" — an hour and the days of the week. That is the whole screen,
+ * and deliberately so: hour + day + frequency + quiet window was four concepts
+ * and eighteen buttons for a thing people summarise as "Monday and Thursday
+ * at seven".
  *
  * Only six hours are offered, and that is a deliberate limit rather than a
  * shortage of buttons: every distinct hour someone picks is another fan-out
@@ -489,12 +480,8 @@ function schedulePanel(user: BotUser): Screen {
   const text =
     `<b>🕘 Коли писати</b>\n\n` +
     `Зараз: <b>${escapeHtml(describeSchedule(s))}</b>\n\n` +
-    `<b>Година</b> — о котрій приходить дайджест.\n` +
-    `<b>День</b> — коли приходить тижневий (вихідні — завжди в четвер).\n` +
-    `<b>Частота</b> — ${FREQUENCIES.map((f) => `<i>${escapeHtml(f.label.toLowerCase())}</i> — ${escapeHtml(f.hint)}`).join('; ')}.\n` +
-    `<b>Тихі години</b> — не пишу нічого несподіваного. Дайджест о ` +
-    `${hourLabel(s.hour)} це не скасовує — ти сам його попросив, — ` +
-    `і нагадування «за ~3 години» теж приходить завжди, інакше від нього нуль сенсу.`;
+    `Обери годину і дні. Дайджест прийде того дня, обраної години.\n` +
+    `Четвер — дайджест на вихідні (пт–нд), тож він рахується окремо.`;
   return {
     text,
     inlineKeyboard: [
@@ -503,16 +490,8 @@ function schedulePanel(user: BotUser): Screen {
         3,
       ),
       ...rows(
-        DIGEST_DAYS.map((d) => ({ text: tick(s.day === d.day, d.short), callback_data: `when:day:${d.day}` })),
+        DIGEST_DAYS.map((d) => ({ text: tick(s.days.includes(d.day), d.short), callback_data: `when:day:${d.day}` })),
         4,
-      ),
-      ...FREQUENCIES.map((f) => [{ text: tick(s.frequency === f.key, f.label), callback_data: `when:freq:${f.key}` }]),
-      ...rows(
-        QUIET_PRESETS.map((q) => ({
-          text: tick(s.quietFrom === q.from && s.quietTo === q.to, `🔇 ${q.label}`),
-          callback_data: `when:quiet:${q.from}-${q.to}`,
-        })),
-        2,
       ),
       [{ text: '⬅️ Назад', callback_data: 'set:back' }],
     ],
@@ -1016,7 +995,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
  *                 onb:like:<cat> · onb:dis:<tag> · onb:budget:<n|none>
  *                 onb:unfollow:<index> · onb:next · onb:skip
  *                 onb:step:<step> · onb:taste · onb:start · onb:later
- *                 when:hour:<0-23> · when:day:<0-6> · when:freq:<key> · when:quiet:<from>-<to>
+ *                 when:hour:<0-23> · when:day:<0-6> (tap to flip a day on/off)
  *   more          the next page of an answer, from the stash behind its
  *                 header; which answer comes from the message it is on
  *   ev:<verb>:<item id>  a button under an event card — ev:r toggles the
@@ -1155,14 +1134,11 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
     if (verb === 'hour' && (DIGEST_HOURS as readonly number[]).includes(Number(payload))) {
       await ctx.store.setSchedule(chatId, { hour: Number(payload) });
     } else if (verb === 'day' && DIGEST_DAYS.some((d) => d.day === Number(payload))) {
-      await ctx.store.setSchedule(chatId, { day: Number(payload) });
-    } else if (verb === 'freq' && isFrequency(payload)) {
-      await ctx.store.setSchedule(chatId, { frequency: payload });
-    } else if (verb === 'quiet') {
-      const hours = payload.split('-').map(Number);
-      const [from, to] = hours;
-      if (hours.length !== 2 || !hours.every((n) => Number.isInteger(n) && n >= 0 && n <= 23)) return;
-      await ctx.store.setSchedule(chatId, { quietFrom: from, quietTo: to });
+      // a tap flips one day. The last day cannot be taken off — someone with
+      // no days left has a digest they pay for and can never receive
+      const next = toggleDay(user.schedule.days, Number(payload));
+      if (!next) return reply('Залиш хоч один день — інакше дайджесту не буде зовсім.');
+      await ctx.store.setSchedule(chatId, { days: next });
     }
     return draw(schedulePanel((await getUser(ctx.store, chatId, ctx.log)) ?? user));
   }

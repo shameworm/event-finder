@@ -72,8 +72,8 @@ const { cacheKey, collectCity } = await import('../src/cache.ts');
 const { parseArgs } = await import('../src/cli.ts');
 const { fanout } = await import('../src/fanout.ts');
 const {
-  DIGEST_HOURS, WEEKEND_DAY, digestDueNow, inQuietHours, reminderAllowedNow, scheduleOf, defaultSchedule,
-  describeSchedule, wantsOnlyMine,
+  DIGEST_DAYS, DIGEST_HOURS, WEEKEND_DAY, digestDueNow, inQuietHours, reminderAllowedNow, scheduleOf, defaultSchedule,
+  describeSchedule, wantsOnlyMine, daysLabel, toggleDay, daysMask, daysFromMask,
 } = await import('../src/schedule.ts');
 const { handleMessage, handleCallback, handleReaction, parseBell, isHeart, isAllowed, BOT_COMMANDS } = await import(
   '../src/bot-handlers.ts'
@@ -1660,6 +1660,52 @@ describe('store', () => {
       assert.equal(await store.getState('nope'), null);
     });
   });
+
+  it('adds digest_days to a database created before it existed, and keeps the old choices working', async () => {
+    // the shape a database had before the schedule was an hour plus days
+    const dbFile = process.env['EVENTS_FINDER_DB']!;
+    await withTestStore((store) => store.close());
+    const { default: Database } = await import('better-sqlite3');
+    const raw = new Database(dbFile);
+    raw.exec(`
+      DROP TABLE users;
+      CREATE TABLE users (
+        chat_id text PRIMARY KEY, username text, first_name text, city text NOT NULL,
+        prefs text NOT NULL, stage text, weekly_digest integer NOT NULL DEFAULT 1,
+        weekend_digest integer NOT NULL DEFAULT 1, follow_alerts integer NOT NULL DEFAULT 1,
+        place_tips integer NOT NULL DEFAULT 1, digest_hour integer NOT NULL DEFAULT 9,
+        digest_day integer NOT NULL DEFAULT 1, quiet_from integer NOT NULL DEFAULT 23,
+        quiet_to integer NOT NULL DEFAULT 8, digest_freq text NOT NULL DEFAULT 'twice',
+        blocked integer NOT NULL DEFAULT 0, last_seen_at text,
+        created_at text NOT NULL, updated_at text NOT NULL);
+      INSERT INTO users (chat_id, city, prefs, digest_hour, digest_day, digest_freq, created_at, updated_at)
+        VALUES ('legacy', 'kharkiv', '{}', 7, 5, 'weekly', 'now', 'now');
+    `);
+    raw.close();
+
+    const reopened = await Store.open();
+    try {
+      assert.equal(reopened.dialect, 'sqlite');
+      // the column came back, and it reads as "untouched"…
+      const row = await reopened.getUser('legacy');
+      assert.ok(row, 'the row still parses');
+      assert.equal(row.digest_days, null);
+      // …so the legacy pair still decides what they get: Friday only
+      const s = scheduleOf(row);
+      assert.equal(s.hour, 7);
+      assert.deepEqual(s.days, [5], 'weekly meant that one day and no Thursday');
+      assert.ok(digestDueNow(s, 'weekly', { hour: 7, weekday: 5 }));
+      assert.ok(!digestDueNow(s, 'weekend', { hour: 7, weekday: WEEKEND_DAY }));
+
+      // the first tap through the panel retires the legacy columns for good
+      await reopened.setSchedule('legacy', { days: [1, WEEKEND_DAY] });
+      const after = await reopened.getUser('legacy');
+      assert.equal(after?.digest_days, (1 << 1) | (1 << WEEKEND_DAY));
+      assert.deepEqual(scheduleOf(after).days, [1, WEEKEND_DAY]);
+    } finally {
+      await reopened.close();
+    }
+  });
 });
 
 /* ------------------------------------------------------------------ users --- */
@@ -1806,47 +1852,80 @@ describe('schedule', () => {
     const legacy = scheduleOf({ chat_id: '1', city: 'kharkiv' } as never);
     assert.deepEqual(legacy, defaultSchedule());
     assert.equal(legacy.hour, 9);
-    assert.equal(legacy.day, 1, 'Monday');
+    assert.deepEqual(legacy.days, [1, WEEKEND_DAY], 'Monday and Thursday');
     assert.equal(legacy.frequency, 'twice');
     assert.ok(digestDueNow(legacy, 'weekly', { hour: 9, weekday: 1 }));
     assert.ok(digestDueNow(legacy, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
   });
 
+  it('reads the legacy weekly-only row as the one day it meant', () => {
+    const s = scheduleOf({ digest_day: 5, digest_freq: 'weekly' } as never);
+    assert.deepEqual(s.days, [5], 'Friday and nothing else — Thursday was never part of it');
+    assert.ok(digestDueNow(s, 'weekly', { hour: 9, weekday: 5 }));
+    assert.ok(!digestDueNow(s, 'weekend', { hour: 9, weekday: WEEKEND_DAY }), 'they asked for once a week');
+  });
+
   it('falls back to the default for a value outside the clock', () => {
     assert.equal(scheduleOf({ digest_hour: 24 } as never).hour, 9);
     assert.equal(scheduleOf({ digest_hour: -1 } as never).hour, 9);
-    assert.equal(scheduleOf({ digest_day: 7 } as never).day, 1);
+    assert.deepEqual(scheduleOf({ digest_day: 7 } as never).days, defaultSchedule().days);
     assert.equal(scheduleOf({ digest_freq: 'hourly' } as never).frequency, 'twice');
     assert.equal(scheduleOf(undefined).hour, 9);
   });
 
-  it('matches a digest to one hour of one day and nothing else', () => {
-    const s = { ...defaultSchedule(), hour: 21, day: 5 };
+  it('round-trips a weekday set through its stored bitmask', () => {
+    for (const days of [[1], [1, WEEKEND_DAY], [0, 6], [0, 1, 2, 3, 4, 5, 6], [3]]) {
+      assert.deepEqual(daysFromMask(daysMask(days)), [...days].sort((a, b) => (a || 7) - (b || 7)), days.join(','));
+    }
+    // 0 would read as "no days" and silently resurrect the legacy columns, so
+    // it is written as the Sunday bit instead — one day is the floor
+    assert.equal(daysMask([0]), 1);
+    assert.equal(daysMask([]), 0, 'an empty set is the sentinel for "untouched"');
+  });
+
+  it('flips one day on and off, and refuses to empty the week', () => {
+    assert.deepEqual(toggleDay([1], 4), [1, WEEKEND_DAY], 'adding Thursday is how the weekend picks are asked for');
+    assert.deepEqual(toggleDay([1, 4], 4), [1]);
+    assert.deepEqual(toggleDay([3], 0), [3, 0], 'Sunday sorts last');
+    assert.equal(toggleDay([1], 1), null, 'the last day cannot be taken off');
+  });
+
+  it('matches a digest to one hour of one of their days and nothing else', () => {
+    const s = { ...defaultSchedule(), hour: 21, days: [5] };
     assert.ok(digestDueNow(s, 'weekly', { hour: 21, weekday: 5 }));
     assert.ok(!digestDueNow(s, 'weekly', { hour: 20, weekday: 5 }), 'an hour early is not their hour');
     assert.ok(!digestDueNow(s, 'weekly', { hour: 22, weekday: 5 }), 'an hour late is not their hour');
     assert.ok(!digestDueNow(s, 'weekly', { hour: 21, weekday: 4 }), 'right hour, wrong day');
   });
 
+  it('gives every ticked day its own digest', () => {
+    const s = { ...defaultSchedule(), hour: 7, days: [1, 3, 5] };
+    for (const weekday of [1, 3, 5]) assert.ok(digestDueNow(s, 'weekly', { hour: 7, weekday }), `day ${weekday}`);
+    for (const weekday of [0, 2, 4, 6]) assert.ok(!digestDueNow(s, 'weekly', { hour: 7, weekday }), `day ${weekday}`);
+    assert.ok(!digestDueNow(s, 'weekly', { hour: 8, weekday: 1 }), 'not their hour');
+  });
+
   it('holds the day boundaries: 00:00 and 23:00 are hours like any other', () => {
-    const midnight = { ...defaultSchedule(), hour: 0, day: 0 };
+    const midnight = { ...defaultSchedule(), hour: 0, days: [0] };
     assert.ok(digestDueNow(midnight, 'weekly', { hour: 0, weekday: 0 }), 'Sunday 00:00 is a real slot');
     assert.ok(!digestDueNow(midnight, 'weekly', { hour: 23, weekday: 6 }), 'the hour before does not roll over');
-    const lateSaturday = { ...defaultSchedule(), hour: 23, day: 6 };
+    const lateSaturday = { ...defaultSchedule(), hour: 23, days: [6] };
     assert.ok(digestDueNow(lateSaturday, 'weekly', { hour: 23, weekday: 6 }));
     assert.ok(!digestDueNow(lateSaturday, 'weekly', { hour: 0, weekday: 0 }), 'and does not spill into Sunday');
   });
 
-  it('keeps the weekend digest on Thursday whatever day the weekly one is on', () => {
-    const s = { ...defaultSchedule(), hour: 18, day: 6 };
-    assert.ok(digestDueNow(s, 'weekend', { hour: 18, weekday: WEEKEND_DAY }));
-    assert.ok(!digestDueNow(s, 'weekend', { hour: 18, weekday: 6 }), 'their own day does not move the weekend picks');
+  it('keeps the weekend digest on Thursday whatever other days are ticked', () => {
+    const s = { ...defaultSchedule(), hour: 18, days: [WEEKEND_DAY, 6] };
+    assert.ok(digestDueNow(s, 'weekend', { hour: 18, weekday: WEEKEND_DAY }), 'Thursday carries the weekend picks');
+    assert.ok(!digestDueNow(s, 'weekend', { hour: 18, weekday: 6 }), 'their Saturday does not move the weekend picks');
+    assert.ok(digestDueNow(s, 'weekly', { hour: 18, weekday: 6 }), 'and Saturday still gets its own digest');
   });
 
-  it('sends only the weekly digest to someone who asked for once a week', () => {
-    const s = { ...defaultSchedule(), frequency: 'weekly' as const };
-    assert.ok(digestDueNow(s, 'weekly', { hour: 9, weekday: 1 }));
-    assert.ok(!digestDueNow(s, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
+  it('never sends both digests on the same day', () => {
+    // ticking Thursday asks for the weekend one, not a second weekly digest
+    const s = { ...defaultSchedule(), days: [WEEKEND_DAY] };
+    assert.ok(digestDueNow(s, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
+    assert.ok(!digestDueNow(s, 'weekly', { hour: 9, weekday: WEEKEND_DAY }), 'Thursday is taken, not doubled');
   });
 
   it('leaves the timing alone for "only when there is something of mine"', () => {
@@ -1855,6 +1934,12 @@ describe('schedule', () => {
     assert.ok(digestDueNow(s, 'weekly', { hour: 9, weekday: 1 }), 'it is a content rule, not a clock rule');
     assert.ok(digestDueNow(s, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
     assert.ok(!wantsOnlyMine(defaultSchedule()));
+  });
+
+  it('offers every weekday exactly once, in Пн…Нд order', () => {
+    assert.deepEqual(DIGEST_DAYS.map((d) => d.day), [1, 2, 3, 4, 5, 6, 0]);
+    assert.equal(new Set(DIGEST_DAYS.map((d) => d.day)).size, 7);
+    assert.ok(DIGEST_DAYS.every((d) => d.short && d.label));
   });
 
   it('wraps a quiet window around midnight', () => {
@@ -1903,12 +1988,18 @@ describe('schedule', () => {
   });
 
   it('describes a schedule in Ukrainian', () => {
-    const line = describeSchedule({ ...defaultSchedule(), hour: 18, day: 5, frequency: 'weekly' });
+    const line = describeSchedule({ ...defaultSchedule(), hour: 18, days: [5] });
     assert.ok(line.includes('пʼятниця') && line.includes('18:00'), line);
-    assert.ok(describeSchedule(defaultSchedule()).includes('тихі години 23:00–08:00'));
-    assert.ok(
-      describeSchedule({ ...defaultSchedule(), quietFrom: 0, quietTo: 0 }).includes('тихі години вимкнено'),
-    );
+    assert.equal(describeSchedule(defaultSchedule()), 'понеділок і четвер, 09:00');
+    assert.equal(describeSchedule({ ...defaultSchedule(), days: [0, 1, 2, 3, 4, 5, 6] }), 'щодня, 09:00');
+  });
+
+  it('names a day set the way a person would', () => {
+    assert.equal(daysLabel([1]), 'понеділок');
+    assert.equal(daysLabel([1, WEEKEND_DAY]), 'понеділок і четвер');
+    assert.equal(daysLabel([1, 2, 3]), 'понеділок, вівторок і середа');
+    assert.equal(daysLabel([6, 0]), 'субота і неділя', 'Sunday reads last, not first');
+    assert.equal(daysLabel([]), 'ніколи');
   });
 });
 
@@ -2017,9 +2108,9 @@ describe('fanout', () => {
     await withTestStore(async (store) => {
       await seed(store);
       for (const chatId of ['2300', '2301', '2302']) await registerUser(store, { chatId, city: 'kharkiv' });
-      await store.setSchedule('2300', { hour: 9, day: 1 });
-      await store.setSchedule('2301', { hour: 18, day: 1 });
-      await store.setSchedule('2302', { hour: 9, day: 4 });
+      await store.setSchedule('2300', { hour: 9, days: [1] });
+      await store.setSchedule('2301', { hour: 18, days: [1] });
+      await store.setSchedule('2302', { hour: 9, days: [4] });
       const chats = ['2300', '2301', '2302'];
 
       const nine = new Set<string>();
@@ -2165,7 +2256,7 @@ describe('fanout', () => {
       await registerUser(store, { chatId: '2700', city: 'kharkiv' });
       // 07:00 is inside the default 23:00–08:00 window, and it is still what
       // they picked — the hour button would otherwise look broken
-      await store.setSchedule('2700', { hour: 7, day: 1 });
+      await store.setSchedule('2700', { hour: 7, days: [1] });
       const result = await fanout({
         store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
         title: () => 'W', onlyChats: ['2700'], now: { hour: 7, weekday: 1 },
@@ -2498,7 +2589,7 @@ describe('bot handlers', () => {
     });
   });
 
-  it('opens a "коли писати" screen with an hour, a day, a frequency and a quiet window', async () => {
+  it('opens a "коли писати" screen with an hour and the days of the week', async () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3020', city: 'kharkiv' });
       const panel = await say(store, '3020', '/settings');
@@ -2508,13 +2599,15 @@ describe('bot handlers', () => {
       const when = await tap(store, '3020', 'set:when');
       assert.ok(when.includes('Коли писати'), when.slice(0, 300));
       for (const hour of DIGEST_HOURS) assert.ok(when.includes(`(when:hour:${hour})`), `hour ${hour}`);
-      assert.ok(when.includes('(when:day:1)') && when.includes('(when:day:0)'), 'every weekday is pickable');
-      assert.ok(when.includes('(when:freq:mine)') && when.includes('(when:freq:weekly)'), when.slice(0, 900));
-      assert.ok(when.includes('(when:quiet:23-8)') && when.includes('(when:quiet:0-0)'), 'including switching it off');
+      for (const d of DIGEST_DAYS) assert.ok(when.includes(`(when:day:${d.day})`), `${d.short} is pickable`);
+      // the screen is an hour and a set of days, and nothing else
+      assert.ok(!when.includes('when:freq'), 'no frequency — ticking days is the frequency');
+      assert.ok(!when.includes('when:quiet'), 'no quiet window on this screen');
+      assert.ok(when.includes('понеділок') && when.includes('четвер'), 'and it says what is ticked now');
     });
   });
 
-  it('picks an hour, a day and a frequency by button', async () => {
+  it('picks an hour and ticks days by button', async () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3021', city: 'kharkiv' });
       const redraw = await tap(store, '3021', 'when:hour:18');
@@ -2522,21 +2615,30 @@ describe('bot handlers', () => {
       assert.ok(redraw.includes('edit 42'), 'the screen is rewritten, not reposted');
       assert.ok(redraw.includes('✅ 18:00'), redraw.slice(0, 600));
 
+      // Saturday arrives on top of the default Monday and Thursday
       await tap(store, '3021', 'when:day:6');
-      assert.equal((await store.getUser('3021'))?.digest_day, 6);
+      const sat = (await store.getUser('3021'))!;
+      assert.equal(sat.digest_days, (1 << 1) | (1 << 4) | (1 << 6), 'one bit per weekday');
+      assert.deepEqual((await getUser(store, '3021'))!.schedule.days, [1, 4, 6]);
 
-      await tap(store, '3021', 'when:freq:mine');
-      assert.equal((await store.getUser('3021'))?.digest_freq, 'mine');
+      // and tapping it again takes it back off
+      await tap(store, '3021', 'when:day:6');
+      assert.equal((await store.getUser('3021'))?.digest_days, (1 << 1) | (1 << 4));
 
-      await tap(store, '3021', 'when:quiet:0-0');
-      const off = (await store.getUser('3021'))!;
-      assert.equal(off.quiet_from, 0);
-      assert.equal(off.quiet_to, 0);
-
-      // and the schedule is what the fan-out will read back
+      // a legacy column nobody has written since still reads as it always did
       assert.deepEqual((await getUser(store, '3021'))!.schedule, {
-        hour: 18, day: 6, quietFrom: 0, quietTo: 0, frequency: 'mine',
+        hour: 18, days: [1, 4], quietFrom: 23, quietTo: 8, frequency: 'twice',
       });
+    });
+  });
+
+  it('refuses to take the last day off', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3022', city: 'kharkiv' });
+      await store.setSchedule('3022', { days: [5] });
+      const said = await tap(store, '3022', 'when:day:5');
+      assert.deepEqual((await getUser(store, '3022'))!.schedule.days, [5], 'Friday stays');
+      assert.ok(said.includes('Залиш хоч один день'), said.slice(-400));
     });
   });
 
@@ -2546,9 +2648,11 @@ describe('bot handlers', () => {
       await tap(store, '3030', 'when:hour:4');
       assert.equal((await store.getUser('3030'))?.digest_hour, 9, 'a hand-crafted callback changes nothing');
       await tap(store, '3030', 'when:day:9');
-      assert.equal((await store.getUser('3030'))?.digest_day, 1);
-      await tap(store, '3030', 'when:freq:hourly');
-      assert.equal((await store.getUser('3030'))?.digest_freq, 'twice');
+      assert.deepEqual((await getUser(store, '3030'))!.schedule.days, [1, 4], 'and neither does a bogus weekday');
+      await tap(store, '3030', 'when:freq:mine');
+      assert.equal((await store.getUser('3030'))?.digest_freq, 'twice', 'the frequency button is gone');
+      await tap(store, '3030', 'when:quiet:0-0');
+      assert.equal((await store.getUser('3030'))?.quiet_from, 23, 'and so is the quiet-window one');
     });
   });
 
