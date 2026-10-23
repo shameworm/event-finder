@@ -167,8 +167,10 @@ date are dropped.
 ## Scheduled jobs (they fan out to every user)
 
 ```bash
-npx tsx scripts/digest.ts --week                # Monday 09:00 — this week, per user's city
-npx tsx scripts/digest.ts --weekend --top 5     # Thursday 18:00 — weekend picks
+npx tsx scripts/digest.ts --week                # hourly — whoever asked for this hour/day
+npx tsx scripts/digest.ts --weekend --top 5     # hourly on Thursday — weekend picks
+npx tsx scripts/digest.ts --week --hour 18 --day 5 --dry-run   # rehearse one slot
+npx tsx scripts/digest.ts --week --now          # ignore the schedule, send to everyone
 npx tsx scripts/follows.ts                      # every 6h — new shows by people they follow
 npx tsx scripts/follows.ts --queries            #   …run these first: tours are announced by name
 npx tsx scripts/places.ts                       # weekly — places to try

@@ -78,6 +78,27 @@ async function createDriver(): Promise<Driver> {
 
 /* ------------------------------------------------------------- bootstrap --- */
 
+/**
+ * Add a column to an existing table, idempotently.
+ *
+ * Postgres has `ADD COLUMN IF NOT EXISTS`; SQLite has no such thing and errors
+ * with "duplicate column name", which on the second start-up is exactly the
+ * outcome we wanted. Table and column names come from the literals above,
+ * never from user input.
+ */
+async function addColumn(d: Driver, table: string, column: string, type: string): Promise<void> {
+  const ifNotExists = d.dialect === 'postgres' ? 'IF NOT EXISTS ' : '';
+  try {
+    await d.run(sql.raw(`ALTER TABLE ${table} ADD COLUMN ${ifNotExists}${column} ${type}`));
+  } catch (err) {
+    // drizzle wraps driver errors, so the real complaint is down the `cause`
+    // chain rather than in the top-level message
+    const messages: string[] = [];
+    for (let e: unknown = err; e instanceof Error; e = e.cause) messages.push(e.message);
+    if (!/duplicate column|already exists/i.test(messages.join(' | '))) throw err;
+  }
+}
+
 async function bootstrap(d: Driver): Promise<void> {
   const t = d.schema;
   const pk = d.dialect === 'postgres' ? sql`serial PRIMARY KEY` : sql`integer PRIMARY KEY AUTOINCREMENT`;
@@ -93,12 +114,31 @@ async function bootstrap(d: Driver): Promise<void> {
     weekend_digest integer NOT NULL DEFAULT 1,
     follow_alerts  integer NOT NULL DEFAULT 1,
     place_tips     integer NOT NULL DEFAULT 1,
+    digest_hour    integer NOT NULL DEFAULT 9,
+    digest_day     integer NOT NULL DEFAULT 1,
+    quiet_from     integer NOT NULL DEFAULT 23,
+    quiet_to       integer NOT NULL DEFAULT 8,
+    digest_freq    text NOT NULL DEFAULT 'twice',
     blocked        integer NOT NULL DEFAULT 0,
     last_seen_at   text,
     created_at     text NOT NULL,
     updated_at     text NOT NULL
   )`);
   await d.run(sql`CREATE INDEX IF NOT EXISTS idx_users_city ON ${t.users} (city)`);
+
+  // There are no migration files in this project, so a database created before
+  // the personal schedule existed has the old `users` shape and the CREATE
+  // TABLE above is a no-op for it. Add the columns by hand instead, with the
+  // defaults that reproduce the single hard-wired cron it was built around.
+  for (const [column, type] of [
+    ['digest_hour', `integer NOT NULL DEFAULT 9`],
+    ['digest_day', `integer NOT NULL DEFAULT 1`],
+    ['quiet_from', `integer NOT NULL DEFAULT 23`],
+    ['quiet_to', `integer NOT NULL DEFAULT 8`],
+    ['digest_freq', `text NOT NULL DEFAULT 'twice'`],
+  ] as const) {
+    await addColumn(d, 'users', column, type);
+  }
 
   await d.run(sql`CREATE TABLE IF NOT EXISTS ${t.deliveries} (
     chat_id       text NOT NULL,
@@ -192,6 +232,13 @@ export const UserRowSchema = z.object({
   weekend_digest: z.coerce.number().int(),
   follow_alerts: z.coerce.number().int(),
   place_tips: z.coerce.number().int(),
+  // the personal schedule; defaulted rather than required, so a row that
+  // predates these columns still parses and behaves as it always did
+  digest_hour: z.coerce.number().int().default(9),
+  digest_day: z.coerce.number().int().default(1),
+  quiet_from: z.coerce.number().int().default(23),
+  quiet_to: z.coerce.number().int().default(8),
+  digest_freq: z.string().default('twice'),
   blocked: z.coerce.number().int(),
 });
 export type UserRow = z.infer<typeof UserRowSchema>;
@@ -331,6 +378,27 @@ export class Store {
       : which === 'follow_alerts' ? sql`follow_alerts`
       : sql`place_tips`;
     await this.d.run(sql`UPDATE ${t.users} SET ${column} = ${value}, updated_at = ${ts} WHERE chat_id = ${chatId}`);
+  }
+
+  /**
+   * Change one piece of someone's delivery schedule. Each field is written
+   * through its own statement so the column list stays a closed set of
+   * literals rather than something assembled from input.
+   */
+  async setSchedule(
+    chatId: string,
+    patch: { hour?: number; day?: number; quietFrom?: number; quietTo?: number; frequency?: string },
+  ): Promise<void> {
+    const t = this.d.schema;
+    const ts = nowIso();
+    const set = async (column: SQL, value: number | string) => {
+      await this.d.run(sql`UPDATE ${t.users} SET ${column} = ${value}, updated_at = ${ts} WHERE chat_id = ${chatId}`);
+    };
+    if (patch.hour !== undefined) await set(sql`digest_hour`, patch.hour);
+    if (patch.day !== undefined) await set(sql`digest_day`, patch.day);
+    if (patch.quietFrom !== undefined) await set(sql`quiet_from`, patch.quietFrom);
+    if (patch.quietTo !== undefined) await set(sql`quiet_to`, patch.quietTo);
+    if (patch.frequency !== undefined) await set(sql`digest_freq`, patch.frequency);
   }
 
   /** 1 = the user pressed /stop or Telegram told us the chat is gone. */

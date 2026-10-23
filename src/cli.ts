@@ -13,7 +13,7 @@ export interface Args {
 
 const KNOWN_VALUE_FLAGS = new Set([
   'city', 'cities', 'from', 'to', 'like', 'dislike', 'max-price', 'top', 'pages', 'days',
-  'chat', 'kind', 'source', 'limit', 'ingest', 'out', 'format', 'base', 'per-day', 'label', 'title', 'channel',
+  'chat', 'hour', 'day', 'kind', 'source', 'limit', 'ingest', 'out', 'format', 'base', 'per-day', 'label', 'title', 'channel',
 ]);
 
 export function parseArgs(argv = process.argv.slice(2)): Args {

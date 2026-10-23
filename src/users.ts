@@ -11,12 +11,15 @@ import { loadConfig, loadPrefs, resolveCity } from './config.ts';
 import { loadEnv } from './paths.ts';
 import type { OptIn, Store, UserRow } from './db.ts';
 import type { Logger } from './log.ts';
+import { scheduleOf, type UserSchedule } from './schedule.ts';
 
 export interface BotUser {
   chatId: string;
   /** Authoritative city for this person (mirrors prefs.home_city). */
   city: string;
   prefs: Preferences;
+  /** When this person wants to hear from us; see src/schedule.ts. */
+  schedule: UserSchedule;
   row: UserRow;
 }
 
@@ -82,7 +85,13 @@ function parsePrefs(json: string, city: string, log?: Logger): Preferences {
 }
 
 export function toBotUser(row: UserRow, log?: Logger): BotUser {
-  return { chatId: row.chat_id, city: row.city, prefs: parsePrefs(row.prefs, row.city, log), row };
+  return {
+    chatId: row.chat_id,
+    city: row.city,
+    prefs: parsePrefs(row.prefs, row.city, log),
+    schedule: scheduleOf(row),
+    row,
+  };
 }
 
 export async function getUser(store: Store, chatId: string, log?: Logger): Promise<BotUser | null> {
