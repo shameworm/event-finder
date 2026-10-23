@@ -11,6 +11,12 @@
  *
  * Reminders are created by reacting ❤️ to an event message in Telegram
  * (scripts/bot.ts) — this script only delivers them.
+ *
+ * Quiet hours are honoured by exactly half of this. The "in ~3 hours" reminder
+ * always fires: it is the whole point of the feature, and a reminder that waits
+ * until morning for a show that started last night is worse than none. The
+ * "tomorrow" one is not urgent, so it is held until the quiet window ends —
+ * the row stays unfired and the next tick picks it up.
  */
 import { loadConfig } from '../src/config.ts';
 import { makeLogger } from '../src/log.ts';
@@ -18,6 +24,7 @@ import { parseArgs } from '../src/cli.ts';
 import { withStore } from '../src/db.ts';
 import { TelegramError, escapeHtml, sendMessage } from '../src/telegram-api.ts';
 import { canSend } from '../src/deliver.ts';
+import { reminderAllowedNow, scheduleOf } from '../src/schedule.ts';
 import { dayLabel, localDate, localTime, sleep } from '../src/util.ts';
 
 const args = parseArgs();
@@ -56,8 +63,25 @@ await withStore(async (store) => {
   const due = await store.dueReminders();
   log.info(`${due.length} reminder(s) due`);
 
+  const hour = Number(localTime(new Date(), cfg.timezone).slice(0, 2));
+  const schedules = new Map<string, ReturnType<typeof scheduleOf>>();
+  const scheduleFor = async (chatId: string) => {
+    const known = schedules.get(chatId);
+    if (known) return known;
+    const fresh = scheduleOf((await store.getUser(chatId)) ?? undefined);
+    schedules.set(chatId, fresh);
+    return fresh;
+  };
+
   let fired = 0;
+  let held = 0;
   for (const { row, which } of due) {
+    // the 1-day reminder can wait for morning; the 3-hour one cannot
+    if (!reminderAllowedNow(which, hour, await scheduleFor(row.chat_id))) {
+      log.info(`chat ${row.chat_id}: holding the 1-day reminder for "${row.title}" until quiet hours end`);
+      held++;
+      continue;
+    }
     const when = which === '1d' ? 'Завтра' : 'Вже за ~3 години';
     const day = dayLabel(localDate(row.starts_at, cfg.timezone), cfg.locale);
     const time = localTime(row.starts_at, cfg.timezone);
@@ -84,7 +108,10 @@ await withStore(async (store) => {
     if (cfg.bot.send_delay_ms) await sleep(cfg.bot.send_delay_ms);
   }
 
-  process.stdout.write(fired === 0 ? 'nothing due\n' : `${fired} reminder(s) ${dryRun ? 'would fire' : 'fired'}\n`);
+  const heldNote = held ? ` (${held} held for quiet hours)` : '';
+  process.stdout.write(
+    fired === 0 ? `nothing due${heldNote}\n` : `${fired} reminder(s) ${dryRun ? 'would fire' : 'fired'}${heldNote}\n`,
+  );
 });
 
 process.exit(0);

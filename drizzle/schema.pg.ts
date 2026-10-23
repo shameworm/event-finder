@@ -21,6 +21,20 @@ export const users = pgTable(
     weekendDigest: integer('weekend_digest').notNull().default(1),
     followAlerts: integer('follow_alerts').notNull().default(1),
     placeTips: integer('place_tips').notNull().default(1),
+    /**
+     * Personal schedule. Additive with defaults that reproduce the old
+     * hard-wired cron (Monday 09:00 + Thursday), because there are no
+     * migrations here: a row written before these columns existed must still
+     * read, and must behave exactly as it did.
+     */
+    digestHour: integer('digest_hour').notNull().default(9),
+    /** 0 = Sunday … 6 = Saturday, for the weekly digest. */
+    digestDay: integer('digest_day').notNull().default(1),
+    /** Quiet window, local hours; from === to means "no quiet hours". */
+    quietFrom: integer('quiet_from').notNull().default(23),
+    quietTo: integer('quiet_to').notNull().default(8),
+    /** 'weekly' | 'twice' | 'mine' — see src/schedule.ts. */
+    digestFreq: text('digest_freq').notNull().default('twice'),
     /** 1 = stopped the bot or was blocked; no sends, no digests. */
     blocked: integer('blocked').notNull().default(0),
     lastSeenAt: text('last_seen_at'),

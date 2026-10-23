@@ -226,7 +226,7 @@ export async function deleteMessage(
   opts: { chatId: string; dryRun?: boolean; log?: Logger },
 ): Promise<void> {
   if (opts.dryRun) {
-    process.stdout.write(`\n──────── delete ${opts.messageId} in chat ${opts.chatId} ────────\n`);
+    process.stdout.write(`\n──────── delete ${messageId} in chat ${opts.chatId} ────────\n`);
     return;
   }
   try {
