@@ -48,7 +48,7 @@ const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange
 const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom, pickImage } = await import('../src/normalize.ts');
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
-const { buildDigest, buildMessages, renderReminders } = await import('../src/render.ts');
+const { buildDigest, buildMessages, renderReminders, renderItem, renderCaption, CAPTION_LIMIT } = await import('../src/render.ts');
 const { loadConfig, loadPrefs, resolveCity, cityLocalName } = await import('../src/config.ts');
 const { applyPrefsCommand, describePrefs } = await import('../src/prefs-engine.ts');
 const { tagLabel } = await import('../src/categories.ts');
@@ -556,6 +556,53 @@ describe('render', () => {
   it('says the date is unknown in Ukrainian', () => {
     const items = [makeItem({ city: 'kharkiv', title: 'Someday', url: 'https://x/c3', source: 's' })!];
     assert.ok(buildDigest({ title: 'T', query, items, format: 'text' }).text.includes('дата уточнюється'));
+  });
+
+  it('drops the description rather than overrun a caption', () => {
+    // renderItem already caps a title at 160 and a blurb at 140, so a normal
+    // card fits 1024 easily; escaping is what pushes one over ("&" -> "&amp;")
+    const long = makeItem({
+      city: 'kharkiv',
+      title: '&'.repeat(160),
+      url: 'https://x/caption',
+      source: 'karabas',
+      startsAt: '2026-10-24T19:00:00+03:00',
+      venue: 'Театрально-концертний центр',
+      description: '&'.repeat(400),
+      priceMin: 300,
+      image: 'https://img/p.jpg',
+    })!;
+    const full = renderItem(long, { format: 'html' });
+    const caption = renderCaption(long, { format: 'html' });
+    assert.ok(full.length > CAPTION_LIMIT, `the full card was only ${full.length} chars`);
+    assert.ok(caption, 'this card is renderable as a caption');
+    assert.ok(caption.length <= CAPTION_LIMIT, `caption was ${caption.length} chars`);
+    // the facts a caption exists for must survive; only the blurb goes
+    assert.ok(caption.includes('19:00'), caption);
+    assert.ok(caption.includes('300'), caption);
+    assert.ok(caption.includes('Театрально-концертний центр'), caption);
+    assert.ok(caption.includes('https://x/caption'), caption);
+  });
+
+  it('leaves a short card alone, description and all', () => {
+    const short = makeItem({ city: 'kharkiv', title: 'Коротко', url: 'https://x/s', source: 'karabas', startsAt: '2026-10-24T19:00:00+03:00', description: 'Два слова.', image: 'https://img/p.jpg' })!;
+    const caption = renderCaption(short, { format: 'html' });
+    assert.equal(caption, renderItem(short, { format: 'html' }));
+    assert.ok(caption!.includes('Два слова.'));
+  });
+
+  it('fits a caption even when escaping multiplies every character', () => {
+    // "&" becomes "&amp;": a 160-character title can render as 960
+    const hostile = makeItem({ city: 'kharkiv', title: '&'.repeat(160), url: 'https://x/h', source: 'karabas', startsAt: '2026-10-24T19:00:00+03:00', venue: '<'.repeat(120), image: 'https://img/p.jpg' })!;
+    const caption = renderCaption(hostile, { format: 'html' });
+    assert.ok(caption, 'should still fit after shrinking the fields');
+    assert.ok(caption.length <= CAPTION_LIMIT, `caption was ${caption.length} chars`);
+    assert.ok(!/<[a-z]*$/.test(caption), 'must never cut an HTML tag in half');
+  });
+
+  it('gives up on the caption rather than drop the link', () => {
+    const silly = makeItem({ city: 'kharkiv', title: 'Тест', url: `https://x/${'z'.repeat(2000)}`, source: 'karabas', startsAt: '2026-10-24T19:00:00+03:00', image: 'https://img/p.jpg' })!;
+    assert.equal(renderCaption(silly, { format: 'html' }), null);
   });
 
   it('escapes HTML coming from a site', () => {

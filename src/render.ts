@@ -4,7 +4,9 @@ import { cityLabel, loadConfig } from './config.ts';
 import { priceText } from './normalize.ts';
 import { dayLabel, localDate, localTime, truncate } from './util.ts';
 import { groupByDay } from './rank.ts';
-import { escapeHtml, type InlineButton } from './telegram-api.ts';
+import { CAPTION_LIMIT, escapeHtml, type InlineButton } from './telegram-api.ts';
+
+export { CAPTION_LIMIT };
 
 export type Format = 'html' | 'text';
 
@@ -71,6 +73,12 @@ export interface RenderItemOptions {
   withDay?: boolean;
   /** Reason this item is being (re)sent, e.g. "new date". */
   changeNote?: string;
+  /**
+   * Caption mode: drop the description and the ranking line. A photo's caption
+   * gets 1024 characters where a message gets 4096, and the poster above it is
+   * already doing the work a blurb would.
+   */
+  compact?: boolean;
 }
 
 /** One event/place line: emoji, title, venue, time, price, description, link. */
@@ -99,14 +107,47 @@ export function renderItem(item: Item, opts: RenderItemOptions = {}): string {
     `${num}${emoji} ${bold(item.title, format)}${STATUS_BADGE[item.status] ?? ''}${note ? ` — 🔁 ${note}` : ''}`,
     facts,
   ];
-  if (item.description) lines.push(plain(truncate(item.description, 140), format));
+  if (item.description && !opts.compact) lines.push(plain(truncate(item.description, 140), format));
   // "квитки" is a promise; a free event or one with no price has none to make
   const buyable = item.kind === 'event' && !item.free && (item.priceMin !== undefined || item.priceMax !== undefined);
   lines.push(link(buyable ? 'квитки →' : 'детальніше →', item.url, format));
-  if (opts.explain && item.reasons?.length) {
+  if (opts.explain && !opts.compact && item.reasons?.length) {
     lines.push(plain(`· ${item.reasons.slice(0, 4).join(', ')} (бали ${item.score})`, format));
   }
   return lines.filter(Boolean).join('\n');
+}
+
+/**
+ * The same card, as a caption that fits under its poster — or null when it
+ * cannot be made to fit, in which case the card goes out as a plain message.
+ *
+ * It tries the full card first, since most of them already fit; then compact,
+ * without the description; and only then shortens the item's own fields. The
+ * last part matters: HTML escaping can multiply a hostile title sixfold
+ * ("&" -> "&amp;"), and clamping *rendered* HTML would cut a tag in half and
+ * make Telegram reject the whole message.
+ */
+export function renderCaption(item: Item, opts: RenderItemOptions = {}): string | null {
+  for (const compact of [false, true]) {
+    const text = renderItem(item, { ...opts, compact });
+    if (text.length <= CAPTION_LIMIT) return text;
+  }
+  for (const len of [120, 60, 30, 12]) {
+    const text = renderItem(
+      {
+        ...item,
+        title: truncate(item.title, len),
+        venue: item.venue ? truncate(item.venue, len) : undefined,
+        address: item.address ? truncate(item.address, len) : undefined,
+        description: undefined,
+      },
+      { ...opts, compact: true },
+    );
+    if (text.length <= CAPTION_LIMIT) return text;
+  }
+  // an absurdly long url is the only way to get here, and it is worth more
+  // than the poster: let the caller send a message instead
+  return null;
 }
 
 /** What `renderReminders` needs of a reminder row, and nothing more. */
