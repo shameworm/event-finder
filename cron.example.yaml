@@ -5,7 +5,7 @@
 # service (systemd / pm2 / launchd — see the README) so replies are instant.
 # These entries are the scheduled fan-outs. The two digest jobs TICK EVERY HOUR
 # and deliver to whoever asked for that hour: the schedule lives on each user
-# (digest_hour / digest_day / digest_freq, set from /settings → 🕘 Коли писати),
+# (digest_hour / digest_days, set from /settings → 🕘 Коли писати),
 # not in this file. A tick that matches nobody exits without scraping anything.
 #
 # Do not "optimise" these back to `0 9 * * 1`: that would pin everybody to one
@@ -27,8 +27,8 @@
 cron:
   # ── 1. Every hour — "this week in <their city>", at each person's own hour ─
   #
-  # Only the users whose digest_hour is this hour and whose digest_day is today
-  # are covered; the other 23 ticks are a no-op for them. Hours are limited to
+  # Only the users whose digest_hour is this hour and who ticked today are
+  # covered; the other 23 ticks are a no-op for them. Hours are limited to
   # a six-slot menu (07, 09, 12, 15, 18, 21) on purpose — see the README for
   # what a free choice of all 24 would cost the source sites.
   - name: events-finder-weekly-digest

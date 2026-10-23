@@ -6,7 +6,7 @@
  * is keyed by their Telegram chat id. Keep this in sync with
  * drizzle/schema.pg.ts; `src/db.ts` picks one at runtime.
  */
-import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 /** One row per person using the bot. `prefs` is their Preferences as JSON. */
 export const users = sqliteTable(
@@ -31,8 +31,14 @@ export const users = sqliteTable(
      * read, and must behave exactly as it did.
      */
     digestHour: integer('digest_hour').notNull().default(9),
-    /** 0 = Sunday … 6 = Saturday, for the weekly digest. */
+    /** The legacy single weekday — see `digestDays`, which supersedes it. */
     digestDay: integer('digest_day').notNull().default(1),
+    /**
+     * The days a digest arrives: one bit per weekday, bit 0 = Sunday. NULL
+     * means the user has never touched the schedule, so the legacy
+     * `digestDay` + `digestFreq` pair still decides. See src/schedule.ts.
+     */
+    digestDays: integer('digest_days'),
     /** Quiet window, local hours; from === to means "no quiet hours". */
     quietFrom: integer('quiet_from').notNull().default(23),
     quietTo: integer('quiet_to').notNull().default(8),
@@ -97,7 +103,10 @@ export const reminders = sqliteTable(
     fired3h: integer('fired_3h').notNull().default(0),
     cancelled: integer('cancelled').notNull().default(0),
   },
-  (t) => [index('idx_rem_start').on(t.startsAt), index('idx_rem_chat').on(t.chatId, t.itemId)],
+  // unique, and named exactly as src/db.ts bootstraps it: one reminder per
+  // chat per event is what makes a second ❤️ an update instead of a duplicate.
+  // src/db.ts's CREATE TABLE is the authority — these must not drift from it.
+  (t) => [index('idx_rem_start').on(t.startsAt), uniqueIndex('idx_rem_chat_item').on(t.chatId, t.itemId)],
 );
 
 /**

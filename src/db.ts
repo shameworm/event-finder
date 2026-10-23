@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { ItemSchema, QuerySchema, type Item } from './types.ts';
 import { DB_FILE, ensureDirs, loadEnv } from './paths.ts';
 import { fingerprint } from './dedupe.ts';
+import { daysMask } from './schedule.ts';
 import * as sqliteSchema from '../drizzle/schema.sqlite.ts';
 import * as pgSchema from '../drizzle/schema.pg.ts';
 
@@ -116,6 +117,7 @@ async function bootstrap(d: Driver): Promise<void> {
     place_tips     integer NOT NULL DEFAULT 1,
     digest_hour    integer NOT NULL DEFAULT 9,
     digest_day     integer NOT NULL DEFAULT 1,
+    digest_days    integer,
     quiet_from     integer NOT NULL DEFAULT 23,
     quiet_to       integer NOT NULL DEFAULT 8,
     digest_freq    text NOT NULL DEFAULT 'twice',
@@ -133,6 +135,10 @@ async function bootstrap(d: Driver): Promise<void> {
   for (const [column, type] of [
     ['digest_hour', `integer NOT NULL DEFAULT 9`],
     ['digest_day', `integer NOT NULL DEFAULT 1`],
+    // deliberately nullable and defaultless: NULL is what says "use the
+    // digest_day/freq above", and giving it a default would silently move
+    // every existing user onto Monday-and-Thursday
+    ['digest_days', `integer`],
     ['quiet_from', `integer NOT NULL DEFAULT 23`],
     ['quiet_to', `integer NOT NULL DEFAULT 8`],
     ['digest_freq', `text NOT NULL DEFAULT 'twice'`],
@@ -214,6 +220,20 @@ async function bootstrap(d: Driver): Promise<void> {
 const nowIso = () => new Date().toISOString();
 
 /**
+ * How long bookkeeping rows are kept by `Store.prune()`. Generous on purpose:
+ * `messages` is what a late ❤️ resolves through, and `deliveries` is what
+ * stops a digest repeating itself.
+ */
+const RETENTION = {
+  messagesDays: 120,
+  deliveriesDays: 180,
+  /** Reminders for events this far in the past are of no use to anyone. */
+  remindersDays: 60,
+  /** Hourly rate-limit buckets. */
+  usageHours: 48,
+};
+
+/**
  * Onboarded enough to be sent something. The /start walkthrough parks its step
  * in `stage`, but only the city is actually required to build a digest — so
  * someone who walked away at "what's your budget?" still gets one, and only
@@ -236,6 +256,12 @@ export const UserRowSchema = z.object({
   // predates these columns still parses and behaves as it always did
   digest_hour: z.coerce.number().int().default(9),
   digest_day: z.coerce.number().int().default(1),
+  /**
+   * The days a digest arrives, as one bit per weekday (bit 0 = Sunday). NULL
+   * means nobody has touched this row since it existed — the legacy
+   * `digest_day` + `digest_freq` below still say what they want.
+   */
+  digest_days: z.coerce.number().int().nullable().default(null),
   quiet_from: z.coerce.number().int().default(23),
   quiet_to: z.coerce.number().int().default(8),
   digest_freq: z.string().default('twice'),
@@ -384,10 +410,13 @@ export class Store {
    * Change one piece of someone's delivery schedule. Each field is written
    * through its own statement so the column list stays a closed set of
    * literals rather than something assembled from input.
+   *
+   * `days` is the weekday set as a bitmask (bit 0 = Sunday), and writing it is
+   * what retires the legacy `digest_day`/`digest_freq` for that user.
    */
   async setSchedule(
     chatId: string,
-    patch: { hour?: number; day?: number; quietFrom?: number; quietTo?: number; frequency?: string },
+    patch: { hour?: number; days?: number[]; quietFrom?: number; quietTo?: number; frequency?: string },
   ): Promise<void> {
     const t = this.d.schema;
     const ts = nowIso();
@@ -395,7 +424,7 @@ export class Store {
       await this.d.run(sql`UPDATE ${t.users} SET ${column} = ${value}, updated_at = ${ts} WHERE chat_id = ${chatId}`);
     };
     if (patch.hour !== undefined) await set(sql`digest_hour`, patch.hour);
-    if (patch.day !== undefined) await set(sql`digest_day`, patch.day);
+    if (patch.days !== undefined) await set(sql`digest_days`, daysMask(patch.days));
     if (patch.quietFrom !== undefined) await set(sql`quiet_from`, patch.quietFrom);
     if (patch.quietTo !== undefined) await set(sql`quiet_to`, patch.quietTo);
     if (patch.frequency !== undefined) await set(sql`digest_freq`, patch.frequency);
@@ -547,12 +576,22 @@ export class Store {
     return 'added';
   }
 
-  async listReminders(chatId?: string): Promise<ReminderRow[]> {
+  /**
+   * Live reminders. A chat that said /stop ("більше нічого не надсилаю") is
+   * excluded even though its reminder rows stay put — /start brings them back.
+   */
+  async listReminders(chatId?: string, window?: { from: string; to: string }): Promise<ReminderRow[]> {
     const t = this.d.schema;
-    const scope = chatId ? sql` AND chat_id = ${chatId}` : sql``;
+    const scope = chatId ? sql` AND r.chat_id = ${chatId}` : sql``;
+    // the reminder cron runs every 15 minutes and only ever cares about the day
+    // either side of now, so it asks for that slice instead of every row
+    const bound = window ? sql` AND r.starts_at >= ${window.from} AND r.starts_at <= ${window.to}` : sql``;
     const rows = await this.d.all(
-      sql`SELECT id, chat_id, item_id, title, city, venue, starts_at, url, fired_1d, fired_3h
-          FROM ${t.reminders} WHERE cancelled = 0${scope} ORDER BY starts_at`,
+      sql`SELECT r.id, r.chat_id, r.item_id, r.title, r.city, r.venue, r.starts_at, r.url, r.fired_1d, r.fired_3h
+          FROM ${t.reminders} r
+          WHERE r.cancelled = 0${scope}${bound}
+            AND r.chat_id NOT IN (SELECT chat_id FROM ${t.users} WHERE blocked = 1)
+          ORDER BY r.starts_at`,
     );
     return rows.flatMap((r) => {
       const parsed = ReminderRowSchema.safeParse(r);
@@ -563,7 +602,14 @@ export class Store {
   /** Reminders whose 1-day or 3-hour mark has passed but has not fired yet. */
   async dueReminders(now = new Date()): Promise<{ row: ReminderRow; which: '1d' | '3h' }[]> {
     const due: { row: ReminderRow; which: '1d' | '3h' }[] = [];
-    for (const row of await this.listReminders()) {
+    // nothing outside this window can be due. The bound is text comparison on
+    // ISO strings whose offsets may differ from ours, so it is deliberately two
+    // days wide either way; the exact arithmetic below still decides.
+    const window = {
+      from: new Date(now.getTime() - 2 * 86_400_000).toISOString(),
+      to: new Date(now.getTime() + 2 * 86_400_000).toISOString(),
+    };
+    for (const row of await this.listReminders(undefined, window)) {
       if (row.fired_1d === 1 && row.fired_3h === 1) continue;
       const start = Date.parse(row.starts_at);
       if (Number.isNaN(start)) continue;
@@ -669,7 +715,31 @@ export class Store {
   }
 
   async pruneCache(): Promise<void> {
-    await this.d.run(sql`DELETE FROM ${this.d.schema.scrapeCache} WHERE expires_at < ${nowIso()}`);
+    // `<=`, as getCache reads it: an entry whose ttl is up already counts as
+    // stale, and a strict `<` left a 0-ttl row behind whenever the prune
+    // happened in the same millisecond the row was written.
+    await this.d.run(sql`DELETE FROM ${this.d.schema.scrapeCache} WHERE expires_at <= ${nowIso()}`);
+  }
+
+  /**
+   * Housekeeping: drop the cache rows that have expired and the bookkeeping
+   * nobody can use any more. Without this, `messages`, `deliveries` and
+   * `usage` only ever grow — a year of weekly digests for a hundred people is
+   * a few hundred thousand rows about events that have already happened.
+   *
+   * Called at the end of every fan-out job, so there is nothing extra to cron.
+   */
+  async prune(): Promise<void> {
+    await this.pruneCache();
+    const t = this.d.schema;
+    const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString();
+    // a ❤️ resolves through `messages`, so these outlive the digest itself
+    await this.d.run(sql`DELETE FROM ${t.messages} WHERE sent_at < ${daysAgo(RETENTION.messagesDays)}`);
+    await this.d.run(sql`DELETE FROM ${t.deliveries} WHERE last_sent_at < ${daysAgo(RETENTION.deliveriesDays)}`);
+    await this.d.run(sql`DELETE FROM ${t.reminders} WHERE starts_at < ${daysAgo(RETENTION.remindersDays)}`);
+    await this.d.run(
+      sql`DELETE FROM ${t.usage} WHERE bucket < ${new Date(Date.now() - RETENTION.usageHours * 3_600_000).toISOString().slice(0, 13)}`,
+    );
   }
 
   /* -------------------------------------------------------- rate limiting --- */

@@ -1,7 +1,7 @@
 import type { Kind, Preferences, Query } from './types.ts';
 import { EVENT_CATEGORIES, KEYWORDS, PLACE_CATEGORIES, TAG_SYNONYMS } from './categories.ts';
 import { loadConfig, resolveCity } from './config.ts';
-import { WORD_START, addDays, hasWord, monthFromWord, normText, pad2, today, weekdayOf } from './util.ts';
+import { WORD_START, addDays, hasWord, monthFromWord, nextOccurrence, normText, pad2, parseBudget, today, weekdayOf } from './util.ts';
 
 /* ------------------------------------------------------------- date ranges --- */
 
@@ -62,7 +62,10 @@ export function parseDateRange(text: string, base = today(loadConfig().timezone)
   if (hasWord(t, 'tomorrow', 'завтра')) return { from: addDays(base, 1), to: addDays(base, 1), label: 'завтра' };
   if (hasWord(t, 'післязавтра', 'послезавтра')) return { from: addDays(base, 2), to: addDays(base, 2), label: 'післязавтра' };
   if (/(next weekend|наступні вихідні|наступних вихідних|на наступних вихідних)/.test(t)) {
-    const w = weekendRange(addDays(base, 7));
+    // measured from next Monday, not from today + 7: asked on a Sunday,
+    // "today + 7" is another Sunday, and weekendRange would hand back that
+    // one day alone instead of the whole Friday–Sunday
+    const w = weekendRange(nextWeekRange(base).from);
     return { ...w, label: 'наступні вихідні' };
   }
   if (/(weekend|вихідн|выходн)/.test(t)) return weekendRange(base);
@@ -83,10 +86,16 @@ export function parseDateRange(text: string, base = today(loadConfig().timezone)
   if (spanWord) {
     const mon = monthFromWord(spanWord[3] as string);
     if (mon) {
-      const y = Number(base.slice(0, 4));
-      const from = `${y}-${pad2(mon)}-${pad2(Number(spanWord[1]))}`;
-      const to = `${y}-${pad2(mon)}-${pad2(Number(spanWord[2]))}`;
-      return { from, to, label: `${spanWord[1]}–${spanWord[2]} ${spanWord[3]}` };
+      // one year for the whole span, rolled forward only when its *end* has
+      // passed: "28-30 грудня" asked on the 29th is happening right now, and
+      // "15-17 січня" asked in late December is three weeks away, not eleven
+      // months behind
+      const d1 = Number(spanWord[1]);
+      const d2 = Number(spanWord[2]);
+      const day = (y: number, d: number) => `${y}-${pad2(mon)}-${pad2(d)}`;
+      const y0 = Number(base.slice(0, 4));
+      const y = day(y0, d2) >= base.slice(0, 10) ? y0 : y0 + 1;
+      return { from: day(y, d1), to: day(y, d2), label: `${spanWord[1]}–${spanWord[2]} ${spanWord[3]}` };
     }
   }
 
@@ -95,18 +104,20 @@ export function parseDateRange(text: string, base = today(loadConfig().timezone)
   if (dayWord) {
     const mon = monthFromWord(dayWord[2] as string);
     if (mon) {
-      const y = Number(base.slice(0, 4));
-      const d = `${y}-${pad2(mon)}-${pad2(Number(dayWord[1]))}`;
+      const d = nextOccurrence(base, mon, Number(dayWord[1]));
       return { from: d, to: d, label: `${dayWord[1]} ${dayWord[2]}` };
     }
   }
 
-  // 25.10 / 25.10.2026 / 2026-10-25, optional range with a dash
-  const iso = raw.match(/(\d{4})-(\d{2})-(\d{2})/);
+  // 2026-10-25, or a range: 2026-10-25..2026-10-27, "… - …", "… to …"
+  const iso = raw.match(/(\d{4}-\d{2}-\d{2})(?:\s*(?:\.{2,}|[-–—]|to|по)\s*(\d{4}-\d{2}-\d{2}))?/);
   const dotted = text.match(/(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?(?:\s*[-–]\s*(\d{1,2})[./](\d{1,2}))?/);
   if (iso) {
-    const d = `${iso[1]}-${iso[2]}-${iso[3]}`;
-    return { from: d, to: d, label: d };
+    const a = iso[1] as string;
+    const b = iso[2] ?? a;
+    // whichever way round they typed it
+    const [from, to] = a <= b ? [a, b] : [b, a];
+    return { from, to, label: from === to ? from : `${from}..${to}` };
   }
   if (dotted) {
     const y = dotted[3] ? (dotted[3].length === 2 ? `20${dotted[3]}` : dotted[3]) : base.slice(0, 4);
@@ -235,11 +246,9 @@ export function parseRequest(text: string, opts: ParseOptions = {}): Query {
   dislike.delete('other');
 
   // --- budget
-  let maxPrice = opts.maxPrice;
-  if (maxPrice === undefined) {
-    const m = normText(text).match(/(?:до|under|max|не більше|не дорожче|cheaper than)\s*(\d{2,5})/);
-    if (m) maxPrice = Number(m[1]);
-  }
+  // on the raw text, and only when a price word makes "до" about money: a
+  // bare "до 20:00" used to cap the search at 20 ₴ and hide everything
+  const maxPrice = opts.maxPrice ?? parseBudget(text);
 
   // --- kinds
   let kinds: Kind[] = opts.kinds ?? ['event'];

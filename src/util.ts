@@ -150,13 +150,24 @@ export function monthFromWord(word: string): number {
   return 0;
 }
 
+/**
+ * A day and month with no year, as the next date that fits: "15 січня" asked
+ * on 20 December is three weeks away, not eleven months in the past.
+ */
+export function nextOccurrence(base: string, month: number, day: number): string {
+  const year = Number(base.slice(0, 4));
+  const candidate = `${year}-${pad2(month)}-${pad2(day)}`;
+  return candidate >= base.slice(0, 10) ? candidate : `${year + 1}-${pad2(month)}-${pad2(day)}`;
+}
+
 export function pad2(n: number): string {
   return String(n).padStart(2, '0');
 }
 
-/** Human day label: "Fri 24 Oct". */
+/** Human day label: "Fri 24 Oct". Empty string for an unparseable date. */
 export function dayLabel(date: string, locale = 'uk-UA'): string {
   const d = new Date(`${date}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return '';
   return new Intl.DateTimeFormat(locale, { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }).format(d);
 }
 
@@ -237,4 +248,32 @@ export function wordRe(word: string, flags = 'iu'): RegExp {
 /** True when any of `words` appears in `text` as a whole word. */
 export function hasWord(text: string, ...words: string[]): boolean {
   return words.some((w) => w.length > 0 && wordRe(w).test(text));
+}
+
+/* ----------------------------------------------------------------- money --- */
+
+/** Words that make a number money rather than a time, a count or a date. */
+const PRICE_WORD = /price|грн|uah|₴|гривн|гривень|budget|бюджет|ціна|цін|квит|ticket|дорожч|дешев|cheaper/i;
+
+/** Openers that mean money on their own. */
+const BUDGET_OPENER = String.raw`max(?:imum)?|budget|limit|ліміт|бюджет|максимум|не більше|не дорожче|cheaper than`;
+
+/**
+ * "up to 500 hryvnia" in any of the shapes people type it, or undefined.
+ *
+ * Two tiers on purpose. `до` and `under` are ordinary prepositions and
+ * `\d{2,5}` happily matches the first half of a clock time, so on their own
+ * they need a price word nearby: "що буде до 20:00?" is a question about an
+ * evening, and reading it as a 20 ₴ budget both swallowed the search and
+ * filtered out everything that costs money.
+ *
+ * Call this with the **raw** text: normalising it first drops the colon that
+ * tells a time from a price.
+ */
+export function parseBudget(text: string): number | undefined {
+  const amount = String.raw`${WORD_END}[^\d]{0,15}(\d{2,5})(?!\s*[:.]\d)`;
+  const hit =
+    text.match(new RegExp(`${WORD_START}(?:${BUDGET_OPENER})${amount}`, 'iu')) ??
+    (PRICE_WORD.test(text) ? text.match(new RegExp(String.raw`${WORD_START}(?:under|до)${amount}`, 'iu')) : null);
+  return hit ? Number(hit[1]) : undefined;
 }

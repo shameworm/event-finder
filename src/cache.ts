@@ -9,7 +9,7 @@ import type { Item, Kind, Query } from './types.ts';
 import { PreferencesSchema } from './types.ts';
 import { loadConfig } from './config.ts';
 import { sha1 } from './util.ts';
-import { runPipeline, ALL_SOURCE_NAMES } from './pipeline.ts';
+import { runPipeline, ALL_SOURCE_NAMES, type PipelineOptions } from './pipeline.ts';
 import type { Store } from './db.ts';
 import type { Logger } from './log.ts';
 
@@ -23,8 +23,13 @@ export interface CityWindow {
   kinds: Kind[];
 }
 
-export function cacheKey(w: CityWindow, sources: string[]): string {
-  return sha1('v1', w.city, w.from, w.to, w.kinds.join(','), [...sources].sort().join(','));
+/**
+ * `depth` (pages per source) is part of the key on purpose: an interactive
+ * two-page search and a six-page digest are *different* scrapes, and sharing
+ * one entry let a quick question thin out that city's digest for the whole TTL.
+ */
+export function cacheKey(w: CityWindow, sources: string[], depth: number): string {
+  return sha1('v1', w.city, w.from, w.to, w.kinds.join(','), [...sources].sort().join(','), String(depth));
 }
 
 export interface CollectOptions extends CityWindow {
@@ -36,6 +41,8 @@ export interface CollectOptions extends CityWindow {
   ttlSeconds?: number;
   /** Ignore the cache and scrape again. */
   force?: boolean;
+  /** Passed through to the collectors; the test suite serves fixtures with it. */
+  fetchText?: PipelineOptions['fetchText'];
 }
 
 export interface CollectResult {
@@ -45,13 +52,21 @@ export interface CollectResult {
 }
 
 /**
+ * Scrapes running right now, by cache key. Two users asking the same thing a
+ * second apart used to start two identical crawls, because neither had written
+ * the cache entry yet; the second one now waits for the first.
+ */
+const inFlight = new Map<string, Promise<CollectResult>>();
+
+/**
  * Items for one city and window, from the cache when it is warm.
  * The returned items are deduplicated but unranked and unfiltered.
  */
 export async function collectCity(opts: CollectOptions): Promise<CollectResult> {
   const cfg = loadConfig();
   const sources = opts.sources?.length ? opts.sources : ALL_SOURCE_NAMES;
-  const key = cacheKey(opts, sources);
+  const depth = opts.maxPages ?? cfg.http.max_pages;
+  const key = cacheKey(opts, sources, depth);
   const ttl = opts.ttlSeconds ?? cfg.cache.ttl_seconds;
 
   if (!opts.force && ttl > 0) {
@@ -62,6 +77,23 @@ export async function collectCity(opts: CollectOptions): Promise<CollectResult> 
     }
   }
 
+  const running = inFlight.get(key);
+  if (running) {
+    opts.log.info(`joining the scrape already running for ${opts.city} ${opts.from}..${opts.to}`);
+    return running;
+  }
+  const scrape = scrapeCity(opts, sources, depth, key, ttl).finally(() => inFlight.delete(key));
+  inFlight.set(key, scrape);
+  return scrape;
+}
+
+async function scrapeCity(
+  opts: CollectOptions,
+  sources: string[],
+  depth: number,
+  key: string,
+  ttl: number,
+): Promise<CollectResult> {
   const query: Query = {
     cities: [opts.city],
     from: opts.from,
@@ -77,7 +109,9 @@ export async function collectCity(opts: CollectOptions): Promise<CollectResult> 
     prefs: NEUTRAL,
     log: opts.log,
     only: sources,
-    maxPages: opts.maxPages,
+    // the same depth the key was built from
+    maxPages: depth,
+    fetchText: opts.fetchText,
     keepDisliked: true,
     keepExpensive: true,
     // one scrape serves everyone in the city; whose taste it fits is decided

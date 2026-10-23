@@ -12,11 +12,10 @@
 import type { Item, SourceResult } from '../src/types.ts';
 import { loadConfig } from '../src/config.ts';
 import { eventsFromJsonLd } from '../src/jsonld.ts';
-import { politeFetch } from '../src/http.ts';
 import { fromSchemaEvent } from '../src/normalize.ts';
 import { inWindow } from '../src/filter.ts';
 import { categoryFromSlug } from '../src/categories.ts';
-import { runSourceCli, type SourceContext } from '../src/source.ts';
+import { fetcherFor, pager, runSourceCli, type SourceContext } from '../src/source.ts';
 
 export const SOURCE = 'concert.ua';
 const BASE = 'https://concert.ua/en/catalog';
@@ -33,16 +32,14 @@ export async function collect(ctx: SourceContext): Promise<SourceResult> {
   const categories = sourceCfg.categories?.length ? sourceCfg.categories : ['all-categories'];
   const maxPages = ctx.maxPages ?? cfg.http.max_pages;
   const items: Item[] = [];
-  let fetched = 0;
+  const fetchText = fetcherFor(ctx);
+  const pages = pager(ctx.log);
 
   for (const category of categories) {
-    for (let page = 1; page <= maxPages; page++) {
+    await pages.walk(`${SOURCE}: ${category}`, maxPages, async (page) => {
       const url = `${BASE}/${sourceCfg.slug}/${category}${page > 1 ? `?page=${page}` : ''}`;
-      const html = await politeFetch(url, { log: ctx.log });
-      fetched++;
-      const raw = eventsFromJsonLd(html);
+      const raw = eventsFromJsonLd(await fetchText(url, { log: ctx.log }));
       ctx.log.info(`${SOURCE}: ${category} page ${page}: ${raw.length} events`);
-      if (raw.length === 0) break;
 
       for (const obj of raw) {
         const item = fromSchemaEvent(obj, {
@@ -52,10 +49,11 @@ export async function collect(ctx: SourceContext): Promise<SourceResult> {
         });
         if (item && inWindow(item, ctx.query)) items.push(item);
       }
-    }
+      return raw.length;
+    });
   }
 
-  return { source: SOURCE, ok: true, items, fetched };
+  return pages.result(SOURCE, items);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) await runSourceCli(SOURCE, collect);

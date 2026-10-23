@@ -8,7 +8,7 @@
  *   npx tsx scripts/digest.ts --weekend --chat 123   # only that user (useful for testing)
  *
  * **This runs every hour**, not once a week. The schedule lives on each user
- * (digest_hour / digest_day / digest_freq, see src/schedule.ts), so a run only
+ * (digest_hour / digest_days, see src/schedule.ts), so a run only
  * covers the people whose hour it currently is and does nothing the other 23
  * times. Each city is still scraped once per run and ranked separately for
  * every user in it, so a hundred Kharkiv subscribers sharing an hour cost one
@@ -87,4 +87,4 @@ await withStore(async (store) => {
   }
 });
 
-process.exit(0);
+process.exit(process.exitCode ?? 0);

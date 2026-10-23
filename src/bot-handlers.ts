@@ -10,16 +10,16 @@ import type { OptIn, Store } from './db.ts';
 import type { Logger } from './log.ts';
 import type { TgCallbackQuery, TgMessage, TgReactionUpdate } from './schemas.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
-import { answerCallbackQuery, editMessageText, escapeHtml, sendMessage, type InlineButton } from './telegram-api.ts';
+import { answerCallbackQuery, deleteMessage, editMessageCaption, editMessageText, escapeHtml, sendMessage, type InlineButton } from './telegram-api.ts';
 import { applyPrefsCommand, applyThumbsDown, describePrefs, favouritesFromList } from './prefs-engine.ts';
 import { CATEGORY_LABEL, DISLIKE_SUGGESTIONS, EMOJI, EVENT_CATEGORIES, canonicalTag, tagLabel } from './categories.ts';
 import { parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
-import { countEvents, eventKeyboard, moreButton, renderItem, renderReminders } from './render.ts';
+import { countEvents, eventKeyboard, moreButton, renderCaption, renderItem, renderReminders } from './render.ts';
 import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
-import { DIGEST_DAYS, DIGEST_HOURS, FREQUENCIES, describeSchedule, hourLabel, isFrequency } from './schedule.ts';
+import { DIGEST_DAYS, DIGEST_HOURS, describeSchedule, hourLabel, toggleDay } from './schedule.ts';
 import { WORD_END, addDays, normText, today } from './util.ts';
 
 export interface HandlerContext {
@@ -466,19 +466,10 @@ async function handleStepText(
 /* ------------------------------------------------------------- schedule --- */
 
 /**
- * The quiet-hours windows on offer. A free pair of dials would be four taps
- * and a lot of screens for a setting nobody wants to fine-tune; these cover
- * "I go to bed early", "I go to bed late" and "do not bother".
- */
-const QUIET_PRESETS: { from: number; to: number; label: string }[] = [
-  { from: 0, to: 0, label: 'вимкнено' },
-  { from: 22, to: 8, label: '22:00–08:00' },
-  { from: 23, to: 8, label: '23:00–08:00' },
-  { from: 0, to: 9, label: '00:00–09:00' },
-];
-
-/**
- * "Коли писати" — the hour, the day, how often, and the quiet window.
+ * "Коли писати" — an hour and the days of the week. That is the whole screen,
+ * and deliberately so: hour + day + frequency + quiet window was four concepts
+ * and eighteen buttons for a thing people summarise as "Monday and Thursday
+ * at seven".
  *
  * Only six hours are offered, and that is a deliberate limit rather than a
  * shortage of buttons: every distinct hour someone picks is another fan-out
@@ -489,12 +480,8 @@ function schedulePanel(user: BotUser): Screen {
   const text =
     `<b>🕘 Коли писати</b>\n\n` +
     `Зараз: <b>${escapeHtml(describeSchedule(s))}</b>\n\n` +
-    `<b>Година</b> — о котрій приходить дайджест.\n` +
-    `<b>День</b> — коли приходить тижневий (вихідні — завжди в четвер).\n` +
-    `<b>Частота</b> — ${FREQUENCIES.map((f) => `<i>${escapeHtml(f.label.toLowerCase())}</i> — ${escapeHtml(f.hint)}`).join('; ')}.\n` +
-    `<b>Тихі години</b> — не пишу нічого несподіваного. Дайджест о ` +
-    `${hourLabel(s.hour)} це не скасовує — ти сам його попросив, — ` +
-    `і нагадування «за ~3 години» теж приходить завжди, інакше від нього нуль сенсу.`;
+    `Обери годину і дні. Дайджест прийде того дня, обраної години.\n` +
+    `Четвер — дайджест на вихідні (пт–нд), тож він рахується окремо.`;
   return {
     text,
     inlineKeyboard: [
@@ -503,16 +490,8 @@ function schedulePanel(user: BotUser): Screen {
         3,
       ),
       ...rows(
-        DIGEST_DAYS.map((d) => ({ text: tick(s.day === d.day, d.short), callback_data: `when:day:${d.day}` })),
+        DIGEST_DAYS.map((d) => ({ text: tick(s.days.includes(d.day), d.short), callback_data: `when:day:${d.day}` })),
         4,
-      ),
-      ...FREQUENCIES.map((f) => [{ text: tick(s.frequency === f.key, f.label), callback_data: `when:freq:${f.key}` }]),
-      ...rows(
-        QUIET_PRESETS.map((q) => ({
-          text: tick(s.quietFrom === q.from && s.quietTo === q.to, `🔇 ${q.label}`),
-          callback_data: `when:quiet:${q.from}-${q.to}`,
-        })),
-        2,
       ),
       [{ text: '⬅️ Назад', callback_data: 'set:back' }],
     ],
@@ -656,7 +635,9 @@ export async function answerSearch(
     return 0;
   }
 
-  await opts.reply('⏳ Шукаю…');
+  // sent directly rather than through `reply`, because taking the hourglass
+  // back again needs the message id Telegram gives it
+  const placeholder = await sendMessage('⏳ Шукаю…', { chatId: user.chatId, dryRun: ctx.dryRun, log: ctx.log });
 
   const collected: Item[] = [];
   const failed: string[] = [];
@@ -709,6 +690,9 @@ export async function answerSearch(
             ? `Показав тільки те, що тобі заходить — ще ${offTaste} події відфільтрував. /prefs, якщо це занадто вузько.`
             : undefined,
   });
+  // the hourglass stood in for an answer that has now arrived
+  for (const id of placeholder) await deleteMessage(id, { chatId: user.chatId, dryRun: ctx.dryRun, log: ctx.log });
+
   // park the tail next to the header it belongs to, so paging through it later
   // costs a database read rather than another crawl of somebody's site
   if (rest.length > 0 && outcome.headerMessageId !== undefined && !outcome.chatGone) {
@@ -1011,7 +995,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
  *                 onb:like:<cat> · onb:dis:<tag> · onb:budget:<n|none>
  *                 onb:unfollow:<index> · onb:next · onb:skip
  *                 onb:step:<step> · onb:taste · onb:start · onb:later
- *                 when:hour:<0-23> · when:day:<0-6> · when:freq:<key> · when:quiet:<from>-<to>
+ *                 when:hour:<0-23> · when:day:<0-6> (tap to flip a day on/off)
  *   more          the next page of an answer, from the stash behind its
  *                 header; which answer comes from the message it is on
  *   ev:<verb>:<item id>  a button under an event card — ev:r toggles the
@@ -1043,13 +1027,11 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
   /** Redraw the settings screen with whatever is in the database now. */
   const draw = async (screen: { text: string; inlineKeyboard: InlineButton[][] }, inPlace = true) => {
     if (inPlace && messageId) {
-      await editMessageText(screen.text, {
-        chatId,
-        messageId,
-        inlineKeyboard: screen.inlineKeyboard,
-        dryRun: ctx.dryRun,
-        log: ctx.log,
-      });
+      // a poster card went out as a photo, so its words are a caption —
+      // editMessageText on it is Bad Request: "there is no text in the message"
+      const opts = { chatId, messageId, inlineKeyboard: screen.inlineKeyboard, dryRun: ctx.dryRun, log: ctx.log };
+      if (cq.message?.photo?.length) await editMessageCaption(screen.text, opts);
+      else await editMessageText(screen.text, opts);
     } else {
       await reply(screen.text, { inlineKeyboard: screen.inlineKeyboard });
     }
@@ -1063,6 +1045,7 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
       verb: cut < 0 ? arg : arg.slice(0, cut),
       itemId: cut < 0 ? '' : arg.slice(cut + 1),
       messageId,
+      photo: (cq.message?.photo?.length ?? 0) > 0,
       draw,
       reply,
     });
@@ -1151,14 +1134,11 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
     if (verb === 'hour' && (DIGEST_HOURS as readonly number[]).includes(Number(payload))) {
       await ctx.store.setSchedule(chatId, { hour: Number(payload) });
     } else if (verb === 'day' && DIGEST_DAYS.some((d) => d.day === Number(payload))) {
-      await ctx.store.setSchedule(chatId, { day: Number(payload) });
-    } else if (verb === 'freq' && isFrequency(payload)) {
-      await ctx.store.setSchedule(chatId, { frequency: payload });
-    } else if (verb === 'quiet') {
-      const hours = payload.split('-').map(Number);
-      const [from, to] = hours;
-      if (hours.length !== 2 || !hours.every((n) => Number.isInteger(n) && n >= 0 && n <= 23)) return;
-      await ctx.store.setSchedule(chatId, { quietFrom: from, quietTo: to });
+      // a tap flips one day. The last day cannot be taken off — someone with
+      // no days left has a digest they pay for and can never receive
+      const next = toggleDay(user.schedule.days, Number(payload));
+      if (!next) return reply('Залиш хоч один день — інакше дайджесту не буде зовсім.');
+      await ctx.store.setSchedule(chatId, { days: next });
     }
     return draw(schedulePanel((await getUser(ctx.store, chatId, ctx.log)) ?? user));
   }
@@ -1230,6 +1210,8 @@ async function handleCardButton(
     verb: string;
     itemId: string;
     messageId?: number;
+    /** The card went out as a photo, so its redraw has to be a caption. */
+    photo?: boolean;
     draw: (screen: { text: string; inlineKeyboard: InlineButton[][] }, inPlace?: boolean) => Promise<void>;
     reply: Reply;
   },
@@ -1271,11 +1253,20 @@ async function handleCardButton(
     ctx.log.info(`chat ${chatId} belled "${item.title}" (reminder ${outcome}${learned.tag ? `, learned ${learned.tag}` : ''})`);
   }
 
-  // the card itself is the feedback: the same text, with ⏰ flipped over
-  return draw({
-    text: renderItem(item, { format: ctx.dryRun ? 'text' : 'html', withDay: true }),
-    inlineKeyboard: eventKeyboard(item, { reminded: !reminded }),
-  });
+  // the card itself is the feedback: the same text, with ⏰ flipped over —
+  // as a caption under the poster when the card is a photo, where Telegram
+  // allows 1024 characters, not the 4096 a message gets
+  const itemOpts = { format: ctx.dryRun ? ('text' as const) : ('html' as const), withDay: true };
+  const keyboard = eventKeyboard(item, { reminded: !reminded });
+  if (opts.photo) {
+    const caption = renderCaption(item, itemOpts);
+    // renderCaption gives up only on an absurd URL; rather than edit the photo
+    // into a caption Telegram will reject, hand over a card of its own
+    return caption
+      ? draw({ text: caption, inlineKeyboard: keyboard })
+      : draw({ text: renderItem(item, itemOpts), inlineKeyboard: keyboard }, false);
+  }
+  return draw({ text: renderItem(item, itemOpts), inlineKeyboard: keyboard });
 }
 
 async function handleBell(ctx: HandlerContext, msg: TgMessage, chatId: string, index?: number): Promise<string> {
@@ -1355,9 +1346,14 @@ export async function handleReaction(ctx: HandlerContext, update: TgReactionUpda
   const outcome = await ctx.store.addReminder(chatId, item);
   if (outcome === 'no-date') return reply(`У «${escapeHtml(item.title)}» ще немає часу початку.`);
 
-  const learned = await learnFromHeart(ctx, user, item);
+  // a group has a single row in `users`, so one member's ❤️ would rewrite the
+  // taste of everyone else in it. The reminder is the group's either way; the
+  // taste model stays whatever the group set itself.
+  const shared = (update.chat.type ?? 'private') !== 'private';
+  const learned = shared ? { tag: null, follow: null } : await learnFromHeart(ctx, user, item);
   ctx.log.info(
     `chat ${chatId} hearted "${item.title}" (reminder ${outcome}` +
+      `${shared ? ', shared chat: taste not touched' : ''}` +
       `${learned.tag ? `, learned ${learned.tag}` : ''}${learned.follow ? `, now following ${learned.follow}` : ''})`,
   );
   return reply(reminderSaid(outcome, item.title, learned));

@@ -8,7 +8,7 @@
  * examples, so it is safe to run at any time.
  */
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 // type-only imports are erased, so they cannot run before the sandbox env is set
 import type { Store as StoreType } from '../src/db.ts';
 import type { Item } from '../src/types.ts';
@@ -16,12 +16,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const sandbox = mkdtempSync(join(tmpdir(), 'events-finder-test-'));
+// the suite used to leave a database and a preferences file in /tmp per run
+process.on('exit', () => rmSync(sandbox, { recursive: true, force: true }));
 process.env['EVENTS_FINDER_DATA'] = sandbox;
 process.env['EVENTS_FINDER_DB'] = join(sandbox, 'test.db');
 process.env['EVENTS_FINDER_CONFIG'] = new URL('../config.example.yaml', import.meta.url).pathname;
 process.env['EVENTS_FINDER_PREFS'] = join(sandbox, 'preferences.yaml');
 process.env['EVENTS_FINDER_QUIET'] = '1';
-delete process.env['DATABASE_URL'];
+// empty, not deleted: paths.ts reads ~/.hermes/.env on import, and loadEnv
+// only fills variables that are unset — an operator's real Postgres url would
+// otherwise be pulled into the test run
+process.env['DATABASE_URL'] = '';
 
 // a known preferences file, so ranking tests do not depend on the user's own
 writeFileSync(
@@ -42,36 +47,44 @@ writeFileSync(
 
 // everything else is imported after the sandbox env vars are set above
 const { describe, it, run } = await import('./harness.ts');
-const { normText, stemText, isoInZone, localDate, localTime, addDays, today, weekdayOf, titleKey } = await import('../src/util.ts');
+const { normText, stemText, isoInZone, localDate, localTime, addDays, today, weekdayOf, titleKey, dayLabel } = await import('../src/util.ts');
 const { classify, canonicalTag, expandTag } = await import('../src/categories.ts');
 const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange, splitNegations } = await import('../src/request.ts');
 const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom, pickImage } = await import('../src/normalize.ts');
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
 const { buildDigest, buildMessages, eventKeyboard, renderReminders, renderItem, renderCaption, CAPTION_LIMIT } = await import('../src/render.ts');
-const { loadConfig, loadPrefs, resolveCity, cityLocalName } = await import('../src/config.ts');
+const { loadConfig, loadPrefs, resolveCity, cityLocalName, savePrefs } = await import('../src/config.ts');
 const { applyPrefsCommand, applyThumbsDown, describePrefs } = await import('../src/prefs-engine.ts');
 const { tagLabel } = await import('../src/categories.ts');
 const { PreferencesSchema } = await import('../src/types.ts');
+// the real Telegram schemas, so a handler fixture that drifts out of shape
+// fails here instead of being waved through by a cast
+const { TgMessageSchema, TgCallbackQuerySchema, TgReactionUpdateSchema } = await import('../src/schemas.ts');
 const { parsePost, findDate, findTime, findVenue } = await import('../scripts/telegram.ts');
 const { resultToItem, buildQueries } = await import('../scripts/websearch.ts');
 const { collect: collectKontramarka, cardToSchema } = await import('../scripts/kontramarka.ts');
 const { Store } = await import('../src/db.ts');
-const { splitForTelegram } = await import('../src/telegram-api.ts');
+const { splitForTelegram, parseUpdates } = await import('../src/telegram-api.ts');
 const { googleCalendarUrl } = await import('../src/calendar.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs, newUserPrefs } = await import('../src/users.ts');
-const { cacheKey } = await import('../src/cache.ts');
+const { cacheKey, collectCity } = await import('../src/cache.ts');
+const { parseArgs } = await import('../src/cli.ts');
 const { fanout } = await import('../src/fanout.ts');
 const {
-  DIGEST_HOURS, WEEKEND_DAY, digestDueNow, inQuietHours, reminderAllowedNow, scheduleOf, defaultSchedule,
-  describeSchedule, wantsOnlyMine,
+  DIGEST_DAYS, DIGEST_HOURS, WEEKEND_DAY, digestDueNow, inQuietHours, reminderAllowedNow, scheduleOf, defaultSchedule,
+  describeSchedule, wantsOnlyMine, daysLabel, toggleDay, daysMask, daysFromMask,
 } = await import('../src/schedule.ts');
 const { handleMessage, handleCallback, handleReaction, parseBell, isHeart, isAllowed, BOT_COMMANDS } = await import(
   '../src/bot-handlers.ts'
 );
 const { deliver } = await import('../src/deliver.ts');
 const { makeLogger } = await import('../src/log.ts');
-const { ALL_SOURCE_NAMES } = await import('../src/pipeline.ts');
+const { ALL_SOURCE_NAMES, runPipeline } = await import('../src/pipeline.ts');
+const { politeFetch, HttpError } = await import('../src/http.ts');
+const { pager, safeCollect } = await import('../src/source.ts');
+const { eventsFromJsonLd } = await import('../src/jsonld.ts');
+const { collect: collectKarabas } = await import('../scripts/karabas.ts');
 
 const TZ = 'Europe/Kyiv';
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
@@ -235,6 +248,47 @@ describe('request parsing', () => {
   });
 });
 
+describe('dates people actually type', () => {
+  it('reads a bare day and month as the next one coming, not eleven months ago', () => {
+    // asked two days before new year, "15 січня" is three weeks away
+    const soon = parseDateRange('що буде 15 січня', '2026-12-29');
+    assert.equal(soon.from, '2027-01-15');
+    // and in the same year when it has not passed yet
+    assert.equal(parseDateRange('15 січня', '2026-01-02').from, '2026-01-15');
+    const span = parseDateRange('28-30 грудня', '2026-12-29');
+    assert.deepEqual([span.from, span.to], ['2026-12-28', '2026-12-30']);
+  });
+
+  it('keeps the whole Friday-to-Sunday for "next weekend", even asked on a Sunday', () => {
+    // 2026-10-25 is a Sunday; the next weekend is 30 Oct – 1 Nov
+    const w = parseDateRange('наступні вихідні', '2026-10-25');
+    assert.deepEqual([w.from, w.to], ['2026-10-30', '2026-11-01'], 'asked on Sunday it used to hand back one day');
+    assert.equal(weekdayOf(w.from), 5);
+    // from a Wednesday it is still the weekend after this one
+    const fromWed = parseDateRange('next weekend', '2026-10-21');
+    assert.deepEqual([fromWed.from, fromWed.to], ['2026-10-30', '2026-11-01']);
+  });
+
+  it('reads both ends of an ISO range', () => {
+    for (const text of ['2026-10-24..2026-10-26', '2026-10-24 - 2026-10-26', 'from 2026-10-24 to 2026-10-26']) {
+      assert.deepEqual([parseDateRange(text, '2026-10-20').from, parseDateRange(text, '2026-10-20').to], ['2026-10-24', '2026-10-26'], text);
+    }
+    // the wrong way round is still a range
+    assert.deepEqual(
+      [parseDateRange('2026-10-26..2026-10-24', '2026-10-20').from, parseDateRange('2026-10-26..2026-10-24', '2026-10-20').to],
+      ['2026-10-24', '2026-10-26'],
+    );
+    const one = parseDateRange('2026-10-24', '2026-10-20');
+    assert.deepEqual([one.from, one.to], ['2026-10-24', '2026-10-24']);
+  });
+
+  it('does not read a clock time in a search as a price cap', () => {
+    assert.equal(parseRequest('що буде до 20:00?', { prefs, base: '2026-10-20' }).maxPrice, undefined);
+    assert.equal(parseRequest('стендап до 500 грн', { prefs, base: '2026-10-20' }).maxPrice, 500);
+    assert.equal(parseRequest('концерт, бюджет 900', { prefs, base: '2026-10-20' }).maxPrice, 900);
+  });
+});
+
 /* -------------------------------------------------------------- normalize --- */
 
 describe('normalization', () => {
@@ -284,6 +338,19 @@ describe('normalization', () => {
     assert.deepEqual(parsePriceText('вхід вільний'), { free: true, priceMin: 0 });
     assert.deepEqual(parsePriceText('квитки 300-500 грн'), { priceMin: 300, priceMax: 500 });
     assert.deepEqual(parsePriceText('від 250 грн'), { priceMin: 250 });
+  });
+
+  /**
+   * Telegram posts say "щотижня" or "25 жовтня" all the time. Kept, such a
+   * string used to reach dayLabel → Invalid Date → RangeError, taking the
+   * whole city's digest down with it.
+   */
+  it('drops a startDate it cannot parse rather than keeping poison', () => {
+    const item = makeItem({ city: 'kharkiv', title: 'Щотижня', url: 'https://x/w', source: 'telegram:@x', startsAt: 'щотижня' })!;
+    assert.equal(item.startsAt, undefined, 'human text is not a date');
+    assert.equal(fromSchemaEvent({ name: 'Шоу', url: 'https://x/s', startDate: '25 жовтня' }, { city: 'kharkiv', source: 'x' })!.startsAt, undefined);
+    // a real date still passes untouched
+    assert.equal(makeItem({ city: 'kharkiv', title: 'Gig', url: 'https://x/g', source: 's', startsAt: '2026-10-25T19:00:00+03:00' })!.startsAt, '2026-10-25T19:00:00+03:00');
   });
 
   it('takes the poster off a Concert.ua event, at full size', () => {
@@ -521,6 +588,29 @@ describe('ranking', () => {
     const d2 = makeItem({ city: 'kharkiv', title: 'B', url: 'https://x/10', source: 's', startsAt: '2026-10-23T19:00:00+03:00' })!;
     assert.deepEqual(groupByDay([d1, d2]).map((g) => g.day), ['2026-10-23', '2026-10-25']);
   });
+
+  /**
+   * A date that does not parse used to yield an empty day bucket (not 'tbd'),
+   * and dayLabel('') threw RangeError in the digest header; the soonness
+   * bonus went NaN, and V8 sorts NaN to the front — one junk date could lead
+   * every digest and crash the rest.
+   */
+  it('a bad date scores a real number and groups under tbd', () => {
+    const bad = { ...makeItem({ city: 'kharkiv', title: 'Незрозуміле', url: 'https://x/bd', source: 's', category: 'standup' })!, startsAt: 'щотижня' } as Item;
+    const good = makeItem({ ...common, title: 'Відкритий мікрофон', url: 'https://x/good', source: 'karabas', category: 'standup', priceMin: 200 })!;
+    const ranked = rank([bad, good], { query, prefs });
+    assert.ok(ranked.items.every((i) => !Number.isNaN(i.score!)), 'no score may be NaN');
+    assert.deepEqual(groupByDay(ranked.items, TZ).map((g) => g.day).includes('tbd'), true, 'an unparseable date is "unknown", not its own day');
+    // and the digest header for that bucket renders instead of throwing
+    const head = groupByDay(ranked.items, TZ).find((g) => g.day === 'tbd')!;
+    assert.ok(buildDigest({ title: 'T', query, items: head.items, format: 'text' }).text.includes('уточнюється'));
+  });
+
+  it('dayLabel shrugs off an unparseable date', () => {
+    assert.equal(dayLabel(''), '');
+    assert.equal(dayLabel('щотижня'), '');
+    assert.notEqual(dayLabel('2026-10-24'), '');
+  });
 });
 
 /* ----------------------------------------------------------------- render --- */
@@ -646,6 +736,254 @@ describe('render', () => {
     const chunks = splitForTelegram(Array.from({ length: 200 }, (_, i) => `block ${i}`).join('\n\n'), 500);
     assert.ok(chunks.length > 1);
     assert.ok(chunks.every((c) => c.length <= 500));
+  });
+});
+
+/* ---------------------------------------------------------- getUpdates --- */
+
+describe('getUpdates parsing', () => {
+  // a well-formed message update, as Telegram sends it
+  const good = (id: number, text: string) => ({
+    update_id: id,
+    message: { message_id: id, date: 1, chat: { id: 42, type: 'private' }, text, from: { id: 42 } },
+  });
+
+  it('skips one malformed update without losing the rest of the batch', () => {
+    const poison = { update_id: 6, message: { message_id: 'not-a-number', date: 1, chat: { id: 42 } } };
+    const { updates, lastUpdateId } = parseUpdates([good(5, 'hi'), poison, good(7, 'again')]);
+    assert.deepEqual(updates.map((u) => u.update_id), [5, 7]);
+    // the offset must still advance past the poison, or the poll loop would
+    // re-fetch the same bad batch forever and the bot would serve nobody
+    assert.equal(lastUpdateId, 7);
+  });
+
+  it('reports the highest raw id even when every update is garbage', () => {
+    // update_id 99 is a number (so it advances the offset) but its message is
+    // the wrong shape, so nothing is dispatched
+    const { updates, lastUpdateId } = parseUpdates([{ nonsense: true }, 'string', { update_id: 99, message: 5 }]);
+    assert.equal(updates.length, 0);
+    assert.equal(lastUpdateId, 99);
+  });
+
+  it('stays quiet on an empty batch', () => {
+    const { updates, lastUpdateId } = parseUpdates([]);
+    assert.equal(updates.length, 0);
+    assert.equal(lastUpdateId, -1);
+  });
+});
+
+/* ----------------------------------------------------- the network layer --- */
+
+describe('politeFetch', () => {
+  /** Swap the global fetch for a canned responder; returns the urls it saw. */
+  async function withFetch(
+    handler: (url: string, hit: number) => { status?: number; body?: string; headers?: Record<string, string> },
+    body: (urls: string[], at: number[]) => Promise<void>,
+  ): Promise<void> {
+    const real = globalThis.fetch;
+    const urls: string[] = [];
+    const at: number[] = [];
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input);
+      urls.push(url);
+      at.push(Date.now());
+      const res = handler(url, urls.filter((u) => u === url).length);
+      const status = res.status ?? 200;
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        statusText: '',
+        headers: new Headers(res.headers ?? {}),
+        text: async () => res.body ?? '',
+      } as Response;
+    }) as typeof fetch;
+    try {
+      await body(urls, at);
+    } finally {
+      globalThis.fetch = real;
+    }
+  }
+
+  const fast = { delayMs: 1, retries: 2, timeoutMs: 2000 };
+
+  it('does not retry a 404: page seven of six says the same thing every time', async () => {
+    await withFetch(
+      () => ({ status: 404 }),
+      async (urls) => {
+        await assert.rejects(() => politeFetch('https://no-retry.test/page7', fast), (err: unknown) => {
+          assert.ok(err instanceof HttpError && err.status === 404 && !err.retryable);
+          return true;
+        });
+        assert.equal(urls.length, 1, 'a permanent answer is asked for once');
+      },
+    );
+  });
+
+  it('retries a 502 to the end of its budget', async () => {
+    await withFetch(
+      () => ({ status: 502 }),
+      async (urls) => {
+        await assert.rejects(() => politeFetch('https://flaky.test/x', fast));
+        assert.equal(urls.length, 3, 'the first attempt plus two retries');
+      },
+    );
+  });
+
+  it('comes back for the second attempt when the first one was a hiccup', async () => {
+    await withFetch(
+      (_url, hit) => (hit === 1 ? { status: 503 } : { body: '<html>ok</html>' }),
+      async (urls) => {
+        assert.equal(await politeFetch('https://second-time.test/x', fast), '<html>ok</html>');
+        assert.equal(urls.length, 2);
+      },
+    );
+  });
+
+  it('waits as long as Retry-After asks on a 429', async () => {
+    await withFetch(
+      (_url, hit) => (hit === 1 ? { status: 429, headers: { 'retry-after': '0.3' } } : { body: 'ok' }),
+      async (_urls, at) => {
+        await politeFetch('https://flood.test/x', { ...fast, delayMs: 1 });
+        // our own backoff for attempt 1 would have been 2ms; the server asked
+        // for 300, and ignoring that is how a bot gets banned
+        assert.ok((at[1] ?? 0) - (at[0] ?? 0) >= 250, `waited ${(at[1] ?? 0) - (at[0] ?? 0)}ms`);
+      },
+    );
+  });
+
+  it('spaces concurrent requests to one host instead of firing them at once', async () => {
+    await withFetch(
+      () => ({ body: 'ok' }),
+      async (_urls, at) => {
+        // runPipeline asks for every city × source at once: a plain
+        // read-the-clock-then-set-it check let all three through together
+        await Promise.all([1, 2, 3].map((n) => politeFetch(`https://polite.test/${n}`, { delayMs: 120, retries: 0 })));
+        const gaps = at.slice(1).map((t, i) => t - (at[i] as number));
+        for (const gap of gaps) assert.ok(gap >= 110, `requests were ${gap}ms apart`);
+      },
+    );
+  });
+});
+
+describe('page walking', () => {
+  const log = makeLogger('test');
+  const anywhere = parseRequest('', { prefs, base: '2026-10-20', from: '2026-01-01', to: '2027-12-31' });
+  const anItem = () => makeItem({ city: 'kharkiv', title: 'Щось', url: 'https://x/p', source: 's' })!;
+
+  it('keeps the events from the pages before a failure', async () => {
+    const pages = pager(log);
+    const seen: number[] = [];
+    await pages.walk('listing', 6, async (page) => {
+      if (page === 4) throw new HttpError(500, 'https://x/4');
+      seen.push(page);
+      return 10;
+    });
+    assert.deepEqual(seen, [1, 2, 3], 'three good pages are not thrown away for a bad fourth');
+    const result = pages.result('some-source', [anItem()]);
+    assert.equal(result.ok, true, 'a partial scrape is still a scrape');
+    assert.equal(result.fetched, 3);
+  });
+
+  it('stops at the first empty page', async () => {
+    const pages = pager(log);
+    let calls = 0;
+    await pages.walk('listing', 6, async (page) => {
+      calls++;
+      return page >= 2 ? 0 : 5;
+    });
+    assert.equal(calls, 2);
+  });
+
+  it('calls a source that collected nothing at all a failure', async () => {
+    const pages = pager(log);
+    await pages.walk('listing', 6, async () => {
+      throw new HttpError(403, 'https://x/1');
+    });
+    const result = pages.result('some-source', []);
+    assert.equal(result.ok, false, 'so the answer can admit the list may be short');
+    assert.match(result.error ?? '', /403/);
+  });
+
+  it('turns a collector that throws into a harmless empty result', async () => {
+    const result = await safeCollect(
+      'exploding',
+      async () => {
+        throw new Error('site is down');
+      },
+      { query: anywhere, city: 'kharkiv', log },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.items.length, 0);
+    assert.match(result.error ?? '', /site is down/);
+  });
+});
+
+describe('scrapers, offline', () => {
+  const log = makeLogger('test');
+  /** Serve a page once per url, then nothing — one page per listing. */
+  const serve = (body: string) => {
+    const served = new Set<string>();
+    return async (url: string) => {
+      if (served.has(url)) return '<html></html>';
+      served.add(url);
+      return body;
+    };
+  };
+  const wide = parseRequest('', { prefs, base: '2026-10-20', from: '2026-01-01', to: '2027-12-31' });
+
+  it('reads Kontramarka cards into items', async () => {
+    const res = await collectKontramarka({
+      query: wide,
+      city: 'kharkiv',
+      log,
+      maxPages: 1,
+      fetchText: serve(fixture('kontramarka-card.html')),
+    });
+    assert.equal(res.ok, true);
+    const item = res.items.find((i) => i.title.includes('Байдак'));
+    assert.ok(item, `no Байдак in ${JSON.stringify(res.items.map((i) => i.title))}`);
+    assert.equal(item.startsAt, '2026-10-21T18:30:00+03:00');
+    assert.equal(item.venue, 'ХНАТОБ LOFT STAGE');
+    assert.equal(item.city, 'kharkiv');
+  });
+
+  it('makes a card link absolute, so the button in Telegram is not dead', async () => {
+    const relative = `<!doctype html><html><body>
+      <div class="cat_item" itemscope itemtype="http://schema.org/Event">
+        <a itemprop="url" class="block-info__title" href="/uk/relative-123.html"><span itemprop="name">Відносне</span></a>
+        <meta itemprop="startDate" content="2026-10-21T18:30:00+03:00">
+      </div></body></html>`;
+    const res = await collectKontramarka({ query: wide, city: 'kharkiv', log, maxPages: 1, fetchText: serve(relative) });
+    const item = res.items.find((i) => i.title === 'Відносне');
+    assert.ok(item, 'the card was not read at all');
+    assert.equal(item.url, 'https://kharkiv.kontramarka.ua/uk/relative-123.html');
+  });
+
+  it('reads Karabas JSON-LD into items', async () => {
+    const page = `<html><head><script type="application/ld+json">${fixture('karabas-event.json')}</script></head><body></body></html>`;
+    assert.equal(eventsFromJsonLd(page).length, 1, 'the fixture is one Event');
+    const res = await collectKarabas({ query: wide, city: 'kharkiv', log, maxPages: 1, fetchText: serve(page) });
+    assert.equal(res.ok, true);
+    assert.equal(res.items.length, 1);
+    assert.equal(res.items[0]?.title, 'IVAN LIULENOV');
+    assert.equal(res.items[0]?.source, 'karabas');
+  });
+
+  it('runs the whole pipeline over stubbed pages, deduping across sources', async () => {
+    const karabasPage = `<html><script type="application/ld+json">${fixture('karabas-event.json')}</script></html>`;
+    const result = await runPipeline({
+      query: wide,
+      prefs,
+      log,
+      only: ['karabas', 'kontramarka'],
+      maxPages: 1,
+      keepOffTaste: true,
+      keepExpensive: true,
+      keepDisliked: true,
+      fetchText: serve(karabasPage) as never,
+    });
+    assert.equal(result.failedSources.length, 0, JSON.stringify(result.results.map((r) => [r.source, r.error])));
+    assert.ok(result.all.some((i) => i.title === 'IVAN LIULENOV'));
   });
 });
 
@@ -862,6 +1200,17 @@ describe('telegram posts', () => {
     assert.equal(findDate('5 січня великий концерт', base), '2027-01-05');
   });
 
+  it('does not read a start time as the day of the month', () => {
+    // "о 9.05" is five past nine; it used to be read as the 9th of May
+    assert.equal(findDate('Стендап у пʼятницю, початок о 9.05', base), findDate('Стендап у пʼятницю', base));
+    const post = parsePost(
+      { id: 9, channel: 'c', text: 'Великий концерт 25 жовтня, початок о 19.30, вхід 200 грн' },
+      { city: 'kharkiv', base, tz: TZ },
+    );
+    assert.equal(post?.startsAt?.slice(0, 10), '2026-10-25', 'the date is the date, not the clock');
+    assert.equal(findDate('Концерт 25.10 о 19.30', base), '2026-10-25');
+  });
+
   it('skips posts with no date', () => {
     assert.equal(parsePost({ id: 1, channel: 'c', text: 'Просто привіт усім нашим підписникам, читайте нас' }, { city: 'kharkiv', base, tz: TZ }), null);
   });
@@ -959,6 +1308,28 @@ describe('preference commands', () => {
   it('sets a budget and clears it', () => {
     assert.equal(applyPrefsCommand('max price 800', current).prefs.max_ticket_price, 800);
     assert.equal(applyPrefsCommand('no limit', current).prefs.max_ticket_price, null);
+  });
+
+  /**
+   * "до" is an ordinary Ukrainian preposition, and \d{2,5} matches the first
+   * digits of a time. "що буде до 20:00?" used to set the budget to 20,
+   * answer "✅ Записав" and swallow the search entirely.
+   */
+  it('does not read a time or an ordinary "до" as a budget', () => {
+    check('що буде до 20:00?', { understood: false });
+    check('події до 3000 цього тижня', { understood: false });
+    check('відкритий мікрофон до 20:00', { understood: false });
+    // …but a price sentence still lands, whether the opener says "money" by
+    // itself or leans on a price word to make "до" mean money
+    assert.equal(applyPrefsCommand('до 500 грн', current).prefs.max_ticket_price, 500);
+    assert.equal(applyPrefsCommand('хочу щось до 1000 гривень', current).prefs.max_ticket_price, 1000);
+    assert.equal(applyPrefsCommand('не дорожче 700', current).prefs.max_ticket_price, 700);
+    assert.equal(applyPrefsCommand('under 400 uah', current).prefs.max_ticket_price, 400);
+    assert.equal(applyPrefsCommand('max 500', current).prefs.max_ticket_price, 500);
+    assert.equal(applyPrefsCommand('limit 500', current).prefs.max_ticket_price, 500);
+    assert.equal(applyPrefsCommand('ліміт 500', current).prefs.max_ticket_price, 500);
+    assert.equal(applyPrefsCommand('максимум 500', current).prefs.max_ticket_price, 500);
+    assert.equal(applyPrefsCommand('не більше 600', current).prefs.max_ticket_price, 600);
   });
 
   it('sets a trip from "I\'m in Lviv next week"', () => {
@@ -1178,6 +1549,30 @@ describe('store', () => {
     });
   });
 
+  /**
+   * /stop says "більше нічого не надсилаю" — it used to hold for digests only,
+   * because dueReminders never looked at users.blocked and kept pushing
+   * ❤️ reminders to people who had unsubscribed.
+   */
+  it('gives a chat that said /stop no reminders, and brings them back on /start', async () => {
+    await withTestStore(async (store) => {
+      const soon = makeItem({ ...item, title: 'Blocked soon', url: 'https://x/blocked', startsAt: new Date(Date.now() + 20 * 3600_000).toISOString() })!;
+      await store.ensureUser({ chatId: 'stopper', city: 'kharkiv', prefs: '{}' });
+      await store.addReminder('stopper', soon);
+      assert.ok((await store.dueReminders()).some((d: { row: { chat_id: string } }) => d.row.chat_id === 'stopper'));
+
+      await store.setBlocked('stopper', true);
+      assert.ok(!(await store.dueReminders()).some((d: { row: { chat_id: string } }) => d.row.chat_id === 'stopper'), 'a /stop must silence reminders too');
+      assert.equal((await store.listReminders('stopper')).length, 0, 'and /reminders shows nothing to a stopped chat');
+      // the rows are kept, not deleted — /start (ensureUser) unblocks…
+      assert.equal((await store.listReminders()).filter((r: { chat_id: string }) => r.chat_id === 'stopper').length, 0);
+
+      // …so a returning user gets their reminders back untouched
+      await store.ensureUser({ chatId: 'stopper', city: 'kharkiv', prefs: '{}' });
+      assert.ok((await store.dueReminders()).some((d: { row: { chat_id: string } }) => d.row.chat_id === 'stopper'), '/start brings them back');
+    });
+  });
+
   it('rate limits per person per hour', async () => {
     await withTestStore(async (store) => {
       for (let i = 1; i <= 3; i++) {
@@ -1203,6 +1598,45 @@ describe('store', () => {
     });
   });
 
+  /**
+   * `messages`, `deliveries` and `usage` only ever grew. The dangerous half of
+   * housekeeping is deleting too much, so that is what this pins down.
+   */
+  it('prunes what has expired and leaves everything still in use', async () => {
+    await withTestStore(async (store) => {
+      await store.prune(); // from a known-clean starting point
+      const before = await store.stats();
+
+      await store.putCache('stale-entry', [item], -60);
+      await store.putCache('warm-entry', [item], 600);
+      await store.recordSent('prune-me', [item]);
+      await store.recordMessage('prune-me', 11, [item]);
+      await store.addReminder('prune-me', item);
+      await store.hitRateLimit('prune-me', 20);
+      assert.equal((await store.stats())['cached'], (before['cached'] ?? 0) + 2);
+
+      await store.prune();
+
+      const after = await store.stats();
+      assert.equal(after['cached'], (before['cached'] ?? 0) + 1, 'the expired entry goes, the warm one stays');
+      assert.equal(after['deliveries'], (before['deliveries'] ?? 0) + 1, 'a digest must not repeat itself after a prune');
+      assert.equal(after['messages'], (before['messages'] ?? 0) + 1, 'a ❤️ still has to resolve to its event');
+      assert.equal((await store.listReminders('prune-me')).length, 1);
+      // and the rate limit still remembers this hour
+      assert.equal((await store.hitRateLimit('prune-me', 20)).used, 2);
+    });
+  });
+
+  it('only asks the database for the reminders that could be due', async () => {
+    await withTestStore(async (store) => {
+      const far = makeItem({ ...item, title: 'Far off', url: 'https://x/far', startsAt: new Date(Date.now() + 40 * 86_400_000).toISOString() })!;
+      await store.addReminder('u-far', far);
+      assert.equal((await store.listReminders('u-far')).length, 1, '/reminders still shows it');
+      const due = await store.dueReminders();
+      assert.ok(!due.some((d: { row: { chat_id: string } }) => d.row.chat_id === 'u-far'), 'a month out is not due');
+    });
+  });
+
   it('round-trips a poster, and still reads a cached scrape from before there were any', async () => {
     await withTestStore(async (store) => {
       const withPoster = makeItem({ ...item, id: undefined, url: 'https://x/poster', image: 'https://img/p.jpeg' })!;
@@ -1225,6 +1659,52 @@ describe('store', () => {
       assert.equal(await store.getState('offset'), '18');
       assert.equal(await store.getState('nope'), null);
     });
+  });
+
+  it('adds digest_days to a database created before it existed, and keeps the old choices working', async () => {
+    // the shape a database had before the schedule was an hour plus days
+    const dbFile = process.env['EVENTS_FINDER_DB']!;
+    await withTestStore((store) => store.close());
+    const { default: Database } = await import('better-sqlite3');
+    const raw = new Database(dbFile);
+    raw.exec(`
+      DROP TABLE users;
+      CREATE TABLE users (
+        chat_id text PRIMARY KEY, username text, first_name text, city text NOT NULL,
+        prefs text NOT NULL, stage text, weekly_digest integer NOT NULL DEFAULT 1,
+        weekend_digest integer NOT NULL DEFAULT 1, follow_alerts integer NOT NULL DEFAULT 1,
+        place_tips integer NOT NULL DEFAULT 1, digest_hour integer NOT NULL DEFAULT 9,
+        digest_day integer NOT NULL DEFAULT 1, quiet_from integer NOT NULL DEFAULT 23,
+        quiet_to integer NOT NULL DEFAULT 8, digest_freq text NOT NULL DEFAULT 'twice',
+        blocked integer NOT NULL DEFAULT 0, last_seen_at text,
+        created_at text NOT NULL, updated_at text NOT NULL);
+      INSERT INTO users (chat_id, city, prefs, digest_hour, digest_day, digest_freq, created_at, updated_at)
+        VALUES ('legacy', 'kharkiv', '{}', 7, 5, 'weekly', 'now', 'now');
+    `);
+    raw.close();
+
+    const reopened = await Store.open();
+    try {
+      assert.equal(reopened.dialect, 'sqlite');
+      // the column came back, and it reads as "untouched"…
+      const row = await reopened.getUser('legacy');
+      assert.ok(row, 'the row still parses');
+      assert.equal(row.digest_days, null);
+      // …so the legacy pair still decides what they get: Friday only
+      const s = scheduleOf(row);
+      assert.equal(s.hour, 7);
+      assert.deepEqual(s.days, [5], 'weekly meant that one day and no Thursday');
+      assert.ok(digestDueNow(s, 'weekly', { hour: 7, weekday: 5 }));
+      assert.ok(!digestDueNow(s, 'weekend', { hour: 7, weekday: WEEKEND_DAY }));
+
+      // the first tap through the panel retires the legacy columns for good
+      await reopened.setSchedule('legacy', { days: [1, WEEKEND_DAY] });
+      const after = await reopened.getUser('legacy');
+      assert.equal(after?.digest_days, (1 << 1) | (1 << WEEKEND_DAY));
+      assert.deepEqual(scheduleOf(after).days, [1, WEEKEND_DAY]);
+    } finally {
+      await reopened.close();
+    }
   });
 });
 
@@ -1315,6 +1795,54 @@ describe('users', () => {
   });
 });
 
+/* ------------------------------------------------------------ city cache --- */
+
+describe('the shared city scrape', () => {
+  const log = makeLogger('test');
+  const page = () => `<html><script type="application/ld+json">${fixture('karabas-event.json')}</script></html>`;
+
+  it('gives a deeper digest and a quick chat search their own cache entries', () => {
+    const window = { city: 'kharkiv', from: '2026-10-24', to: '2026-10-26', kinds: ['event' as const] };
+    assert.notEqual(
+      cacheKey(window, ALL_SOURCE_NAMES, 6),
+      cacheKey(window, ALL_SOURCE_NAMES, 2),
+      'a two-page search must not be served to a six-page digest',
+    );
+    assert.equal(cacheKey(window, ALL_SOURCE_NAMES, 6), cacheKey(window, [...ALL_SOURCE_NAMES].reverse(), 6));
+  });
+
+  it('scrapes once when two people ask for the same city at the same moment', async () => {
+    await withTestStore(async (store) => {
+      let fetches = 0;
+      const fetchText = async (url: string) => {
+        fetches++;
+        return url.includes('page=') ? '<html></html>' : page();
+      };
+      const ask = () =>
+        collectCity({
+          store,
+          log,
+          city: 'kharkiv',
+          from: '2026-12-08',
+          to: '2026-12-09',
+          kinds: ['event'],
+          sources: ['karabas'],
+          maxPages: 1,
+          fetchText,
+        });
+      const [a, b] = await Promise.all([ask(), ask()]);
+      assert.equal(fetches, 1, `both askers shared one crawl, not ${fetches}`);
+      assert.deepEqual(a.items.map((i) => i.id), b.items.map((i) => i.id));
+      assert.ok(a.items.length > 0);
+
+      // and the next ask comes off the cache without touching the site at all
+      const later = await ask();
+      assert.equal(fetches, 1);
+      assert.equal(later.cached, true);
+    });
+  });
+});
+
 /* --------------------------------------------------------------- schedule --- */
 
 describe('schedule', () => {
@@ -1324,47 +1852,80 @@ describe('schedule', () => {
     const legacy = scheduleOf({ chat_id: '1', city: 'kharkiv' } as never);
     assert.deepEqual(legacy, defaultSchedule());
     assert.equal(legacy.hour, 9);
-    assert.equal(legacy.day, 1, 'Monday');
+    assert.deepEqual(legacy.days, [1, WEEKEND_DAY], 'Monday and Thursday');
     assert.equal(legacy.frequency, 'twice');
     assert.ok(digestDueNow(legacy, 'weekly', { hour: 9, weekday: 1 }));
     assert.ok(digestDueNow(legacy, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
   });
 
+  it('reads the legacy weekly-only row as the one day it meant', () => {
+    const s = scheduleOf({ digest_day: 5, digest_freq: 'weekly' } as never);
+    assert.deepEqual(s.days, [5], 'Friday and nothing else — Thursday was never part of it');
+    assert.ok(digestDueNow(s, 'weekly', { hour: 9, weekday: 5 }));
+    assert.ok(!digestDueNow(s, 'weekend', { hour: 9, weekday: WEEKEND_DAY }), 'they asked for once a week');
+  });
+
   it('falls back to the default for a value outside the clock', () => {
     assert.equal(scheduleOf({ digest_hour: 24 } as never).hour, 9);
     assert.equal(scheduleOf({ digest_hour: -1 } as never).hour, 9);
-    assert.equal(scheduleOf({ digest_day: 7 } as never).day, 1);
+    assert.deepEqual(scheduleOf({ digest_day: 7 } as never).days, defaultSchedule().days);
     assert.equal(scheduleOf({ digest_freq: 'hourly' } as never).frequency, 'twice');
     assert.equal(scheduleOf(undefined).hour, 9);
   });
 
-  it('matches a digest to one hour of one day and nothing else', () => {
-    const s = { ...defaultSchedule(), hour: 21, day: 5 };
+  it('round-trips a weekday set through its stored bitmask', () => {
+    for (const days of [[1], [1, WEEKEND_DAY], [0, 6], [0, 1, 2, 3, 4, 5, 6], [3]]) {
+      assert.deepEqual(daysFromMask(daysMask(days)), [...days].sort((a, b) => (a || 7) - (b || 7)), days.join(','));
+    }
+    // 0 would read as "no days" and silently resurrect the legacy columns, so
+    // it is written as the Sunday bit instead — one day is the floor
+    assert.equal(daysMask([0]), 1);
+    assert.equal(daysMask([]), 0, 'an empty set is the sentinel for "untouched"');
+  });
+
+  it('flips one day on and off, and refuses to empty the week', () => {
+    assert.deepEqual(toggleDay([1], 4), [1, WEEKEND_DAY], 'adding Thursday is how the weekend picks are asked for');
+    assert.deepEqual(toggleDay([1, 4], 4), [1]);
+    assert.deepEqual(toggleDay([3], 0), [3, 0], 'Sunday sorts last');
+    assert.equal(toggleDay([1], 1), null, 'the last day cannot be taken off');
+  });
+
+  it('matches a digest to one hour of one of their days and nothing else', () => {
+    const s = { ...defaultSchedule(), hour: 21, days: [5] };
     assert.ok(digestDueNow(s, 'weekly', { hour: 21, weekday: 5 }));
     assert.ok(!digestDueNow(s, 'weekly', { hour: 20, weekday: 5 }), 'an hour early is not their hour');
     assert.ok(!digestDueNow(s, 'weekly', { hour: 22, weekday: 5 }), 'an hour late is not their hour');
     assert.ok(!digestDueNow(s, 'weekly', { hour: 21, weekday: 4 }), 'right hour, wrong day');
   });
 
+  it('gives every ticked day its own digest', () => {
+    const s = { ...defaultSchedule(), hour: 7, days: [1, 3, 5] };
+    for (const weekday of [1, 3, 5]) assert.ok(digestDueNow(s, 'weekly', { hour: 7, weekday }), `day ${weekday}`);
+    for (const weekday of [0, 2, 4, 6]) assert.ok(!digestDueNow(s, 'weekly', { hour: 7, weekday }), `day ${weekday}`);
+    assert.ok(!digestDueNow(s, 'weekly', { hour: 8, weekday: 1 }), 'not their hour');
+  });
+
   it('holds the day boundaries: 00:00 and 23:00 are hours like any other', () => {
-    const midnight = { ...defaultSchedule(), hour: 0, day: 0 };
+    const midnight = { ...defaultSchedule(), hour: 0, days: [0] };
     assert.ok(digestDueNow(midnight, 'weekly', { hour: 0, weekday: 0 }), 'Sunday 00:00 is a real slot');
     assert.ok(!digestDueNow(midnight, 'weekly', { hour: 23, weekday: 6 }), 'the hour before does not roll over');
-    const lateSaturday = { ...defaultSchedule(), hour: 23, day: 6 };
+    const lateSaturday = { ...defaultSchedule(), hour: 23, days: [6] };
     assert.ok(digestDueNow(lateSaturday, 'weekly', { hour: 23, weekday: 6 }));
     assert.ok(!digestDueNow(lateSaturday, 'weekly', { hour: 0, weekday: 0 }), 'and does not spill into Sunday');
   });
 
-  it('keeps the weekend digest on Thursday whatever day the weekly one is on', () => {
-    const s = { ...defaultSchedule(), hour: 18, day: 6 };
-    assert.ok(digestDueNow(s, 'weekend', { hour: 18, weekday: WEEKEND_DAY }));
-    assert.ok(!digestDueNow(s, 'weekend', { hour: 18, weekday: 6 }), 'their own day does not move the weekend picks');
+  it('keeps the weekend digest on Thursday whatever other days are ticked', () => {
+    const s = { ...defaultSchedule(), hour: 18, days: [WEEKEND_DAY, 6] };
+    assert.ok(digestDueNow(s, 'weekend', { hour: 18, weekday: WEEKEND_DAY }), 'Thursday carries the weekend picks');
+    assert.ok(!digestDueNow(s, 'weekend', { hour: 18, weekday: 6 }), 'their Saturday does not move the weekend picks');
+    assert.ok(digestDueNow(s, 'weekly', { hour: 18, weekday: 6 }), 'and Saturday still gets its own digest');
   });
 
-  it('sends only the weekly digest to someone who asked for once a week', () => {
-    const s = { ...defaultSchedule(), frequency: 'weekly' as const };
-    assert.ok(digestDueNow(s, 'weekly', { hour: 9, weekday: 1 }));
-    assert.ok(!digestDueNow(s, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
+  it('never sends both digests on the same day', () => {
+    // ticking Thursday asks for the weekend one, not a second weekly digest
+    const s = { ...defaultSchedule(), days: [WEEKEND_DAY] };
+    assert.ok(digestDueNow(s, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
+    assert.ok(!digestDueNow(s, 'weekly', { hour: 9, weekday: WEEKEND_DAY }), 'Thursday is taken, not doubled');
   });
 
   it('leaves the timing alone for "only when there is something of mine"', () => {
@@ -1373,6 +1934,12 @@ describe('schedule', () => {
     assert.ok(digestDueNow(s, 'weekly', { hour: 9, weekday: 1 }), 'it is a content rule, not a clock rule');
     assert.ok(digestDueNow(s, 'weekend', { hour: 9, weekday: WEEKEND_DAY }));
     assert.ok(!wantsOnlyMine(defaultSchedule()));
+  });
+
+  it('offers every weekday exactly once, in Пн…Нд order', () => {
+    assert.deepEqual(DIGEST_DAYS.map((d) => d.day), [1, 2, 3, 4, 5, 6, 0]);
+    assert.equal(new Set(DIGEST_DAYS.map((d) => d.day)).size, 7);
+    assert.ok(DIGEST_DAYS.every((d) => d.short && d.label));
   });
 
   it('wraps a quiet window around midnight', () => {
@@ -1421,12 +1988,18 @@ describe('schedule', () => {
   });
 
   it('describes a schedule in Ukrainian', () => {
-    const line = describeSchedule({ ...defaultSchedule(), hour: 18, day: 5, frequency: 'weekly' });
+    const line = describeSchedule({ ...defaultSchedule(), hour: 18, days: [5] });
     assert.ok(line.includes('пʼятниця') && line.includes('18:00'), line);
-    assert.ok(describeSchedule(defaultSchedule()).includes('тихі години 23:00–08:00'));
-    assert.ok(
-      describeSchedule({ ...defaultSchedule(), quietFrom: 0, quietTo: 0 }).includes('тихі години вимкнено'),
-    );
+    assert.equal(describeSchedule(defaultSchedule()), 'понеділок і четвер, 09:00');
+    assert.equal(describeSchedule({ ...defaultSchedule(), days: [0, 1, 2, 3, 4, 5, 6] }), 'щодня, 09:00');
+  });
+
+  it('names a day set the way a person would', () => {
+    assert.equal(daysLabel([1]), 'понеділок');
+    assert.equal(daysLabel([1, WEEKEND_DAY]), 'понеділок і четвер');
+    assert.equal(daysLabel([1, 2, 3]), 'понеділок, вівторок і середа');
+    assert.equal(daysLabel([6, 0]), 'субота і неділя', 'Sunday reads last, not first');
+    assert.equal(daysLabel([]), 'ніколи');
   });
 });
 
@@ -1441,7 +2014,8 @@ describe('fanout', () => {
 
   /** Pre-seed the cache so the fan-out runs without touching the network. */
   async function seed(store: StoreType, items = [standup, classical]) {
-    const key = cacheKey({ city: 'kharkiv', from: window.from, to: window.to, kinds: ['event'] }, ALL_SOURCE_NAMES);
+    // the depth is part of the key: a digest scrapes deeper than a chat search
+    const key = cacheKey({ city: 'kharkiv', from: window.from, to: window.to, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().http.max_pages);
     await store.putCache(key, items, 600);
   }
 
@@ -1481,6 +2055,35 @@ describe('fanout', () => {
     });
   });
 
+  /**
+   * One failing send used to take the whole job down with it: everybody after
+   * that person in the list got nothing until the next schedule.
+   */
+  it('carries on with the other users when one send fails', async () => {
+    await withTestStore(async (store) => {
+      await seed(store);
+      for (const chatId of ['2301', '2302', '2303']) await registerUser(store, { chatId, city: 'kharkiv' });
+      const reached: string[] = [];
+      const result = await fanout({
+        store,
+        log,
+        optIn: 'weekend_digest',
+        window,
+        onlyChats: ['2301', '2302', '2303'],
+        dryRun: true,
+        title: () => 'Weekend',
+        select: (user, ranked) => {
+          if (user.chatId === '2302') throw new Error('Telegram said no');
+          reached.push(user.chatId);
+          return ranked;
+        },
+      });
+      assert.deepEqual(reached, ['2301', '2303'], 'the person after the failure still got their digest');
+      assert.equal(result.failedUsers, 1);
+      assert.equal(result.recipients, 2);
+    });
+  });
+
   it('skips people who muted the job', async () => {
     await withTestStore(async (store) => {
       await seed(store);
@@ -1505,9 +2108,9 @@ describe('fanout', () => {
     await withTestStore(async (store) => {
       await seed(store);
       for (const chatId of ['2300', '2301', '2302']) await registerUser(store, { chatId, city: 'kharkiv' });
-      await store.setSchedule('2300', { hour: 9, day: 1 });
-      await store.setSchedule('2301', { hour: 18, day: 1 });
-      await store.setSchedule('2302', { hour: 9, day: 4 });
+      await store.setSchedule('2300', { hour: 9, days: [1] });
+      await store.setSchedule('2301', { hour: 18, days: [1] });
+      await store.setSchedule('2302', { hour: 9, days: [4] });
       const chats = ['2300', '2301', '2302'];
 
       const nine = new Set<string>();
@@ -1653,7 +2256,7 @@ describe('fanout', () => {
       await registerUser(store, { chatId: '2700', city: 'kharkiv' });
       // 07:00 is inside the default 23:00–08:00 window, and it is still what
       // they picked — the hour button would otherwise look broken
-      await store.setSchedule('2700', { hour: 7, day: 1 });
+      await store.setSchedule('2700', { hour: 7, days: [1] });
       const result = await fanout({
         store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
         title: () => 'W', onlyChats: ['2700'], now: { hour: 7, weekday: 1 },
@@ -1685,13 +2288,16 @@ async function captureOutput(body: () => Promise<unknown>): Promise<string> {
 /** Capture what the bot would say to one message. */
 async function say(store: StoreType, chatId: string, text: string, extra: Record<string, unknown> = {}): Promise<string> {
   return captureOutput(() =>
-    handleMessage({ store, log, dryRun: true }, {
-      message_id: Math.floor(Math.random() * 100000),
-      date: Math.floor(Date.now() / 1000),
-      chat: { id: chatId, type: 'private' },
-      text,
-      ...extra,
-    } as never),
+    handleMessage(
+      { store, log, dryRun: true },
+      TgMessageSchema.parse({
+        message_id: Math.floor(Math.random() * 100000),
+        date: Math.floor(Date.now() / 1000),
+        chat: { id: chatId, type: 'private' },
+        text,
+        ...extra,
+      }),
+    ),
   );
 }
 
@@ -1817,7 +2423,8 @@ describe('bot handlers', () => {
   /** An answer comes out of the shared cache, so these run without a network. */
   async function seedToday(store: StoreType, items: Item[]): Promise<void> {
     const base = today(loadConfig().timezone);
-    await store.putCache(cacheKey({ city: 'kharkiv', from: base, to: base, kinds: ['event'] }, ALL_SOURCE_NAMES), items, 600);
+    const key = cacheKey({ city: 'kharkiv', from: base, to: base, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().bot.interactive_pages);
+    await store.putCache(key, items, 600);
   }
   const onToday = (title: string, category: Item['category'], extra: Record<string, unknown> = {}) =>
     makeItem({
@@ -1944,12 +2551,15 @@ describe('bot handlers', () => {
       return true;
     };
     try {
-      await handleCallback({ store, log, dryRun: true }, {
-        id: 'cb',
-        data,
-        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' } },
-        from: { id: Number(chatId) },
-      } as never);
+      await handleCallback(
+        { store, log, dryRun: true },
+        TgCallbackQuerySchema.parse({
+          id: 'cb',
+          data,
+          message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' } },
+          from: { id: Number(chatId) },
+        }),
+      );
     } finally {
       (process.stdout as { write: unknown }).write = original;
     }
@@ -1979,7 +2589,7 @@ describe('bot handlers', () => {
     });
   });
 
-  it('opens a "коли писати" screen with an hour, a day, a frequency and a quiet window', async () => {
+  it('opens a "коли писати" screen with an hour and the days of the week', async () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3020', city: 'kharkiv' });
       const panel = await say(store, '3020', '/settings');
@@ -1989,13 +2599,15 @@ describe('bot handlers', () => {
       const when = await tap(store, '3020', 'set:when');
       assert.ok(when.includes('Коли писати'), when.slice(0, 300));
       for (const hour of DIGEST_HOURS) assert.ok(when.includes(`(when:hour:${hour})`), `hour ${hour}`);
-      assert.ok(when.includes('(when:day:1)') && when.includes('(when:day:0)'), 'every weekday is pickable');
-      assert.ok(when.includes('(when:freq:mine)') && when.includes('(when:freq:weekly)'), when.slice(0, 900));
-      assert.ok(when.includes('(when:quiet:23-8)') && when.includes('(when:quiet:0-0)'), 'including switching it off');
+      for (const d of DIGEST_DAYS) assert.ok(when.includes(`(when:day:${d.day})`), `${d.short} is pickable`);
+      // the screen is an hour and a set of days, and nothing else
+      assert.ok(!when.includes('when:freq'), 'no frequency — ticking days is the frequency');
+      assert.ok(!when.includes('when:quiet'), 'no quiet window on this screen');
+      assert.ok(when.includes('понеділок') && when.includes('четвер'), 'and it says what is ticked now');
     });
   });
 
-  it('picks an hour, a day and a frequency by button', async () => {
+  it('picks an hour and ticks days by button', async () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3021', city: 'kharkiv' });
       const redraw = await tap(store, '3021', 'when:hour:18');
@@ -2003,21 +2615,30 @@ describe('bot handlers', () => {
       assert.ok(redraw.includes('edit 42'), 'the screen is rewritten, not reposted');
       assert.ok(redraw.includes('✅ 18:00'), redraw.slice(0, 600));
 
+      // Saturday arrives on top of the default Monday and Thursday
       await tap(store, '3021', 'when:day:6');
-      assert.equal((await store.getUser('3021'))?.digest_day, 6);
+      const sat = (await store.getUser('3021'))!;
+      assert.equal(sat.digest_days, (1 << 1) | (1 << 4) | (1 << 6), 'one bit per weekday');
+      assert.deepEqual((await getUser(store, '3021'))!.schedule.days, [1, 4, 6]);
 
-      await tap(store, '3021', 'when:freq:mine');
-      assert.equal((await store.getUser('3021'))?.digest_freq, 'mine');
+      // and tapping it again takes it back off
+      await tap(store, '3021', 'when:day:6');
+      assert.equal((await store.getUser('3021'))?.digest_days, (1 << 1) | (1 << 4));
 
-      await tap(store, '3021', 'when:quiet:0-0');
-      const off = (await store.getUser('3021'))!;
-      assert.equal(off.quiet_from, 0);
-      assert.equal(off.quiet_to, 0);
-
-      // and the schedule is what the fan-out will read back
+      // a legacy column nobody has written since still reads as it always did
       assert.deepEqual((await getUser(store, '3021'))!.schedule, {
-        hour: 18, day: 6, quietFrom: 0, quietTo: 0, frequency: 'mine',
+        hour: 18, days: [1, 4], quietFrom: 23, quietTo: 8, frequency: 'twice',
       });
+    });
+  });
+
+  it('refuses to take the last day off', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3022', city: 'kharkiv' });
+      await store.setSchedule('3022', { days: [5] });
+      const said = await tap(store, '3022', 'when:day:5');
+      assert.deepEqual((await getUser(store, '3022'))!.schedule.days, [5], 'Friday stays');
+      assert.ok(said.includes('Залиш хоч один день'), said.slice(-400));
     });
   });
 
@@ -2027,9 +2648,11 @@ describe('bot handlers', () => {
       await tap(store, '3030', 'when:hour:4');
       assert.equal((await store.getUser('3030'))?.digest_hour, 9, 'a hand-crafted callback changes nothing');
       await tap(store, '3030', 'when:day:9');
-      assert.equal((await store.getUser('3030'))?.digest_day, 1);
-      await tap(store, '3030', 'when:freq:hourly');
-      assert.equal((await store.getUser('3030'))?.digest_freq, 'twice');
+      assert.deepEqual((await getUser(store, '3030'))!.schedule.days, [1, 4], 'and neither does a bogus weekday');
+      await tap(store, '3030', 'when:freq:mine');
+      assert.equal((await store.getUser('3030'))?.digest_freq, 'twice', 'the frequency button is gone');
+      await tap(store, '3030', 'when:quiet:0-0');
+      assert.equal((await store.getUser('3030'))?.quiet_from, 23, 'and so is the quiet-window one');
     });
   });
 
@@ -2166,16 +2789,19 @@ describe('the heart', () => {
     store: StoreType,
     chatId: string,
     messageId: number,
-    { from = [], to = ['❤️'] }: { from?: string[]; to?: string[] } = {},
+    { from = [], to = ['❤️'], chatType = 'private' }: { from?: string[]; to?: string[]; chatType?: string } = {},
   ): Promise<string> {
     return captureOutput(() =>
-      handleReaction({ store, log, dryRun: true }, {
-        chat: { id: chatId, type: 'private' },
-        message_id: messageId,
-        user: { id: Number(chatId) },
-        old_reaction: from.map((emoji) => ({ type: 'emoji', emoji })),
-        new_reaction: to.map((emoji) => ({ type: 'emoji', emoji })),
-      } as never),
+      handleReaction(
+        { store, log, dryRun: true },
+        TgReactionUpdateSchema.parse({
+          chat: { id: chatId, type: chatType },
+          message_id: messageId,
+          user: { id: Number(chatId) },
+          old_reaction: from.map((emoji) => ({ type: 'emoji', emoji })),
+          new_reaction: to.map((emoji) => ({ type: 'emoji', emoji })),
+        }),
+      ),
     );
   }
 
@@ -2206,6 +2832,25 @@ describe('the heart', () => {
       await react(store, '3202', 778);
       const user = await getUser(store, '3202');
       assert.ok(user?.prefs.favourite_categories.includes('standup'), JSON.stringify(user?.prefs.favourite_categories));
+    });
+  });
+
+  /**
+   * A group chat is one row in `users`: one member's ❤️ would rewrite the taste
+   * of everyone else in it, which is not what "a taste model per person" means.
+   */
+  it('sets a reminder but learns nothing from a heart in a group chat', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3290', city: 'kharkiv' });
+      const before = (await getUser(store, '3290'))!.prefs;
+      await store.recordMessage('3290', 779, [gig()]);
+      const said = await react(store, '3290', 779, { chatType: 'supergroup' });
+
+      assert.match(said, /нагада/i, 'the heart is still a bookmark for the group');
+      assert.equal((await store.listReminders('3290')).length, 1);
+      const after = (await getUser(store, '3290'))!.prefs;
+      assert.deepEqual(after.taste, before.taste, 'the shared profile is left alone');
+      assert.deepEqual(after.favourite_categories, before.favourite_categories);
     });
   });
 
@@ -2318,12 +2963,18 @@ describe('the heart', () => {
 
 describe('card buttons', () => {
   /** A tap on a button under the event card we recorded as message 42. */
-  async function tapCard(store: StoreType, chatId: string, verb: string, itemId: string): Promise<string> {
+  async function tapCard(store: StoreType, chatId: string, verb: string, itemId: string, photo = false): Promise<string> {
     return captureOutput(() =>
       handleCallback({ store, log, dryRun: true }, {
         id: 'cb',
         data: `ev:${verb}:${itemId}`,
-        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' } },
+        message: {
+          message_id: 42,
+          date: Math.floor(Date.now() / 1000),
+          chat: { id: chatId, type: 'private' },
+          // a poster card reaches Telegram as a photo: no `text` at all
+          ...(photo ? { photo: [{ file_id: 'f', file_unique_id: 'u', width: 1, height: 1 }] } : {}),
+        },
         from: { id: Number(chatId) },
       } as never),
     );
@@ -2342,6 +2993,22 @@ describe('card buttons', () => {
       assert.equal(rows.length, 1);
       assert.equal(rows[0]!.title, 'Вечір імпровізації');
       assert.ok(out.includes('edit 42'), 'the card is rewritten in place');
+      assert.ok(out.includes('⏰ Не нагадувати'), out.slice(-600));
+    });
+  });
+
+  it('redraws a poster card as a caption edit, not a doomed text edit', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3411', city: 'kharkiv' });
+      // the bug behind this test: a photo message has no `text`, so
+      // editMessageText on it is Bad Request "there is no text in the message
+      // to edit" — the ⏰ appeared to do nothing at all
+      const item = { ...gig(), image: 'https://img/p.jpg' };
+      await store.recordMessage('3411', 42, [item]);
+      const out = await tapCard(store, '3411', 'r', item.id, true);
+      assert.equal((await store.listReminders('3411')).length, 1, 'the reminder was never the problem');
+      assert.ok(out.includes('caption edit 42'), out.slice(-600));
+      assert.ok(!out.includes('──── edit 42'), 'a photo must not be sent editMessageText');
       assert.ok(out.includes('⏰ Не нагадувати'), out.slice(-600));
     });
   });
@@ -2672,6 +3339,27 @@ describe('deliver', () => {
   });
 });
 
+/* --------------------------------------------------------------------- cli --- */
+
+describe('flag parsing', () => {
+  it('takes a value for every flag that has one', () => {
+    // undeclared flags were parsed as switches and their value swept into the
+    // free text: `bot.ts --timeout 60` waited 0s and searched for "60"
+    const args = parseArgs(['--timeout', '60', '--ttl', '3', '--cancel', '7', 'стендап']);
+    assert.equal(args.num('timeout'), 60);
+    assert.equal(args.num('ttl'), 3);
+    assert.equal(args.get('cancel'), '7');
+    assert.equal(args.text(), 'стендап');
+  });
+
+  it('still treats a bare switch as a switch', () => {
+    const args = parseArgs(['--dry-run', '--city', 'lviv', 'що', 'цікавого']);
+    assert.equal(args.has('dry-run'), true);
+    assert.equal(args.get('city'), 'lviv');
+    assert.equal(args.text(), 'що цікавого');
+  });
+});
+
 /* ------------------------------------------------------------------ config --- */
 
 describe('config', () => {
@@ -2687,6 +3375,32 @@ describe('config', () => {
     const { ConfigSchema } = await import('../src/schemas.ts');
     const result = ConfigSchema.safeParse({ http: { retries: 'lots' } });
     assert.equal(result.success, false);
+  });
+
+  /**
+   * savePrefs once wrote ten of the eleven preference fields and dropped
+   * `taste`, so any CLI edit quietly erased the ❤️ tallies the bot had spent
+   * weeks learning. The round trip is the whole point of this test.
+   */
+  it('round-trips preferences through the file, taste tallies included', () => {
+    const original = readFileSync(process.env['EVENTS_FINDER_PREFS']!, 'utf8');
+    try {
+      const p = PreferencesSchema.parse({
+        home_city: 'kharkiv',
+        favourite_categories: ['standup'],
+        follow: ['Latexfauna'],
+        taste: { standup: 7, concert: 2 },
+        notes: ['сядає біля вікна'],
+      });
+      savePrefs(p);
+      assert.deepEqual(loadPrefs().taste, { standup: 7, concert: 2 }, 'the ❤️ tallies must survive a save');
+      assert.deepEqual(loadPrefs().follow, ['Latexfauna']);
+      // every field, not just the one that went missing: savePrefs lists its
+      // keys by hand, so the twelfth preference would drop just as quietly
+      assert.deepEqual(loadPrefs(), p, 'a save must not lose any preference field');
+    } finally {
+      writeFileSync(process.env['EVENTS_FINDER_PREFS']!, original);
+    }
   });
 });
 

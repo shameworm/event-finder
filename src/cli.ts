@@ -11,9 +11,17 @@ export interface Args {
   text(): string;
 }
 
+/**
+ * Flags that take a value. A flag missing from this list is parsed as a bare
+ * switch and its value is swept into the free-text request instead — which is
+ * how `--timeout 60` and `--ttl 3` used to be ignored in silence.
+ *
+ * Keep it in step with `args.get/num/list` across scripts/.
+ */
 const KNOWN_VALUE_FLAGS = new Set([
   'city', 'cities', 'from', 'to', 'like', 'dislike', 'max-price', 'top', 'pages', 'days',
   'chat', 'hour', 'day', 'kind', 'source', 'limit', 'ingest', 'out', 'format', 'base', 'per-day', 'label', 'title', 'channel',
+  'only', 'skip', 'timeout', 'ttl', 'cancel',
 ]);
 
 export function parseArgs(argv = process.argv.slice(2)): Args {

@@ -15,22 +15,38 @@ import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import type { Item, SourceResult } from '../src/types.ts';
 import { loadConfig } from '../src/config.ts';
-import { politeFetch } from '../src/http.ts';
 import { fromSchemaEvent } from '../src/normalize.ts';
 import { inWindow } from '../src/filter.ts';
 import { categoryFromSlug } from '../src/categories.ts';
-import { runSourceCli, type SourceContext } from '../src/source.ts';
+import { fetcherFor, pager, runSourceCli, type SourceContext } from '../src/source.ts';
 
 export const SOURCE = 'kontramarka';
 
 const DEFAULT_CATEGORIES = ['concert', 'standUp', 'theatre', 'exhibition', 'festival', 'clubs', 'museum'];
 
-/** Read one `.cat_item` card's microdata into a plain schema.org-shaped object. */
-export function cardToSchema($: cheerio.CheerioAPI, el: AnyNode): Record<string, unknown> | null {
+/** Resolve a card's href against the page it was found on; null if unusable. */
+function absolute(href: string, pageUrl: string): string | null {
+  try {
+    return new URL(href, pageUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read one `.cat_item` card's microdata into a plain schema.org-shaped object.
+ *
+ * `pageUrl` is what the card's href is resolved against: Kontramarka links its
+ * cards with site-relative paths, and a bare "/uk/event/123" in a Telegram
+ * message is a dead link. Leave it out and the href is taken as published.
+ */
+export function cardToSchema($: cheerio.CheerioAPI, el: AnyNode, pageUrl?: string): Record<string, unknown> | null {
   const card = $(el);
   const name = card.find('[itemprop="name"]').first().text().trim();
-  const url = card.find('a[itemprop="url"]').first().attr('href') ?? card.find('a.block-info__title').first().attr('href');
-  if (!name || !url) return null;
+  const href = card.find('a[itemprop="url"]').first().attr('href') ?? card.find('a.block-info__title').first().attr('href');
+  if (!name || !href) return null;
+  const url = pageUrl ? absolute(href, pageUrl) : href;
+  if (!url) return null;
 
   const meta = (prop: string): string | undefined => {
     const direct = card.find(`meta[itemprop="${prop}"]`).first().attr('content');
@@ -84,20 +100,18 @@ export async function collect(ctx: SourceContext): Promise<SourceResult> {
   const sub = (sourceCfg.subdomain ?? '').trim();
   const host = sub && sub !== 'www' ? `https://${sub}.kontramarka.ua/uk` : 'https://kontramarka.ua/uk';
   const items: Item[] = [];
-  let fetched = 0;
+  const fetchText = fetcherFor(ctx);
+  const pages = pager(ctx.log);
 
   for (const category of categories) {
-    for (let page = 1; page <= maxPages; page++) {
+    await pages.walk(`${SOURCE}: ${category}`, maxPages, async (page) => {
       const url = `${host}/${category}${page > 1 ? `?page=${page}` : ''}`;
-      const html = await politeFetch(url, { log: ctx.log });
-      fetched++;
-      const $ = cheerio.load(html);
+      const $ = cheerio.load(await fetchText(url, { log: ctx.log }));
       const cards = $('.cat_item[itemtype*="schema.org/Event"], [itemtype$="/Event"].cat_item').toArray();
       ctx.log.info(`${SOURCE}: ${category} page ${page}: ${cards.length} events`);
-      if (cards.length === 0) break;
 
       for (const el of cards) {
-        const obj = cardToSchema($, el);
+        const obj = cardToSchema($, el, url);
         if (!obj) continue;
         const item = fromSchemaEvent(obj, {
           city: ctx.city,
@@ -106,10 +120,11 @@ export async function collect(ctx: SourceContext): Promise<SourceResult> {
         });
         if (item && inWindow(item, ctx.query)) items.push(item);
       }
-    }
+      return cards.length;
+    });
   }
 
-  return { source: SOURCE, ok: true, items, fetched };
+  return pages.result(SOURCE, items);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) await runSourceCli(SOURCE, collect);

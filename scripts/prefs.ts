@@ -127,4 +127,4 @@ await withStore(async (store) => {
   process.stdout.write(`updated chat ${chatId}:\n${edit.changes.map((c) => `  · ${c}`).join('\n')}\n\n${describePrefs(updated.prefs)}\n`);
 });
 
-process.exit(0);
+process.exit(process.exitCode ?? 0);

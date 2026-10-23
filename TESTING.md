@@ -14,13 +14,14 @@ cd ~/.hermes/skills/events-finder
 ## 0. Automated suite (start here)
 
 ```bash
-npm test          # 181 offline checks: parsing, classification, dedupe, ranking,
-                  # rendering, per-user store, users, fan-out, bot handlers
+npm test          # 269 offline checks: parsing, classification, dedupe, ranking,
+                  # rendering, per-user store, users, fan-out, bot handlers,
+                  # politeness/retries, page walking and the scrapers themselves
 npm run typecheck # tsc --noEmit
 ```
 
 Uses a temporary database and the committed example config, so it is safe at any
-time and needs no secrets. Expect `181/181 passed` and exit code 0.
+time and needs no secrets. Expect `269/269 passed` and exit code 0.
 
 Notable cases it covers, so you do not have to by hand: a city is scraped once
 and ranked per user; a muted user is skipped; an already-delivered item is not
@@ -105,8 +106,9 @@ conversation, `src/render.ts` for events), so that is where to look.
    `standup, jazz`.
 4. Type `/` → Telegram autocompletes the command list, and the ☰ button next
    to the text field shows the same menu.
-5. `/weekend` → «⏳ Шукаю…», then a header («🎉 На вихідних · Харків · … · 5
-   подій») followed by **one message per event**. Check the dates read like
+5. `/weekend` → «⏳ Шукаю…», which **disappears** when the answer lands, then a
+   header («🎉 На вихідних · Харків · … · 5 подій») followed by **one message
+   per event**. Check the dates read like
    «пт, 24 жовт. 19:00» and the price like «400–800 ₴».
 6. **Tap ❤️ on one of those event messages** → «⏰ Нагадування поставив — …» as
    a reply to that message, plus «(додав … до улюбленого)» the first time and

@@ -37,6 +37,8 @@ export interface PipelineOptions {
   only?: string[];
   skip?: string[];
   maxPages?: number;
+  /** Passed to every collector; the test suite uses it to serve fixtures. */
+  fetchText?: SourceContext['fetchText'];
   keepDisliked?: boolean;
   keepExpensive?: boolean;
   keepOffTaste?: boolean;
@@ -66,6 +68,7 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
         city,
         log: opts.log.child(name),
         maxPages: opts.maxPages ?? cfg.http.max_pages,
+        fetchText: opts.fetchText,
       };
       jobs.push(safeCollect(name, collector, ctx));
     }

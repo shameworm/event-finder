@@ -33,8 +33,16 @@ export const ItemSchema = z.object({
   city: z.string().min(1),
   venue: z.string().optional(),
   address: z.string().optional(),
-  /** ISO 8601 with offset, e.g. 2026-10-24T22:00:00+03:00. Absent for places. */
-  startsAt: z.string().optional(),
+  /**
+   * ISO 8601 with offset, e.g. 2026-10-24T22:00:00+03:00. Absent for places.
+   * Sources do hand over human text ("щотижня", "25 жовтня") — an unparseable
+   * date is dropped rather than kept, so it renders as "дата уточнюється"
+   * instead of poisoning the ranking and the day grouping with NaN.
+   */
+  startsAt: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined && Number.isNaN(Date.parse(v)) ? undefined : v)),
   endsAt: z.string().optional(),
   priceMin: z.number().nonnegative().optional(),
   priceMax: z.number().nonnegative().optional(),

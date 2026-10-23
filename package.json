@@ -20,7 +20,8 @@
     "test": "tsx tests/run.ts",
     "typecheck": "tsc --noEmit",
     "db:push": "drizzle-kit push",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "check": "npm run typecheck && npm test"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
@@ -35,6 +36,7 @@
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.23.1",
+    "domhandler": "^5.0.3",
     "drizzle-kit": "^0.31.11",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"

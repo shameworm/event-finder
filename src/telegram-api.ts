@@ -42,7 +42,15 @@ async function call<T extends z.ZodTypeAny>(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-  const envelope = TgResponseSchema(result).safeParse(await res.json());
+  // a proxy or Telegram hiccup can return HTML/empty bodies; a raw SyntaxError
+  // from res.json() would masquerade as a validation failure
+  let raw: unknown;
+  try {
+    raw = await res.json();
+  } catch {
+    throw new Error(`Telegram ${method}: non-JSON response (HTTP ${res.status})`);
+  }
+  const envelope = TgResponseSchema(result).safeParse(raw);
   if (!envelope.success) throw new Error(`Telegram ${method}: unexpected response — ${formatZodError(envelope.error, 3)}`);
   if (!envelope.data.ok) throw new TelegramError(method, res.status, envelope.data.description);
   if (envelope.data.result === undefined) throw new Error(`Telegram ${method}: empty result`);
@@ -271,6 +279,40 @@ export async function editMessageText(
 }
 
 /**
+ * The same rewrite for a message Telegram took as a photo: its words live in
+ * the *caption*, and `editMessageText` on one of those fails with "there is no
+ * text in the message to edit" — every poster card in a digest is one of these.
+ */
+export async function editMessageCaption(
+  text: string,
+  opts: { chatId: string; messageId: number; inlineKeyboard?: InlineButton[][]; dryRun?: boolean; log?: Logger },
+): Promise<void> {
+  if (opts.dryRun) {
+    process.stdout.write(`\n──────── caption edit ${opts.messageId} in chat ${opts.chatId} ────────\n${text}\n`);
+    printButtons(opts.inlineKeyboard);
+    return;
+  }
+  const cfg = loadConfig();
+  try {
+    await call(
+      'editMessageCaption',
+      {
+        chat_id: opts.chatId,
+        message_id: opts.messageId,
+        caption: text,
+        parse_mode: cfg.telegram.parse_mode,
+        ...(opts.inlineKeyboard ? { reply_markup: { inline_keyboard: opts.inlineKeyboard } } : {}),
+      },
+      TgMessageSchema,
+    );
+  } catch (err) {
+    // same as editMessageText: a double tap produces an identical caption
+    if (err instanceof TelegramError && (err.description ?? '').includes('message is not modified')) return;
+    throw err;
+  }
+}
+
+/**
  * Take a message back — used for the "⏳ Шукаю…" placeholder once the answer it
  * was standing in for has arrived.
  *
@@ -322,13 +364,43 @@ export async function getMyCommands(): Promise<{ command: string; description: s
   return call('getMyCommands', {}, z.array(z.object({ command: z.string(), description: z.string() }).loose()));
 }
 
-/** Long-poll new updates; the caller stores the offset (see scripts/bot.ts). */
-export async function getUpdates(offset: number, timeout = 0): Promise<TgUpdate[]> {
-  return call(
+/**
+ * Long-poll new updates; the caller stores the offset (see scripts/bot.ts).
+ *
+ * One malformed update must not brick the bot: the whole batch used to be
+ * validated at once, so a single update Telegram (or a proxy) sends in an
+ * unexpected shape threw forever at the same offset. Each update is now
+ * validated on its own — bad ones are logged and skipped, and `lastUpdateId`
+ * still advances the offset past them.
+ */
+export async function getUpdates(
+  offset: number,
+  timeout = 0,
+  log?: Logger,
+): Promise<{ updates: TgUpdate[]; lastUpdateId: number }> {
+  const raw = await call(
     'getUpdates',
     { offset, timeout, allowed_updates: ['message', 'edited_message', 'callback_query', 'message_reaction'] },
-    z.array(TgUpdateSchema),
+    z.array(z.unknown()),
   );
+  return parseUpdates(raw, log);
+}
+
+/** Validate a raw getUpdates array leniently — exported for the test suite. */
+export function parseUpdates(
+  raw: unknown[],
+  log?: Logger,
+): { updates: TgUpdate[]; lastUpdateId: number } {
+  const updates: TgUpdate[] = [];
+  let lastUpdateId = -1;
+  for (const entry of raw) {
+    const id = typeof entry === 'object' && entry !== null ? (entry as { update_id?: unknown })['update_id'] : undefined;
+    if (typeof id === 'number' && id > lastUpdateId) lastUpdateId = id;
+    const parsed = TgUpdateSchema.safeParse(entry);
+    if (parsed.success) updates.push(parsed.data);
+    else log?.warn(`skipping malformed update ${String(id)}: ${formatZodError(parsed.error, 2)}`);
+  }
+  return { updates, lastUpdateId };
 }
 
 export async function getMe(): Promise<{ id: number; username?: string; first_name?: string }> {

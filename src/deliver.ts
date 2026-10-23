@@ -131,13 +131,22 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
     messageIds.push(...ids);
 
     // one event per message, so a ❤️ on this message means exactly this event
+    //
+    // recorded here rather than after the loop: a digest that died on its
+    // seventh message used to record nothing at all, so the retry sent the
+    // first six events a second time
     if (opts.store && opts.chatId && shouldRecord && message.items.length > 0) {
       for (const id of ids) await opts.store.recordMessage(opts.chatId, id, message.items);
+      await opts.store.recordSent(opts.chatId, message.items);
     }
   }
 
-  if (opts.store && opts.chatId && shouldRecord && opts.items.length > 0) {
-    await opts.store.recordSent(opts.chatId, opts.items);
+  // items a per-day cap kept out of the messages were still offered to this
+  // person, and are recorded as before — just once, not twice
+  if (opts.store && opts.chatId && shouldRecord) {
+    const shown = new Set(messages.flatMap((m) => m.items.map((i) => i.id)));
+    const unshown = opts.items.filter((i) => !shown.has(i.id));
+    if (unshown.length > 0) await opts.store.recordSent(opts.chatId, unshown);
   }
 
   opts.log.info(`${opts.dryRun ? 'dry-run' : `sent to ${opts.chatId}`}: ${opts.title} — ${summarize(opts.items)}`);

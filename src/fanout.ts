@@ -74,6 +74,8 @@ export interface FanoutResult {
   scrapes: number;
   cacheHits: number;
   failedSources: string[];
+  /** Users whose own send failed; the rest of the job carried on. */
+  failedUsers: number;
   /** Opted in, but not at this hour / not on this day. */
   notNow: number;
   /** Held back by quiet hours (non-digest jobs only). */
@@ -90,7 +92,7 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
   const now = job.now ?? { hour: Number(localTime(clock, cfg.timezone).slice(0, 2)), weekday: localWeekday(clock, cfg.timezone) };
   const empty = (): FanoutResult => ({
     users: 0, recipients: 0, items: 0, cities: 0, scrapes: 0, cacheHits: 0,
-    failedSources: [], notNow: 0, quiet: 0, notTheirs: 0,
+    failedSources: [], failedUsers: 0, notNow: 0, quiet: 0, notTheirs: 0,
   });
 
   let users = await allUsers(job.store, job.optIn, job.log);
@@ -163,68 +165,84 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
     }
 
     for (const user of cityUsers) {
-      const query: Query = {
-        cities: [city],
-        from: job.window.from,
-        to: job.window.to,
-        like: [],
-        dislike: [],
-        rangeLabel: job.window.label,
-        kinds,
-      };
-
-      const ranked = rank(collected.items, { query, prefs: user.prefs, tz: cfg.timezone });
-      // "only when there is something really mine": a non-zero toppedUp means
-      // rank() had to let off-taste items back in to fill the list, i.e. there
-      // was not enough of their thing on. Saying nothing is the whole point.
-      if (job.digest && wantsOnlyMine(user.schedule) && ranked.toppedUp > 0) {
-        job.log.info(`${user.chatId}: nothing of theirs on (topped up ${ranked.toppedUp}) — staying quiet`);
-        result.notTheirs++;
-        continue;
-      }
-      let items = job.select ? job.select(user, ranked.items) : ranked.items;
-      const changeNotes = new Map<string, string>();
-
-      if (job.newOnly ?? true) {
-        const { fresh } = await job.store.filterUnsent(user.chatId, items);
-        items = fresh.map((f) => f.item);
-        for (const f of fresh) if (f.reason !== 'new') changeNotes.set(f.item.id, f.reason);
-      }
-      if (job.top) items = items.slice(0, job.top);
-
-      if (items.length === 0 && (job.skipEmpty ?? true)) continue;
-
-      // deliver() already splits a digest into one message per event, so the
-      // job does not need to decide that
-      const outcome = await deliver({
-        title: job.title(user, city),
-        query,
-        items,
-        log: job.log,
-        store: job.store,
-        chatId: user.chatId,
-        dryRun: job.dryRun,
-        maxPerDay: job.maxPerDay,
-        footer: job.footer,
-        changeNotes,
-      });
-      const delivered = !outcome.chatGone;
-      if (delivered) {
-        result.items += items.length;
-        if (cfg.bot.send_delay_ms) await sleep(cfg.bot.send_delay_ms);
-      }
-      if (delivered && !sentTo.has(user.chatId)) {
-        sentTo.add(user.chatId);
-        result.recipients++;
+      // one person's failure — a second flood-control hit, a network blip —
+      // used to abort the whole job, so everybody after them in the list got
+      // nothing at all until the next schedule
+      try {
+        await sendToOne(user, city, collected.items);
+      } catch (err) {
+        result.failedUsers++;
+        job.log.error(
+          `${job.optIn} for chat ${user.chatId} failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+        );
       }
     }
   }
 
-  await job.store.pruneCache();
+  await job.store.prune();
   job.log.info(
     `${job.optIn}: ${result.items} item(s) to ${result.recipients}/${result.users} user(s); ` +
       `${result.scrapes} scrape(s), ${result.cacheHits} cache hit(s)` +
+      `${result.failedUsers ? `; ${result.failedUsers} user(s) failed` : ''}` +
       `${result.failedSources.length ? `; failed: ${result.failedSources.join(', ')}` : ''}`,
   );
   return result;
+
+  /** Rank one city's list for one person and send them their own version. */
+  async function sendToOne(user: BotUser, city: string, collected: Item[]): Promise<void> {
+    const query: Query = {
+      cities: [city],
+      from: job.window.from,
+      to: job.window.to,
+      like: [],
+      dislike: [],
+      rangeLabel: job.window.label,
+      kinds,
+    };
+
+    const ranked = rank(collected, { query, prefs: user.prefs, tz: cfg.timezone });
+    // "only when there is something really mine": a non-zero toppedUp means
+    // rank() had to let off-taste items back in to fill the list, i.e. there
+    // was not enough of their thing on. Saying nothing is the whole point.
+    if (job.digest && wantsOnlyMine(user.schedule) && ranked.toppedUp > 0) {
+      job.log.info(`${user.chatId}: nothing of theirs on (topped up ${ranked.toppedUp}) — staying quiet`);
+      result.notTheirs++;
+      return;
+    }
+    let items = job.select ? job.select(user, ranked.items) : ranked.items;
+    const changeNotes = new Map<string, string>();
+
+    if (job.newOnly ?? true) {
+      const { fresh } = await job.store.filterUnsent(user.chatId, items);
+      items = fresh.map((f) => f.item);
+      for (const f of fresh) if (f.reason !== 'new') changeNotes.set(f.item.id, f.reason);
+    }
+    if (job.top) items = items.slice(0, job.top);
+
+    if (items.length === 0 && (job.skipEmpty ?? true)) return;
+
+    // deliver() already splits a digest into one message per event, so the
+    // job does not need to decide that
+    const outcome = await deliver({
+      title: job.title(user, city),
+      query,
+      items,
+      log: job.log,
+      store: job.store,
+      chatId: user.chatId,
+      dryRun: job.dryRun,
+      maxPerDay: job.maxPerDay,
+      footer: job.footer,
+      changeNotes,
+    });
+    const delivered = !outcome.chatGone;
+    if (delivered) {
+      result.items += items.length;
+      if (cfg.bot.send_delay_ms) await sleep(cfg.bot.send_delay_ms);
+    }
+    if (delivered && !sentTo.has(user.chatId)) {
+      sentTo.add(user.chatId);
+      result.recipients++;
+    }
+  }
 }
