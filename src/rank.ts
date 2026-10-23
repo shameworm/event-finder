@@ -169,7 +169,9 @@ export function rank(items: Item[], opts: RankOptions): Ranked {
       const day = localDate(item.startsAt, tz);
       const span = Math.max(1, (Date.parse(`${query.to}T00:00:00Z`) - Date.parse(`${query.from}T00:00:00Z`)) / 86400000);
       const offset = (Date.parse(`${day}T00:00:00Z`) - Date.parse(`${query.from}T00:00:00Z`)) / 86400000;
-      score += Math.max(0, 1 - offset / (span + 1));
+      // a day that does not parse would make the whole score NaN, and a NaN
+      // score sorts to the front — one bad date would lead every digest
+      if (!Number.isNaN(offset)) score += Math.max(0, 1 - offset / (span + 1));
     }
 
     kept.push({ item: { ...item, score: Math.round(score * 100) / 100, reasons }, onTaste });
@@ -193,7 +195,8 @@ export function rank(items: Item[], opts: RankOptions): Ranked {
 export function groupByDay(items: Item[], tz = loadConfig().timezone): { day: string; items: Item[] }[] {
   const map = new Map<string, Item[]>();
   for (const it of items) {
-    const day = it.startsAt ? localDate(it.startsAt, tz) : 'tbd';
+    // an unparseable date is "unknown", not its own empty-string day
+    const day = (it.startsAt ? localDate(it.startsAt, tz) : '') || 'tbd';
     const list = map.get(day);
     if (list) list.push(it);
     else map.set(day, [it]);

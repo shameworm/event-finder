@@ -42,7 +42,7 @@ writeFileSync(
 
 // everything else is imported after the sandbox env vars are set above
 const { describe, it, run } = await import('./harness.ts');
-const { normText, stemText, isoInZone, localDate, localTime, addDays, today, weekdayOf, titleKey } = await import('../src/util.ts');
+const { normText, stemText, isoInZone, localDate, localTime, addDays, today, weekdayOf, titleKey, dayLabel } = await import('../src/util.ts');
 const { classify, canonicalTag, expandTag } = await import('../src/categories.ts');
 const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange, splitNegations } = await import('../src/request.ts');
 const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom } = await import('../src/normalize.ts');
@@ -326,6 +326,19 @@ describe('normalization', () => {
     assert.deepEqual(parsePriceText('від 250 грн'), { priceMin: 250 });
   });
 
+  /**
+   * Telegram posts say "щотижня" or "25 жовтня" all the time. Kept, such a
+   * string used to reach dayLabel → Invalid Date → RangeError, taking the
+   * whole city's digest down with it.
+   */
+  it('drops a startDate it cannot parse rather than keeping poison', () => {
+    const item = makeItem({ city: 'kharkiv', title: 'Щотижня', url: 'https://x/w', source: 'telegram:@x', startsAt: 'щотижня' })!;
+    assert.equal(item.startsAt, undefined, 'human text is not a date');
+    assert.equal(fromSchemaEvent({ name: 'Шоу', url: 'https://x/s', startDate: '25 жовтня' }, { city: 'kharkiv', source: 'x' })!.startsAt, undefined);
+    // a real date still passes untouched
+    assert.equal(makeItem({ city: 'kharkiv', title: 'Gig', url: 'https://x/g', source: 's', startsAt: '2026-10-25T19:00:00+03:00' })!.startsAt, '2026-10-25T19:00:00+03:00');
+  });
+
   it('parses Kontramarka microdata cards', async () => {
     const html = fixture('kontramarka-card.html');
     const cheerio = await import('cheerio');
@@ -475,6 +488,29 @@ describe('ranking', () => {
     const d1 = makeItem({ city: 'kharkiv', title: 'A', url: 'https://x/9', source: 's', startsAt: '2026-10-25T19:00:00+03:00' })!;
     const d2 = makeItem({ city: 'kharkiv', title: 'B', url: 'https://x/10', source: 's', startsAt: '2026-10-23T19:00:00+03:00' })!;
     assert.deepEqual(groupByDay([d1, d2]).map((g) => g.day), ['2026-10-23', '2026-10-25']);
+  });
+
+  /**
+   * A date that does not parse used to yield an empty day bucket (not 'tbd'),
+   * and dayLabel('') threw RangeError in the digest header; the soonness
+   * bonus went NaN, and V8 sorts NaN to the front — one junk date could lead
+   * every digest and crash the rest.
+   */
+  it('a bad date scores a real number and groups under tbd', () => {
+    const bad = { ...makeItem({ city: 'kharkiv', title: 'Незрозуміле', url: 'https://x/bd', source: 's', category: 'standup' })!, startsAt: 'щотижня' } as Item;
+    const good = makeItem({ ...common, title: 'Відкритий мікрофон', url: 'https://x/good', source: 'karabas', category: 'standup', priceMin: 200 })!;
+    const ranked = rank([bad, good], { query, prefs });
+    assert.ok(ranked.items.every((i) => !Number.isNaN(i.score!)), 'no score may be NaN');
+    assert.deepEqual(groupByDay(ranked.items, TZ).map((g) => g.day).includes('tbd'), true, 'an unparseable date is "unknown", not its own day');
+    // and the digest header for that bucket renders instead of throwing
+    const head = groupByDay(ranked.items, TZ).find((g) => g.day === 'tbd')!;
+    assert.ok(buildDigest({ title: 'T', query, items: head.items, format: 'text' }).text.includes('уточнюється'));
+  });
+
+  it('dayLabel shrugs off an unparseable date', () => {
+    assert.equal(dayLabel(''), '');
+    assert.equal(dayLabel('щотижня'), '');
+    assert.notEqual(dayLabel('2026-10-24'), '');
   });
 });
 

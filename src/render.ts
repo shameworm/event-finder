@@ -83,8 +83,9 @@ export function renderItem(item: Item, opts: RenderItemOptions = {}): string {
 
   // Telegram posts often give a date but no time; 00:00 means "unknown", not midnight
   const timeKnown = item.startsAt ? !(item.confidence === 'low' && localTime(item.startsAt, tz) === '00:00') : false;
+  const day = opts.withDay && item.startsAt ? dayLabel(item.startsAt.slice(0, 10), cfg.locale) : '';
   const when = item.startsAt
-    ? `${opts.withDay ? dayLabel(item.startsAt.slice(0, 10), cfg.locale) + ' ' : ''}${timeKnown ? localTime(item.startsAt, tz) : 'час уточнюється'}`
+    ? [day, timeKnown ? localTime(item.startsAt, tz) : 'час уточнюється'].filter(Boolean).join(' ')
     : 'дата уточнюється';
 
   const facts = (item.kind === 'place'
@@ -222,7 +223,8 @@ export function buildDigest(opts: DigestOptions): { text: string; ordered: Item[
   }
 
   for (const group of groupByDay(opts.items, cfg.timezone)) {
-    const dayHead = group.day === 'tbd' ? 'Дата уточнюється' : dayLabel(group.day, cfg.locale);
+    const label = group.day === 'tbd' ? '' : dayLabel(group.day, cfg.locale);
+    const dayHead = label || 'Дата уточнюється';
     const shown = maxPerDay > 0 ? group.items.slice(0, maxPerDay) : group.items;
     ordered.push(...shown);
     const rendered = shown.map((it) =>

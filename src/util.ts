@@ -164,9 +164,10 @@ export function pad2(n: number): string {
   return String(n).padStart(2, '0');
 }
 
-/** Human day label: "Fri 24 Oct". */
+/** Human day label: "Fri 24 Oct". Empty string for an unparseable date. */
 export function dayLabel(date: string, locale = 'uk-UA'): string {
   const d = new Date(`${date}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return '';
   return new Intl.DateTimeFormat(locale, { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }).format(d);
 }
 
