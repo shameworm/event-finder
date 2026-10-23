@@ -296,6 +296,13 @@ export interface OutgoingMessage {
   items: Item[];
   /** The buttons under an event card; the header has none. */
   inlineKeyboard?: InlineButton[][];
+  /**
+   * Poster to send this card as a photo, with `caption` under it. Both are set
+   * together, or neither is; `text` is always the full message-sized card, so a
+   * poster Telegram refuses costs nothing but the picture.
+   */
+  image?: string;
+  caption?: string;
 }
 
 /**
@@ -365,17 +372,22 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
 
   return [
     { text: header, items: [] },
-    ...kept.map((item) => ({
-      text: renderItem(item, {
+    ...kept.map((item) => {
+      const itemOpts: RenderItemOptions = {
         format,
         withDay: !placesOnly,
         explain: opts.explain,
         changeNote: opts.changeNotes?.get(item.id),
-      }),
-      items: [item],
-      // places have no start time to remind about and no ticket to share
-      ...(item.kind === 'event' ? { inlineKeyboard: eventKeyboard(item) } : {}),
-    })),
+      };
+      const caption = item.image ? renderCaption(item, itemOpts) : null;
+      return {
+        text: renderItem(item, itemOpts),
+        items: [item],
+        // places have no start time to remind about and no ticket to share
+        ...(item.kind === 'event' ? { inlineKeyboard: eventKeyboard(item) } : {}),
+        ...(item.image && caption ? { image: item.image, caption } : {}),
+      };
+    }),
   ];
 }
 
