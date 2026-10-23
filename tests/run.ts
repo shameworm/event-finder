@@ -1612,13 +1612,16 @@ async function captureOutput(body: () => Promise<unknown>): Promise<string> {
 /** Capture what the bot would say to one message. */
 async function say(store: StoreType, chatId: string, text: string, extra: Record<string, unknown> = {}): Promise<string> {
   return captureOutput(() =>
-    handleMessage({ store, log, dryRun: true }, {
-      message_id: Math.floor(Math.random() * 100000),
-      date: Math.floor(Date.now() / 1000),
-      chat: { id: chatId, type: 'private' },
-      text,
-      ...extra,
-    } as never),
+    handleMessage(
+      { store, log, dryRun: true },
+      TgMessageSchema.parse({
+        message_id: Math.floor(Math.random() * 100000),
+        date: Math.floor(Date.now() / 1000),
+        chat: { id: chatId, type: 'private' },
+        text,
+        ...extra,
+      }),
+    ),
   );
 }
 
@@ -1872,12 +1875,15 @@ describe('bot handlers', () => {
       return true;
     };
     try {
-      await handleCallback({ store, log, dryRun: true }, {
-        id: 'cb',
-        data,
-        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' } },
-        from: { id: Number(chatId) },
-      } as never);
+      await handleCallback(
+        { store, log, dryRun: true },
+        TgCallbackQuerySchema.parse({
+          id: 'cb',
+          data,
+          message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' } },
+          from: { id: Number(chatId) },
+        }),
+      );
     } finally {
       (process.stdout as { write: unknown }).write = original;
     }
