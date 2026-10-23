@@ -12,7 +12,7 @@ import type { Preferences } from './types.ts';
 import { PreferencesSchema } from './types.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
 import { canonicalTag, tagLabel } from './categories.ts';
-import { WORD_END, WORD_START, normText, today } from './util.ts';
+import { WORD_END, WORD_START, normText, parseBudget, today } from './util.ts';
 import { nextWeekRange, parseDateRange, thisWeekRange } from './request.ts';
 
 export interface PrefsEdit {
@@ -88,14 +88,10 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
     prefs.max_ticket_price = null;
     return ok(changed ? ['максимальна ціна квитка → без обмежень'] : [], changed ? undefined : 'і так без обмежень');
   }
-  const budget = t.match(
-    new RegExp(
-      String.raw`${B}(?:max(?:imum)?|budget|limit|ліміт|бюджет|максимум|не більше|не дорожче|cheaper than|under|до)${E}[^\d]{0,15}(\d{2,5})`,
-      'iu',
-    ),
-  );
-  if (budget && /price|грн|uah|₴|budget|бюджет|ціна|цін|квит|ticket|max|limit|ліміт|до|under/i.test(t)) {
-    const value = Number(budget[1]);
+  // shared with the search parser: "що буде до 20:00?" is a question about an
+  // evening, not a 20 ₴ budget (see parseBudget)
+  const value = parseBudget(t);
+  if (value !== undefined) {
     const changed = prefs.max_ticket_price !== value;
     prefs.max_ticket_price = value;
     return ok(changed ? [`максимальна ціна квитка → ${value} ${money(prefs.currency)}`] : [], changed ? undefined : 'уже так і стоїть');

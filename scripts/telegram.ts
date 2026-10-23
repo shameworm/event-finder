@@ -21,7 +21,7 @@ import { TG_SESSION_FILE, loadEnv } from '../src/paths.ts';
 import { makeItem, parsePriceText } from '../src/normalize.ts';
 import { classify } from '../src/categories.ts';
 import { inWindow } from '../src/filter.ts';
-import { addDays, hasWord, isoInZone, monthFromWord, normText, pad2, stripEmoji, today, truncate, weekdayOf } from '../src/util.ts';
+import { addDays, hasWord, isoInZone, monthFromWord, nextOccurrence, normText, pad2, stripEmoji, today, truncate, weekdayOf } from '../src/util.ts';
 import { runSourceCli, type SourceContext } from '../src/source.ts';
 import { TgChannelPostSchema, type TgChannelPost } from '../src/schemas.ts';
 import { parseArgs } from '../src/cli.ts';
@@ -44,17 +44,16 @@ export function findDate(text: string, base: string): string | null {
   if (hasWord(t, 'сьогодні', 'сегодня', 'today', 'tonight')) return base;
   if (hasWord(t, 'завтра', 'tomorrow')) return addDays(base, 1);
 
-  // 25.10 / 25.10.2026 / 25/10
-  const dotted = text.match(/\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b/);
-  if (dotted) {
-    const day = Number(dotted[1]);
-    const mon = Number(dotted[2]);
-    if (day >= 1 && day <= 31 && mon >= 1 && mon <= 12) {
-      const year = dotted[3]
-        ? Number(dotted[3].length === 2 ? `20${dotted[3]}` : dotted[3])
-        : inferYear(base, mon, day);
-      return `${year}-${pad2(mon)}-${pad2(day)}`;
-    }
+  // 25.10 / 25.10.2026 / 25/10 — every candidate, because the first one may
+  // be a start time: "початок о 9.05" is five past nine, not the 9th of May
+  for (const m of text.matchAll(/(?<![\d.])(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?/g)) {
+    const before = text.slice(Math.max(0, (m.index ?? 0) - 3), m.index);
+    if (/(?:^|\s)(?:о|в|у|at)\s$/iu.test(before)) continue;
+    const day = Number(m[1]);
+    const mon = Number(m[2]);
+    if (day < 1 || day > 31 || mon < 1 || mon > 12) continue;
+    if (m[3]) return `${m[3].length === 2 ? `20${m[3]}` : m[3]}-${pad2(mon)}-${pad2(day)}`;
+    return nextOccurrence(base, mon, day);
   }
 
   // 25 жовтня / 3 november
@@ -62,7 +61,7 @@ export function findDate(text: string, base: string): string | null {
   if (worded) {
     const mon = monthFromWord(worded[2] as string);
     const day = Number(worded[1]);
-    if (mon && day >= 1 && day <= 31) return `${inferYear(base, mon, day)}-${pad2(mon)}-${pad2(day)}`;
+    if (mon && day >= 1 && day <= 31) return nextOccurrence(base, mon, day);
   }
 
   for (const [re, wd] of WEEKDAY_STEMS) {
@@ -72,13 +71,6 @@ export function findDate(text: string, base: string): string | null {
     }
   }
   return null;
-}
-
-/** Posts rarely give a year; assume the next occurrence. */
-function inferYear(base: string, month: number, day: number): number {
-  const year = Number(base.slice(0, 4));
-  const candidate = `${year}-${pad2(month)}-${pad2(day)}`;
-  return candidate >= base.slice(0, 10) ? year : year + 1;
 }
 
 export function findTime(text: string): string | null {

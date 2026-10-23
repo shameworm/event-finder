@@ -234,6 +234,47 @@ describe('request parsing', () => {
   });
 });
 
+describe('dates people actually type', () => {
+  it('reads a bare day and month as the next one coming, not eleven months ago', () => {
+    // asked two days before new year, "15 січня" is three weeks away
+    const soon = parseDateRange('що буде 15 січня', '2026-12-29');
+    assert.equal(soon.from, '2027-01-15');
+    // and in the same year when it has not passed yet
+    assert.equal(parseDateRange('15 січня', '2026-01-02').from, '2026-01-15');
+    const span = parseDateRange('28-30 грудня', '2026-12-29');
+    assert.deepEqual([span.from, span.to], ['2026-12-28', '2026-12-30']);
+  });
+
+  it('keeps the whole Friday-to-Sunday for "next weekend", even asked on a Sunday', () => {
+    // 2026-10-25 is a Sunday; the next weekend is 30 Oct – 1 Nov
+    const w = parseDateRange('наступні вихідні', '2026-10-25');
+    assert.deepEqual([w.from, w.to], ['2026-10-30', '2026-11-01'], 'asked on Sunday it used to hand back one day');
+    assert.equal(weekdayOf(w.from), 5);
+    // from a Wednesday it is still the weekend after this one
+    const fromWed = parseDateRange('next weekend', '2026-10-21');
+    assert.deepEqual([fromWed.from, fromWed.to], ['2026-10-30', '2026-11-01']);
+  });
+
+  it('reads both ends of an ISO range', () => {
+    for (const text of ['2026-10-24..2026-10-26', '2026-10-24 - 2026-10-26', 'from 2026-10-24 to 2026-10-26']) {
+      assert.deepEqual([parseDateRange(text, '2026-10-20').from, parseDateRange(text, '2026-10-20').to], ['2026-10-24', '2026-10-26'], text);
+    }
+    // the wrong way round is still a range
+    assert.deepEqual(
+      [parseDateRange('2026-10-26..2026-10-24', '2026-10-20').from, parseDateRange('2026-10-26..2026-10-24', '2026-10-20').to],
+      ['2026-10-24', '2026-10-26'],
+    );
+    const one = parseDateRange('2026-10-24', '2026-10-20');
+    assert.deepEqual([one.from, one.to], ['2026-10-24', '2026-10-24']);
+  });
+
+  it('does not read a clock time in a search as a price cap', () => {
+    assert.equal(parseRequest('що буде до 20:00?', { prefs, base: '2026-10-20' }).maxPrice, undefined);
+    assert.equal(parseRequest('стендап до 500 грн', { prefs, base: '2026-10-20' }).maxPrice, 500);
+    assert.equal(parseRequest('концерт, бюджет 900', { prefs, base: '2026-10-20' }).maxPrice, 900);
+  });
+});
+
 /* -------------------------------------------------------------- normalize --- */
 
 describe('normalization', () => {
@@ -840,6 +881,17 @@ describe('telegram posts', () => {
     assert.equal(findDate('5 січня великий концерт', base), '2027-01-05');
   });
 
+  it('does not read a start time as the day of the month', () => {
+    // "о 9.05" is five past nine; it used to be read as the 9th of May
+    assert.equal(findDate('Стендап у пʼятницю, початок о 9.05', base), findDate('Стендап у пʼятницю', base));
+    const post = parsePost(
+      { id: 9, channel: 'c', text: 'Великий концерт 25 жовтня, початок о 19.30, вхід 200 грн' },
+      { city: 'kharkiv', base, tz: TZ },
+    );
+    assert.equal(post?.startsAt?.slice(0, 10), '2026-10-25', 'the date is the date, not the clock');
+    assert.equal(findDate('Концерт 25.10 о 19.30', base), '2026-10-25');
+  });
+
   it('skips posts with no date', () => {
     assert.equal(parsePost({ id: 1, channel: 'c', text: 'Просто привіт усім нашим підписникам, читайте нас' }, { city: 'kharkiv', base, tz: TZ }), null);
   });
@@ -937,6 +989,28 @@ describe('preference commands', () => {
   it('sets a budget and clears it', () => {
     assert.equal(applyPrefsCommand('max price 800', current).prefs.max_ticket_price, 800);
     assert.equal(applyPrefsCommand('no limit', current).prefs.max_ticket_price, null);
+  });
+
+  /**
+   * "до" is an ordinary Ukrainian preposition, and \d{2,5} matches the first
+   * digits of a time. "що буде до 20:00?" used to set the budget to 20,
+   * answer "✅ Записав" and swallow the search entirely.
+   */
+  it('does not read a time or an ordinary "до" as a budget', () => {
+    check('що буде до 20:00?', { understood: false });
+    check('події до 3000 цього тижня', { understood: false });
+    check('відкритий мікрофон до 20:00', { understood: false });
+    // …but a price sentence still lands, whether the opener says "money" by
+    // itself or leans on a price word to make "до" mean money
+    assert.equal(applyPrefsCommand('до 500 грн', current).prefs.max_ticket_price, 500);
+    assert.equal(applyPrefsCommand('хочу щось до 1000 гривень', current).prefs.max_ticket_price, 1000);
+    assert.equal(applyPrefsCommand('не дорожче 700', current).prefs.max_ticket_price, 700);
+    assert.equal(applyPrefsCommand('under 400 uah', current).prefs.max_ticket_price, 400);
+    assert.equal(applyPrefsCommand('max 500', current).prefs.max_ticket_price, 500);
+    assert.equal(applyPrefsCommand('limit 500', current).prefs.max_ticket_price, 500);
+    assert.equal(applyPrefsCommand('ліміт 500', current).prefs.max_ticket_price, 500);
+    assert.equal(applyPrefsCommand('максимум 500', current).prefs.max_ticket_price, 500);
+    assert.equal(applyPrefsCommand('не більше 600', current).prefs.max_ticket_price, 600);
   });
 
   it('sets a trip from "I\'m in Lviv next week"', () => {
