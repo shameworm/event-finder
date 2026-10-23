@@ -4,7 +4,7 @@ import { cityLabel, loadConfig } from './config.ts';
 import { priceText } from './normalize.ts';
 import { dayLabel, localDate, localTime, truncate } from './util.ts';
 import { groupByDay } from './rank.ts';
-import { escapeHtml } from './telegram-api.ts';
+import { escapeHtml, type InlineButton } from './telegram-api.ts';
 
 export type Format = 'html' | 'text';
 
@@ -23,9 +23,9 @@ export const countPlaces = (n: number): string => `${n} ${plural(n, ['місце
 
 export const countReminders = (n: number): string => `${n} ${plural(n, ['нагадування', 'нагадування', 'нагадувань'])}`;
 
-export const REMINDER_HINT = 'Тапни ❤️ на події — нагадаю за день і за 3 години до початку.';
-export const NO_REMINDERS = 'Нагадувань поки немає. Тапни ❤️ на події — і я поставлю.';
-export const CANCEL_HINT = 'Знімеш ❤️ з повідомлення про подію — скасую нагадування.';
+export const REMINDER_HINT = 'Тисни ⏰ під подією або ❤️ на ній — нагадаю за день і за 3 години до початку.';
+export const NO_REMINDERS = 'Нагадувань поки немає. Тисни ⏰ під подією або ❤️ на ній — і я поставлю.';
+export const CANCEL_HINT = 'Тисни ⏰ під подією ще раз або знімеш ❤️ — скасую нагадування.';
 export const PLACES_HINT = 'Скажи, як тобі — і я підлаштую підказки.';
 export const NOTHING_FOUND = 'Цього разу нічого не знайшлося. Спробуй ширший період або інше місто.';
 
@@ -253,6 +253,33 @@ export interface OutgoingMessage {
   text: string;
   /** What this message is about: exactly one item for an event, none for the header. */
   items: Item[];
+  /** The buttons under an event card; the header has none. */
+  inlineKeyboard?: InlineButton[][];
+}
+
+/**
+ * The buttons under one event card.
+ *
+ * `callback_data` is `ev:<verb>:<item id>` — three bytes of prefix plus a
+ * 40-character sha1, which leaves room inside Telegram's 64-byte limit. The
+ * item is still resolved from the messages table (chat + message id), the same
+ * path a ❤️ takes; the id in the data is what tells a tap which card it came
+ * from when the message carried more than one.
+ *
+ * ⏰ is a toggle and says which way it is pointing, like a heart you can see.
+ */
+export function eventKeyboard(item: Item, opts: { reminded?: boolean } = {}): InlineButton[][] {
+  const ev = (verb: string) => `ev:${verb}:${item.id}`;
+  return [
+    [
+      { text: opts.reminded ? '⏰ Не нагадувати' : '⏰ Нагадати', callback_data: ev('r') },
+      { text: '👎 Не моє', callback_data: ev('no') },
+    ],
+    [
+      { text: '📅 В календар', callback_data: ev('cal') },
+      { text: '↗️ Поділитись', callback_data: ev('share') },
+    ],
+  ];
 }
 
 /**
@@ -305,6 +332,8 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
         changeNote: opts.changeNotes?.get(item.id),
       }),
       items: [item],
+      // places have no start time to remind about and no ticket to share
+      ...(item.kind === 'event' ? { inlineKeyboard: eventKeyboard(item) } : {}),
     })),
   ];
 }
