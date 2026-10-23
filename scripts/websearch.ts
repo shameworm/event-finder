@@ -137,6 +137,7 @@ export function resultToItem(result: WebResult, opts: { city: string; kind: Kind
     category: result.category ?? classify(text) ?? (kind === 'place' ? 'spot' : undefined),
     venue: result.venue,
     address: result.address,
+    image: result.image,
     startsAt,
     description: result.snippet ?? result.description,
     priceMin: price.priceMin,

@@ -9,8 +9,8 @@
 import type { Item, Query } from './types.ts';
 import type { Logger } from './log.ts';
 import type { Store } from './db.ts';
-import { buildMessages, summarize, type Format } from './render.ts';
-import { TelegramError, botToken, sendMessage } from './telegram-api.ts';
+import { buildMessages, summarize, type Format, type OutgoingMessage } from './render.ts';
+import { TelegramError, botToken, sendMessage, sendPhoto } from './telegram-api.ts';
 import { loadConfig } from './config.ts';
 import { sleep } from './util.ts';
 
@@ -32,13 +32,63 @@ export interface DeliverOptions {
   replyTo?: number;
   /** Record the items as sent, so they are not repeated. Default: true when sending. */
   record?: boolean;
+  /** How many ranked items did not fit; puts a "показати ще" button on the header. */
+  more?: number;
+  /**
+   * Send the header. The second and later pages of an answer are events only —
+   * their header is already in the chat, being edited in place.
+   */
+  withHeader?: boolean;
 }
 
 export interface DeliverResult {
   messageIds: number[];
   text: string;
+  /** The header on its own, and the message it became — what "показати ще" edits. */
+  headerText: string;
+  headerMessageId?: number;
   /** True when Telegram said this chat is gone (blocked, deleted, never started). */
   chatGone: boolean;
+}
+
+/**
+ * Send one card: as a photo with a caption when it has a poster, as text when
+ * it does not — and as text when Telegram will not take the poster.
+ *
+ * That last case is the whole reason this is a function. A URL Telegram cannot
+ * fetch, or a file it rejects, fails the *entire* sendPhoto call, so without a
+ * retry as text one dead poster would silently drop an event out of somebody's
+ * digest — and, because the message id is what a ❤️ resolves through, take the
+ * reminder for it with them.
+ */
+async function sendCard(
+  message: OutgoingMessage,
+  opts: DeliverOptions,
+  replyTo: number | undefined,
+): Promise<number[]> {
+  const common = {
+    chatId: opts.chatId,
+    dryRun: opts.dryRun,
+    log: opts.log,
+    replyTo,
+    // the buttons belong to the cards — a photo caption carries them too
+    inlineKeyboard: message.inlineKeyboard,
+  };
+  if (message.image && message.caption) {
+    try {
+      return await sendPhoto(message.image, { ...common, caption: message.caption });
+    } catch (err) {
+      // a gone chat is about the person, not the picture — let it through
+      if (err instanceof TelegramError && !err.chatGone) {
+        opts.log.warn(
+          `poster rejected for "${message.items[0]?.title ?? '?'}" (${err.description ?? err.message}) — sending as text: ${message.image}`,
+        );
+      } else {
+        throw err;
+      }
+    }
+  }
+  return sendMessage(message.text, common);
 }
 
 export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
@@ -52,7 +102,11 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
     explain: opts.explain,
     footer: opts.footer,
     changeNotes: opts.changeNotes,
+    more: opts.more,
   });
+  const headerText = messages[0]?.text ?? '';
+  // a follow-up page has no header of its own: it continues one already sent
+  if (opts.withHeader === false) messages.splice(0, 1);
   const text = messages.map((m) => m.text).join('\n\n');
   const shouldRecord = opts.record ?? !opts.dryRun;
   const messageIds: number[] = [];
@@ -64,20 +118,13 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
 
     let ids: number[];
     try {
-      ids = await sendMessage(message.text, {
-        chatId: opts.chatId,
-        dryRun: opts.dryRun,
-        log: opts.log,
-        // only the header answers the request; the events stand on their own
-        replyTo: i === 0 ? opts.replyTo : undefined,
-        // and the other way round: the buttons belong to the cards
-        inlineKeyboard: message.inlineKeyboard,
-      });
+      // only the header answers the request; the events stand on their own
+      ids = await sendCard(message, opts, i === 0 ? opts.replyTo : undefined);
     } catch (err) {
       if (err instanceof TelegramError && err.chatGone) {
         opts.log.warn(`chat ${opts.chatId} is unreachable (${err.description ?? 'blocked'})`);
         if (opts.store && opts.chatId) await opts.store.setBlocked(opts.chatId, true);
-        return { messageIds, text, chatGone: true };
+        return { messageIds, text, headerText, headerMessageId: undefined, chatGone: true };
       }
       throw err;
     }
@@ -94,7 +141,13 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
   }
 
   opts.log.info(`${opts.dryRun ? 'dry-run' : `sent to ${opts.chatId}`}: ${opts.title} — ${summarize(opts.items)}`);
-  return { messageIds, text, chatGone: false };
+  return {
+    messageIds,
+    text,
+    headerText,
+    ...(opts.withHeader === false ? {} : { headerMessageId: messageIds[0] }),
+    chatGone: false,
+  };
 }
 
 /**

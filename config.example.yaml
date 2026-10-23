@@ -32,7 +32,7 @@ bot:
   public: true             # false = only chat ids in `allowlist` may use it
   allowlist: []            # e.g. ["123456789"] — only used when public: false
   searches_per_hour: 20    # per user; an on-demand search can trigger a scrape
-  max_results: 10          # items in an on-demand answer
+  max_results: 10          # items per page of an on-demand answer ("показати ще" hands out the rest)
   interactive_pages: 2     # pages per source when someone is waiting on a reply
   taste_floor: 5           # answers only hold what a person likes; when fewer
                            # than this many match, the next best are added back

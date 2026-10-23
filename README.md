@@ -8,7 +8,7 @@ personalised digests, alerts and reminders.
 - **Places**: new cafés, bars with live music, galleries, unusual spots
 - **Sources**: Concert.ua, Karabas, Kontramarka, Telegram channels (GramJS), web search
 - **Cities**: Kharkiv (default), Kyiv, Lviv, Dnipro, Odesa, Ivano-Frankivsk — add any
-- **Multi-user**: every person gets their own city, taste, digest settings and reminders
+- **Multi-user**: every person gets their own city, taste, delivery hour, quiet hours and reminders
 - **Ukrainian**: the bot speaks Ukrainian only; it still understands requests typed in Russian or English
 - **One message per event**, so a ❤️ on it means exactly that event
 
@@ -29,6 +29,7 @@ web search ─┘                                            rank per user (thei
                                            user A digest       user B digest       user C digest
                                                  │                   │                   │
                                         header + one message per event, each one ❤️-able
+                                        (with its poster, when the source published one)
 ```
 
 The cache is the point: 200 people in Kharkiv asking about the same weekend cost
@@ -88,7 +89,14 @@ cache:
 `message_delay_ms` exists because every event is its own message: a ten-event
 week is eleven sends to the same chat, and Telegram throttles a sustained burst
 at roughly one message per second. Lower it and you will start seeing 429s
-(`sendMessage` retries once, then gives up on that message).
+(both `sendMessage` and `sendPhoto` retry once, then give up on that message).
+
+An event with a poster goes out as a photo, and Telegram fetches that file from
+the source's CDN itself — so a photo card takes it several hundred milliseconds
+longer to accept than a text one, which spaces a digest out further than this
+setting alone would. 400ms has held for text; if a photo-heavy digest starts
+logging 429s, `1000` is the value to move to, matching Telegram's own advice of
+one message per second per chat.
 
 Start with `public: false` and your own chat id on the allowlist while you try
 it out; flip it to `true` when you are ready for strangers.
@@ -269,7 +277,7 @@ npx tsx scripts/telegram.ts --channel @some_channel --dump   # see raw posts
 ```bash
 npx tsx scripts/doctor.ts            # config, secrets, db, users, bot policy
 npx tsx scripts/doctor.ts --network  # also probe every source site
-npm test                             # 159 offline checks (~3s, no network)
+npm test                             # 181 offline checks (~3s, no network)
 ```
 
 ## 8. Automate the digests
@@ -279,14 +287,76 @@ them with `hermes cron add` (both forms are there, plus a crontab fallback):
 
 | When (Europe/Kyiv) | Job | Covers |
 |---|---|---|
-| Monday 09:00 | `digest.ts --week` | every subscriber, in their own city |
-| Thursday 18:00 | `digest.ts --weekend --top 5` | same |
-| every 6 hours | `follows.ts` | each user's follow list |
-| Sunday 11:00 | `places.ts` | each user's interests |
+| **every hour** | `digest.ts --week` | whoever set that hour and today's weekday |
+| **every hour, Thursday** | `digest.ts --weekend --top 5` | whoever set that hour |
+| every 6 hours | `follows.ts` | each user's follow list, outside their quiet hours |
+| Sunday 11:00 | `places.ts` | each user's interests, outside their quiet hours |
 | every 15 minutes | `reminders.ts` | everyone's ❤️ reminders |
 
+The two digest jobs tick **hourly** and the schedule lives on the user, not in
+the cron: each person picks their hour, their weekday and how often from
+`/settings → 🕘 Коли писати`. A tick that matches nobody logs one line and
+exits without scraping anything, so 23 of every 24 runs are free.
+
 Rehearse each one with `--dry-run`, and against yourself with
-`--chat <your-chat-id>`, before letting it loose on real users.
+`--chat <your-chat-id>`, before letting it loose on real users:
+
+```bash
+npx tsx scripts/digest.ts --week --dry-run                    # whoever's hour it is now
+npx tsx scripts/digest.ts --week --dry-run --hour 18 --day 5  # rehearse Friday 18:00
+npx tsx scripts/digest.ts --week --dry-run --chat 123 --now   # ignore the schedule entirely
+```
+
+### Each person's own schedule
+
+| Setting | Default | What it does |
+|---|---|---|
+| `digest_hour` | `9` | the hour digests arrive, in `config.timezone` |
+| `digest_day` | `1` (Monday) | the weekday for the *weekly* digest |
+| `digest_freq` | `twice` | `weekly` · `twice` (weekly + weekend) · `mine` |
+| `quiet_from` / `quiet_to` | `23` → `8` | the window the bot keeps quiet in; equal values switch it off |
+
+Three things worth knowing:
+
+- **`mine` means "only when there is something really mine"** — nothing is sent
+  if `rank()` had to top the list up with off-taste items to reach
+  `bot.taste_floor`. Someone on `mine` in a quiet week hears nothing at all,
+  which is the request. It only has teeth once there is a taste model to judge
+  against: with an empty profile `rank()` has nothing to filter by, never pads
+  anything, and `mine` behaves like `twice`.
+- **Quiet hours do not cancel a digest.** Pick 07:00 and you get it at 07:00
+  even though the default quiet window covers it — you asked for that hour, and
+  swallowing the choice would make the button look broken. Quiet hours gate the
+  sends nobody scheduled: follow alerts, place tips, and the "tomorrow"
+  reminder. Those are deferred, not dropped — only what actually went out is
+  recorded as sent, so the next tick delivers the same items.
+- **The "in ~3 hours" reminder always fires**, quiet hours or not. Held until
+  the morning it is not politeness, it is the feature failing.
+
+Anyone registered before these columns existed reads as the defaults above, so
+they keep getting exactly the Monday 09:00 + Thursday mailing they always did.
+
+### Why only six hours to choose from
+
+The hour picker offers **07, 09, 12, 15, 18, 21** and nothing else. That is a
+politeness budget, not a UI shortcut. `cache.ttl_seconds` is 1800, so everyone
+sharing one city *and one hour* shares a single scrape — but spreading users
+over more hours means more scrapes of the same sites per day.
+
+With 5 cities configured, as upper bounds (every slot occupied, every city):
+
+| | distinct fan-outs / week | city-scrapes / week | per city, per day |
+|---|---|---|---|
+| one hard-wired cron (before) | 2 | 10 | 0.3 |
+| 6 hour slots × 7 days (now) | 42 + 6 | 240 | ~6.9 (one every 3.5 h) |
+| all 24 hours × 7 days | 168 + 24 | 960 | ~27 (more than one an hour) |
+
+240 a week is 24× the old traffic and still gentler per site than one page per
+three hours; 960 is not something to point at someone else's server. If even
+that is too much, cut `DIGEST_HOURS` in `src/schedule.ts` — the hour buttons,
+the validation and the tests all read from that one list. Real numbers land far
+below the bound: it counts *occupied* slots, and a few dozen users cluster into
+two or three of them.
 
 ## 9. Operating it
 
@@ -307,7 +377,7 @@ npx tsx scripts/search.ts "stand-up in Lviv this weekend"    # answer by hand
   availability changed, and the line says which (`🔁 нова дата`).
 - **Card buttons**: every event message carries `⏰ Нагадати`, `👎 Не моє`,
   `📅 В календар` and `↗️ Поділитись` (`ev:<verb>:<item id>` callback data).
-  ⏰ and 👎 are wired up; 📅 and ↗️ answer "скоро" for now.
+  ⏰, 👎 and 📅 are wired up; ↗️ answers "скоро" for now.
 - **Reminders** are set by tapping ⏰ under an event message or ❤️ on it, and
   cancelled the same way — both go through the one reminder row, so a ❤️ then a
   ⏰ never leaves two. Typing `нагадай` still works for anyone who does neither.
@@ -347,6 +417,7 @@ src/
   users.ts                chat id ↔ taste model
   cache.ts                one scrape per city
   fanout.ts               scheduled jobs across all users
+  schedule.ts             each person's hour, day, frequency and quiet hours
   pipeline.ts request.ts rank.ts dedupe.ts normalize.ts render.ts
   db.ts config.ts schemas.ts types.ts http.ts jsonld.ts log.ts …
 drizzle/                  database schema (sqlite + postgres)
