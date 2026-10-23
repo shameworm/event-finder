@@ -63,6 +63,7 @@ const { Store } = await import('../src/db.ts');
 const { splitForTelegram, parseUpdates } = await import('../src/telegram-api.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs, newUserPrefs } = await import('../src/users.ts');
 const { cacheKey, collectCity } = await import('../src/cache.ts');
+const { parseArgs } = await import('../src/cli.ts');
 const { fanout } = await import('../src/fanout.ts');
 const { handleMessage, handleCallback, handleReaction, parseBell, isHeart, isAllowed, BOT_COMMANDS } = await import(
   '../src/bot-handlers.ts'
@@ -2219,6 +2220,27 @@ describe('deliver', () => {
       );
       assert.equal(printed.split('──────── to chat 3301').length - 1, 4, printed);
     });
+  });
+});
+
+/* --------------------------------------------------------------------- cli --- */
+
+describe('flag parsing', () => {
+  it('takes a value for every flag that has one', () => {
+    // undeclared flags were parsed as switches and their value swept into the
+    // free text: `bot.ts --timeout 60` waited 0s and searched for "60"
+    const args = parseArgs(['--timeout', '60', '--ttl', '3', '--cancel', '7', 'стендап']);
+    assert.equal(args.num('timeout'), 60);
+    assert.equal(args.num('ttl'), 3);
+    assert.equal(args.get('cancel'), '7');
+    assert.equal(args.text(), 'стендап');
+  });
+
+  it('still treats a bare switch as a switch', () => {
+    const args = parseArgs(['--dry-run', '--city', 'lviv', 'що', 'цікавого']);
+    assert.equal(args.has('dry-run'), true);
+    assert.equal(args.get('city'), 'lviv');
+    assert.equal(args.text(), 'що цікавого');
   });
 });
 
