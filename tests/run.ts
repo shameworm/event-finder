@@ -21,7 +21,10 @@ process.env['EVENTS_FINDER_DB'] = join(sandbox, 'test.db');
 process.env['EVENTS_FINDER_CONFIG'] = new URL('../config.example.yaml', import.meta.url).pathname;
 process.env['EVENTS_FINDER_PREFS'] = join(sandbox, 'preferences.yaml');
 process.env['EVENTS_FINDER_QUIET'] = '1';
-delete process.env['DATABASE_URL'];
+// empty, not deleted: paths.ts reads ~/.hermes/.env on import, and loadEnv
+// only fills variables that are unset — an operator's real Postgres url would
+// otherwise be pulled into the test run
+process.env['DATABASE_URL'] = '';
 
 // a known preferences file, so ranking tests do not depend on the user's own
 writeFileSync(

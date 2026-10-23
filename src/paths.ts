@@ -9,6 +9,12 @@ export const SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 /** Hermes home, overridable for tests. */
 export const HERMES_HOME = process.env['HERMES_HOME'] || join(homedir(), '.hermes');
 
+// Read .env *before* the paths below. These consts are evaluated on import,
+// and the first thing to call loadEnv() used to be loadConfig() — long after,
+// so an EVENTS_FINDER_DB or EVENTS_FINDER_CONFIG set in .env was ignored in
+// silence. (HERMES_HOME cannot come from .env: it is where .env lives.)
+loadEnv();
+
 /** Per-skill data dir: SQLite db, logs, GramJS session, websearch inbox. */
 export const DATA_DIR = process.env['EVENTS_FINDER_DATA'] || join(HERMES_HOME, 'data', 'events-finder');
 export const LOG_DIR = join(DATA_DIR, 'logs');
