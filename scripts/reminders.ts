@@ -87,4 +87,4 @@ await withStore(async (store) => {
   process.stdout.write(fired === 0 ? 'nothing due\n' : `${fired} reminder(s) ${dryRun ? 'would fire' : 'fired'}\n`);
 });
 
-process.exit(0);
+process.exit(process.exitCode ?? 0);

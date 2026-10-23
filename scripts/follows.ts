@@ -94,4 +94,4 @@ await withStore(async (store) => {
   if (result.failedSources.length) process.stderr.write(`⚠️  sources that failed: ${result.failedSources.join(', ')}\n`);
 });
 
-process.exit(0);
+process.exit(process.exitCode ?? 0);
