@@ -15,6 +15,21 @@ const SOURCE_RANK = (source: string): number => {
   return 0;
 };
 
+/**
+ * How good a poster is, without downloading it. Nobody publishes dimensions we
+ * can trust, so this goes on two things we can see: a URL that still carries a
+ * thumbnail preset is worth less than a bare one, and otherwise the more
+ * trusted source wins — Concert.ua and Karabas serve full-size posters where a
+ * Telegram post serves whatever was pasted into it.
+ *
+ * Negative means "no image", so an item with a poster always beats one without.
+ */
+function imageScore(i: Item): number {
+  if (!i.image) return -1;
+  const thumbnail = /:[\w.-]+$|\/thumbs?\//i.test(i.image);
+  return SOURCE_RANK(i.source) + (thumbnail ? -10 : 0);
+}
+
 function completeness(i: Item): number {
   let n = 0;
   for (const v of [i.venue, i.address, i.startsAt, i.description, i.priceMin, i.performers]) if (v !== undefined) n++;
@@ -35,6 +50,9 @@ function merge(a: Item, b: Item): Item {
     startsAt: keep.startsAt ?? other.startsAt,
     endsAt: keep.endsAt ?? other.endsAt,
     description: keep.description ?? other.description,
+    // not `keep.image ?? other.image`: the item with the better facts is not
+    // necessarily the one with the better poster
+    image: (imageScore(a) >= imageScore(b) ? a : b).image,
     performers: keep.performers ?? other.performers,
     priceMin: priceMin.length ? Math.min(...priceMin) : undefined,
     priceMax: priceMax.length ? Math.max(...priceMax) : undefined,
