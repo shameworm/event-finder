@@ -1783,6 +1783,108 @@ describe('card buttons', () => {
   });
 });
 
+/* ------------------------------------------------------------- показати ще --- */
+
+describe('показати ще', () => {
+  const query = parseRequest('', { prefs, base: '2026-10-20', from: '2026-10-23', to: '2026-10-25' });
+
+  /** Five ranked events nobody has seen yet, in the order rank() put them. */
+  const tail = (n: number) =>
+    [...Array(n)].map(
+      (_, i) =>
+        makeItem({
+          city: 'kharkiv',
+          title: `Подія ${i + 1}`,
+          url: `https://m/${i + 1}`,
+          source: 's',
+          category: 'standup',
+          startsAt: `2026-10-23T${10 + i}:00:00+03:00`,
+        })!,
+    );
+
+  async function tapMore(store: StoreType, chatId: string, text?: string): Promise<string> {
+    return captureOutput(() =>
+      handleCallback({ store, log, dryRun: true }, {
+        id: 'cb',
+        data: 'more',
+        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' }, ...(text ? { text } : {}) },
+        from: { id: Number(chatId) },
+      } as never),
+    );
+  }
+
+  const seed = async (store: StoreType, chatId: string, n: number, size: number) => {
+    await registerUser(store, { chatId, city: 'kharkiv' });
+    await store.putPage(`more:${chatId}:42`, { header: '🗓 Харків', title: '🗓 Харків', query, rest: tail(n), size }, 3600);
+  };
+
+  it('offers the button on the header only when something was left over', () => {
+    const items = tail(2);
+    const withRest = buildMessages({ title: 'T', query, items, format: 'text', more: 7 });
+    assert.deepEqual(withRest[0]!.inlineKeyboard, [[{ text: '📥 Показати ще 7', callback_data: 'more' }]]);
+    const whole = buildMessages({ title: 'T', query, items, format: 'text', more: 0 });
+    assert.equal(whole[0]!.inlineKeyboard, undefined, 'nothing left over, no button');
+  });
+
+  it('hands out the next page, one message per event, and counts the header down', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, '3501', 5, 2);
+
+      const first = await tapMore(store, '3501');
+      assert.ok(first.includes('Подія 1') && first.includes('Подія 2'), first.slice(0, 400));
+      assert.ok(!first.includes('Подія 3'), 'one page at a time');
+      assert.equal(first.split('──────── to chat 3501').length - 1, 2, 'each event is its own message');
+      assert.ok(first.includes('edit 42') && first.includes('📥 Показати ще 3'), first.slice(0, 600));
+
+      const second = await tapMore(store, '3501');
+      assert.ok(second.includes('Подія 3') && second.includes('Подія 4'), second.slice(0, 400));
+      assert.ok(!second.includes('Подія 1') && !second.includes('Подія 2'), 'nothing is shown twice');
+      assert.ok(second.includes('📥 Показати ще 1'), second.slice(0, 600));
+    });
+  });
+
+  it('takes the button away with the last page, and forgets the stash', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, '3502', 3, 3);
+      const out = await tapMore(store, '3502');
+      assert.ok(out.includes('Подія 3'), out.slice(0, 400));
+      assert.ok(out.includes('edit 42'), 'the header is redrawn');
+      assert.ok(!out.includes('Показати ще'), 'the last page leaves no button behind');
+      assert.equal(await store.getPage('more:3502:42'), null, 'the stash is cleaned up, not left to expire');
+    });
+  });
+
+  it('keeps the event buttons on a page that arrived late', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, '3503', 1, 5);
+      const out = await tapMore(store, '3503');
+      const id = tail(1)[0]!.id;
+      assert.ok(out.includes(`ev:r:${id}`), 'a late arrival carries its own ⏰, so a reminder still works');
+    });
+  });
+
+  it('does not spend a search from the hourly budget', async () => {
+    await withTestStore(async (store) => {
+      await seed(store, '3504', 4, 2);
+      const before = await store.hitRateLimit('3504', 100);
+      await tapMore(store, '3504');
+      await tapMore(store, '3504');
+      const after = await store.hitRateLimit('3504', 100);
+      assert.equal(after.used, before.used + 1, 'paging is not searching; only these two probes count');
+    });
+  });
+
+  it('drops the button when the stash has expired', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3505', city: 'kharkiv' });
+      const out = await tapMore(store, '3505', '🗓 Харків');
+      assert.ok(out.includes('edit 42'), 'the stale button goes away');
+      assert.ok(!out.includes('Показати ще'), out.slice(0, 400));
+      assert.ok(out.includes('застарів'), out.slice(0, 400));
+    });
+  });
+});
+
 /* -------------------------------------------------------------------- deliver --- */
 
 describe('deliver', () => {

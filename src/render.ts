@@ -179,6 +179,8 @@ export interface DigestOptions {
   /** Number items continuously (console output only; Telegram gets one message each). */
   numbered?: boolean;
   changeNotes?: Map<string, string>;
+  /** How many ranked events did not fit; puts a "показати ще" button on the header. */
+  more?: number;
 }
 
 /**
@@ -283,6 +285,18 @@ export function eventKeyboard(item: Item, opts: { reminded?: boolean } = {}): In
 }
 
 /**
+ * The header's own button: the rest of the ranked list, one tap away.
+ *
+ * `callback_data` is the bare `more` — which message to continue comes from
+ * the callback itself (chat + the header's message id), so nothing has to be
+ * squeezed into Telegram's 64 bytes and an old button can never point at
+ * somebody else's page.
+ */
+export function moreButton(rest: number): InlineButton[][] {
+  return [[{ text: `📥 Показати ще ${rest}`, callback_data: 'more' }]];
+}
+
+/**
  * The Telegram shape: a short header, then **one message per event**.
  *
  * One message per event is what makes the heart work. Every event message is
@@ -323,7 +337,7 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
   const header = `${bold(opts.title, format)}\n${plain(facts, format)}\n\n${plain(tail, format)}`;
 
   return [
-    { text: header, items: [] },
+    { text: header, items: [], ...(opts.more && opts.more > 0 ? { inlineKeyboard: moreButton(opts.more) } : {}) },
     ...kept.map((item) => ({
       text: renderItem(item, {
         format,

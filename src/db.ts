@@ -13,7 +13,7 @@
  */
 import { sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
-import { ItemSchema, type Item } from './types.ts';
+import { ItemSchema, QuerySchema, type Item } from './types.ts';
 import { DB_FILE, ensureDirs, loadEnv } from './paths.ts';
 import { fingerprint } from './dedupe.ts';
 import * as sqliteSchema from '../drizzle/schema.sqlite.ts';
@@ -217,6 +217,22 @@ export interface SendDecision {
 }
 
 export type OptIn = 'weekly_digest' | 'weekend_digest' | 'follow_alerts' | 'place_tips';
+
+/**
+ * What one answer left over: the events it ranked but had no room to show,
+ * plus the header text they hang under so the "показати ще" button on it can
+ * be redrawn (or taken away) without rebuilding the answer from scratch.
+ */
+export const PendingPageSchema = z.object({
+  header: z.string(),
+  title: z.string(),
+  query: QuerySchema,
+  /** Ranked, in order, none of them shown yet. */
+  rest: z.array(ItemSchema),
+  /** How many to hand out per tap — the same page size the first answer used. */
+  size: z.number().int().positive(),
+});
+export type PendingPage = z.infer<typeof PendingPageSchema>;
 
 function itemsFromPayload(payload: unknown): Item[] {
   if (typeof payload !== 'string' || !payload) return [];
@@ -537,6 +553,51 @@ export class Store {
         created_at = ${new Date(now).toISOString()},
         expires_at = ${new Date(now + ttlSeconds * 1000).toISOString()}
     `);
+  }
+
+  /* --------------------------------------------------- "show more" stash --- */
+
+  /**
+   * Park the ranked-but-unshown tail of one answer, so "показати ще" can hand
+   * out the next page without scraping anybody's site a second time.
+   *
+   * It lives in the scrape-cache table on purpose: that table already carries
+   * `expires_at`, and `pruneCache` already sweeps it, so a stash nobody comes
+   * back for disappears within the hour instead of growing forever.
+   */
+  async putPage(key: string, page: PendingPage, ttlSeconds: number): Promise<void> {
+    const t = this.d.schema;
+    const now = Date.now();
+    const payload = JSON.stringify(page);
+    await this.d.run(sql`
+      INSERT INTO ${t.scrapeCache} (key, payload, created_at, expires_at)
+      VALUES (${key}, ${payload}, ${new Date(now).toISOString()}, ${new Date(now + ttlSeconds * 1000).toISOString()})
+      ON CONFLICT (key) DO UPDATE SET
+        payload    = ${payload},
+        created_at = ${new Date(now).toISOString()},
+        expires_at = ${new Date(now + ttlSeconds * 1000).toISOString()}
+    `);
+  }
+
+  /** The stash for one answer, or null when it expired or was never there. */
+  async getPage(key: string): Promise<PendingPage | null> {
+    const rows = await this.d.all(
+      sql`SELECT payload, expires_at FROM ${this.d.schema.scrapeCache} WHERE key = ${key}`,
+    );
+    const row = rows[0];
+    if (!row) return null;
+    const expires = typeof row['expires_at'] === 'string' ? Date.parse(row['expires_at']) : 0;
+    if (!expires || expires <= Date.now()) return null;
+    try {
+      const parsed = PendingPageSchema.safeParse(JSON.parse(String(row['payload'] ?? 'null')));
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async dropPage(key: string): Promise<void> {
+    await this.d.run(sql`DELETE FROM ${this.d.schema.scrapeCache} WHERE key = ${key}`);
   }
 
   async pruneCache(): Promise<void> {
