@@ -15,11 +15,10 @@ import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import type { Item, SourceResult } from '../src/types.ts';
 import { loadConfig } from '../src/config.ts';
-import { politeFetch } from '../src/http.ts';
 import { fromSchemaEvent } from '../src/normalize.ts';
 import { inWindow } from '../src/filter.ts';
 import { categoryFromSlug } from '../src/categories.ts';
-import { runSourceCli, type SourceContext } from '../src/source.ts';
+import { fetcherFor, pager, runSourceCli, type SourceContext } from '../src/source.ts';
 
 export const SOURCE = 'kontramarka';
 
@@ -81,17 +80,15 @@ export async function collect(ctx: SourceContext): Promise<SourceResult> {
   const sub = (sourceCfg.subdomain ?? '').trim();
   const host = sub && sub !== 'www' ? `https://${sub}.kontramarka.ua/uk` : 'https://kontramarka.ua/uk';
   const items: Item[] = [];
-  let fetched = 0;
+  const fetchText = fetcherFor(ctx);
+  const pages = pager(ctx.log);
 
   for (const category of categories) {
-    for (let page = 1; page <= maxPages; page++) {
+    await pages.walk(`${SOURCE}: ${category}`, maxPages, async (page) => {
       const url = `${host}/${category}${page > 1 ? `?page=${page}` : ''}`;
-      const html = await politeFetch(url, { log: ctx.log });
-      fetched++;
-      const $ = cheerio.load(html);
+      const $ = cheerio.load(await fetchText(url, { log: ctx.log }));
       const cards = $('.cat_item[itemtype*="schema.org/Event"], [itemtype$="/Event"].cat_item').toArray();
       ctx.log.info(`${SOURCE}: ${category} page ${page}: ${cards.length} events`);
-      if (cards.length === 0) break;
 
       for (const el of cards) {
         const obj = cardToSchema($, el);
@@ -103,10 +100,11 @@ export async function collect(ctx: SourceContext): Promise<SourceResult> {
         });
         if (item && inWindow(item, ctx.query)) items.push(item);
       }
-    }
+      return cards.length;
+    });
   }
 
-  return { source: SOURCE, ok: true, items, fetched };
+  return pages.result(SOURCE, items);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) await runSourceCli(SOURCE, collect);

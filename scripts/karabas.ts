@@ -13,11 +13,10 @@
 import type { Item, SourceResult } from '../src/types.ts';
 import { loadConfig } from '../src/config.ts';
 import { eventsFromJsonLd } from '../src/jsonld.ts';
-import { politeFetch } from '../src/http.ts';
 import { fromSchemaEvent } from '../src/normalize.ts';
 import { inWindow } from '../src/filter.ts';
 import { categoryFromSlug } from '../src/categories.ts';
-import { runSourceCli, type SourceContext } from '../src/source.ts';
+import { fetcherFor, pager, runSourceCli, type SourceContext } from '../src/source.ts';
 
 export const SOURCE = 'karabas';
 
@@ -33,19 +32,17 @@ export async function collect(ctx: SourceContext): Promise<SourceResult> {
   const maxPages = ctx.maxPages ?? cfg.http.max_pages;
   const host = `https://${sourceCfg.subdomain}.karabas.com`;
   const items: Item[] = [];
-  let fetched = 0;
+  const fetchText = fetcherFor(ctx);
+  const pages = pager(ctx.log);
 
   for (const path of paths) {
     const clean = `/${path.replace(/^\/|\/$/g, '')}/`.replace('//', '/');
-    for (let page = 1; page <= maxPages; page++) {
+    const slug = clean.replace(/\//g, '');
+    await pages.walk(`${SOURCE}: ${clean}`, maxPages, async (page) => {
       const url = `${host}${clean === '//' ? '/' : clean}${page > 1 ? `?page=${page}` : ''}`;
-      const html = await politeFetch(url, { log: ctx.log });
-      fetched++;
-      const raw = eventsFromJsonLd(html);
+      const raw = eventsFromJsonLd(await fetchText(url, { log: ctx.log }));
       ctx.log.info(`${SOURCE}: ${clean} page ${page}: ${raw.length} events`);
-      if (raw.length === 0) break;
 
-      const slug = clean.replace(/\//g, '');
       for (const obj of raw) {
         const item = fromSchemaEvent(obj, {
           city: ctx.city,
@@ -54,10 +51,11 @@ export async function collect(ctx: SourceContext): Promise<SourceResult> {
         });
         if (item && inWindow(item, ctx.query)) items.push(item);
       }
-    }
+      return raw.length;
+    });
   }
 
-  return { source: SOURCE, ok: true, items, fetched };
+  return pages.result(SOURCE, items);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) await runSourceCli(SOURCE, collect);

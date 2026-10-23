@@ -66,8 +66,11 @@ const { handleMessage, handleCallback, handleReaction, parseBell, isHeart, isAll
 );
 const { deliver } = await import('../src/deliver.ts');
 const { makeLogger } = await import('../src/log.ts');
-const { ALL_SOURCE_NAMES } = await import('../src/pipeline.ts');
+const { ALL_SOURCE_NAMES, runPipeline } = await import('../src/pipeline.ts');
 const { politeFetch, HttpError } = await import('../src/http.ts');
+const { pager, safeCollect } = await import('../src/source.ts');
+const { eventsFromJsonLd } = await import('../src/jsonld.ts');
+const { collect: collectKarabas } = await import('../scripts/karabas.ts');
 
 const TZ = 'Europe/Kyiv';
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
@@ -599,6 +602,116 @@ describe('politeFetch', () => {
         for (const gap of gaps) assert.ok(gap >= 110, `requests were ${gap}ms apart`);
       },
     );
+  });
+});
+
+describe('page walking', () => {
+  const log = makeLogger('test');
+  const anywhere = parseRequest('', { prefs, base: '2026-10-20', from: '2026-01-01', to: '2027-12-31' });
+  const anItem = () => makeItem({ city: 'kharkiv', title: 'Щось', url: 'https://x/p', source: 's' })!;
+
+  it('keeps the events from the pages before a failure', async () => {
+    const pages = pager(log);
+    const seen: number[] = [];
+    await pages.walk('listing', 6, async (page) => {
+      if (page === 4) throw new HttpError(500, 'https://x/4');
+      seen.push(page);
+      return 10;
+    });
+    assert.deepEqual(seen, [1, 2, 3], 'three good pages are not thrown away for a bad fourth');
+    const result = pages.result('some-source', [anItem()]);
+    assert.equal(result.ok, true, 'a partial scrape is still a scrape');
+    assert.equal(result.fetched, 3);
+  });
+
+  it('stops at the first empty page', async () => {
+    const pages = pager(log);
+    let calls = 0;
+    await pages.walk('listing', 6, async (page) => {
+      calls++;
+      return page >= 2 ? 0 : 5;
+    });
+    assert.equal(calls, 2);
+  });
+
+  it('calls a source that collected nothing at all a failure', async () => {
+    const pages = pager(log);
+    await pages.walk('listing', 6, async () => {
+      throw new HttpError(403, 'https://x/1');
+    });
+    const result = pages.result('some-source', []);
+    assert.equal(result.ok, false, 'so the answer can admit the list may be short');
+    assert.match(result.error ?? '', /403/);
+  });
+
+  it('turns a collector that throws into a harmless empty result', async () => {
+    const result = await safeCollect(
+      'exploding',
+      async () => {
+        throw new Error('site is down');
+      },
+      { query: anywhere, city: 'kharkiv', log },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.items.length, 0);
+    assert.match(result.error ?? '', /site is down/);
+  });
+});
+
+describe('scrapers, offline', () => {
+  const log = makeLogger('test');
+  /** Serve a page once per url, then nothing — one page per listing. */
+  const serve = (body: string) => {
+    const served = new Set<string>();
+    return async (url: string) => {
+      if (served.has(url)) return '<html></html>';
+      served.add(url);
+      return body;
+    };
+  };
+  const wide = parseRequest('', { prefs, base: '2026-10-20', from: '2026-01-01', to: '2027-12-31' });
+
+  it('reads Kontramarka cards into items', async () => {
+    const res = await collectKontramarka({
+      query: wide,
+      city: 'kharkiv',
+      log,
+      maxPages: 1,
+      fetchText: serve(fixture('kontramarka-card.html')),
+    });
+    assert.equal(res.ok, true);
+    const item = res.items.find((i) => i.title.includes('Байдак'));
+    assert.ok(item, `no Байдак in ${JSON.stringify(res.items.map((i) => i.title))}`);
+    assert.equal(item.startsAt, '2026-10-21T18:30:00+03:00');
+    assert.equal(item.venue, 'ХНАТОБ LOFT STAGE');
+    assert.equal(item.city, 'kharkiv');
+  });
+
+  it('reads Karabas JSON-LD into items', async () => {
+    const page = `<html><head><script type="application/ld+json">${fixture('karabas-event.json')}</script></head><body></body></html>`;
+    assert.equal(eventsFromJsonLd(page).length, 1, 'the fixture is one Event');
+    const res = await collectKarabas({ query: wide, city: 'kharkiv', log, maxPages: 1, fetchText: serve(page) });
+    assert.equal(res.ok, true);
+    assert.equal(res.items.length, 1);
+    assert.equal(res.items[0]?.title, 'IVAN LIULENOV');
+    assert.equal(res.items[0]?.source, 'karabas');
+  });
+
+  it('runs the whole pipeline over stubbed pages, deduping across sources', async () => {
+    const karabasPage = `<html><script type="application/ld+json">${fixture('karabas-event.json')}</script></html>`;
+    const result = await runPipeline({
+      query: wide,
+      prefs,
+      log,
+      only: ['karabas', 'kontramarka'],
+      maxPages: 1,
+      keepOffTaste: true,
+      keepExpensive: true,
+      keepDisliked: true,
+      fetchText: serve(karabasPage) as never,
+    });
+    assert.equal(result.failedSources.length, 0, JSON.stringify(result.results.map((r) => [r.source, r.error])));
+    assert.ok(result.all.some((i) => i.title === 'IVAN LIULENOV'));
   });
 });
 
