@@ -50,7 +50,7 @@ const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
 const { buildDigest, buildMessages, renderReminders } = await import('../src/render.ts');
 const { loadConfig, loadPrefs, resolveCity, cityLocalName } = await import('../src/config.ts');
-const { applyPrefsCommand, describePrefs } = await import('../src/prefs-engine.ts');
+const { applyPrefsCommand, applyThumbsDown, describePrefs } = await import('../src/prefs-engine.ts');
 const { tagLabel } = await import('../src/categories.ts');
 const { PreferencesSchema } = await import('../src/types.ts');
 const { parsePost, findDate, findTime, findVenue } = await import('../scripts/telegram.ts');
@@ -340,6 +340,24 @@ describe('ranking', () => {
     const ranked = rank([other, followed], { query, prefs });
     assert.equal(ranked.items[0]!.title, 'Курган і Agregat');
     assert.ok(ranked.items[0]!.reasons?.some((r) => r.includes('follow')));
+  });
+
+  it('drops a blocked act even when the same name is in the follow list', () => {
+    const p = PreferencesSchema.parse({
+      home_city: 'kharkiv',
+      favourite_categories: ['concert'],
+      follow: ['Курган і Agregat'],
+      blocked_acts: ['Курган і Agregat'],
+    });
+    const gig = makeItem({ ...common, title: 'Курган і Agregat', url: 'https://x/b1', source: 'concert.ua', category: 'concert', priceMin: 900 })!;
+    const other = makeItem({ ...common, title: 'Хтось інший', url: 'https://x/b2', source: 'concert.ua', category: 'concert', priceMin: 300 })!;
+    const ranked = rank([gig, other], { query: parseRequest('', { prefs: p, base: '2026-10-20' }), prefs: p, tasteFloor: 0 });
+    assert.deepEqual(ranked.items.map((i) => i.title), ['Хтось інший']);
+    assert.ok(ranked.dropped.some((d) => d.why.includes('blocked act')), JSON.stringify(ranked.dropped.map((d) => d.why)));
+    // and the shared cache, which keeps dislikes, keeps it too — scored last
+    const cached = rank([gig], { query: parseRequest('', { prefs: p, base: '2026-10-20' }), prefs: p, keepDisliked: true, keepOffTaste: true });
+    assert.equal(cached.items.length, 1);
+    assert.ok(!cached.items[0]!.reasons?.some((r) => r.includes('you follow')), JSON.stringify(cached.items[0]!.reasons));
   });
 
   it('keeps only what the person likes, and says how much it hid', () => {
@@ -821,6 +839,56 @@ describe('preference commands', () => {
     }
     // and none of that may swallow the other lists
     assert.ok(applyPrefsCommand('додай джаз до улюблених', current).prefs.favourite_categories.includes('jazz'));
+  });
+});
+
+describe('the 👎 side of the taste model', () => {
+  const liked = () => PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['standup'], taste: { standup: 2 } });
+
+  it('takes a point off the tally without touching the lists', () => {
+    const down = applyThumbsDown(liked(), { tag: 'standup' });
+    assert.equal(down.score, 1);
+    assert.equal(down.demoted, false);
+    assert.deepEqual(down.prefs.favourite_categories, ['standup']);
+    assert.deepEqual(down.prefs.disliked_categories, []);
+  });
+
+  it('moves the category across once the tally reaches the threshold', () => {
+    let down = applyThumbsDown(liked(), { tag: 'standup' });
+    for (let i = 0; i < 4; i++) down = applyThumbsDown(down.prefs, { tag: 'standup' });
+    assert.equal(down.score, -3);
+    assert.equal(down.demoted, true);
+    assert.deepEqual(down.prefs.favourite_categories, []);
+    assert.deepEqual(down.prefs.disliked_categories, ['standup']);
+    // and saying you like it again clears the debt, not just the list
+    const back = applyPrefsCommand('люблю стендап', down.prefs);
+    assert.deepEqual(back.prefs.disliked_categories, []);
+    assert.equal(back.prefs.taste['standup'], 0);
+  });
+
+  it('silences the performer and takes the name off the follow list', () => {
+    const following = PreferencesSchema.parse({ home_city: 'kharkiv', follow: ['Антон Тимошенко'] });
+    const down = applyThumbsDown(following, { tag: 'standup', act: 'Антон Тимошенко' });
+    assert.deepEqual(down.prefs.blocked_acts, ['Антон Тимошенко']);
+    assert.deepEqual(down.prefs.follow, []);
+    assert.equal(down.blocked, 'Антон Тимошенко');
+    // ...and asking for them by name again undoes it
+    const again = applyPrefsCommand('слідкуй за Антон Тимошенко', down.prefs);
+    assert.deepEqual(again.prefs.blocked_acts, []);
+    assert.deepEqual(again.prefs.follow, ['Антон Тимошенко']);
+  });
+
+  it('reads a profile saved before the stop list existed', () => {
+    const old = { home_city: 'kharkiv', favourite_categories: ['standup'], follow: ['Хтось'], taste: { standup: 3 } };
+    const parsed = PreferencesSchema.parse(old);
+    assert.deepEqual(parsed.blocked_acts, []);
+    // and a tally that has already gone negative survives the round-trip
+    assert.equal(PreferencesSchema.parse({ home_city: 'kharkiv', taste: { standup: -2 } }).taste['standup'], -2);
+  });
+
+  it('shows what it stopped showing, not only what it likes', () => {
+    const down = applyThumbsDown(liked(), { tag: 'standup', act: 'Антон Тимошенко' });
+    assert.ok(describePrefs(down.prefs).includes('не показую: Антон Тимошенко'), describePrefs(down.prefs));
   });
 });
 
@@ -1765,11 +1833,43 @@ describe('card buttons', () => {
       await registerUser(store, { chatId: '3404', city: 'kharkiv' });
       const item = gig();
       await store.recordMessage('3404', 42, [item]);
-      for (const verb of ['no', 'cal', 'share']) {
+      for (const verb of ['cal', 'share']) {
         const out = await tapCard(store, '3404', verb, item.id);
         assert.ok(out.includes('Скоро'), `${verb}: ${out.slice(0, 200)}`);
       }
       assert.equal((await store.listReminders('3404')).length, 0);
+    });
+  });
+
+  it('says what a 👎 taught it, and takes a point off the category', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3406', city: 'kharkiv' });
+      const item = { ...gig(), performers: ['Антон Тимошенко'] };
+      await store.recordMessage('3406', 42, [item]);
+      const out = await tapCard(store, '3406', 'no', item.id);
+      const after = (await getUser(store, '3406', log))!;
+      assert.equal(after.prefs.taste['standup'], -1);
+      assert.ok(!after.prefs.disliked_categories.includes('standup'), 'one 👎 is not a verdict');
+      assert.ok(after.prefs.blocked_acts.includes('Антон Тимошенко'), JSON.stringify(after.prefs.blocked_acts));
+      assert.ok(out.includes('важить менше'), out.slice(0, 300));
+      assert.ok(out.includes('Антон Тимошенко'), out.slice(0, 300));
+    });
+  });
+
+  it('moves the category into the dislikes once 👎 reaches the threshold', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3407', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3407', 42, [item]);
+      const start = (await getUser(store, '3407', log))!;
+      await saveUserPrefs(store, start, { ...start.prefs, favourite_categories: ['standup'] });
+      let out = '';
+      for (let i = 0; i < 3; i++) out = await tapCard(store, '3407', 'no', item.id);
+      const after = (await getUser(store, '3407', log))!;
+      assert.equal(after.prefs.taste['standup'], -3);
+      assert.ok(after.prefs.disliked_categories.includes('standup'), JSON.stringify(after.prefs));
+      assert.ok(!after.prefs.favourite_categories.includes('standup'), 'and it leaves the favourites');
+      assert.ok(out.includes('більше не показуватиму'), out.slice(0, 300));
     });
   });
 

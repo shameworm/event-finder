@@ -73,8 +73,16 @@ interests:
 
 notes: []
 
-# Written by the bot, not by hand: how many ❤️ each tag has collected, which is
-# what makes a category someone keeps hearting outrank one they hearted once.
+# Written by the bot, not by hand: the running tally for each tag. ❤️ adds a
+# point, 👎 takes one away, which is what makes a category someone keeps
+# hearting outrank one they hearted once. At -3 the category leaves
+# favourite_categories and joins disliked_categories.
 # taste:
 #   standup: 7
 #   concert: 2
+#   classical: -3
+
+# Also written by the bot: acts silenced by a 👎. Stronger than `follow` — a
+# name here is never shown, even if its category is a favourite.
+# blocked_acts:
+#   - Якийсь гурт

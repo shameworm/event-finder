@@ -11,7 +11,7 @@ import type { Logger } from './log.ts';
 import type { TgCallbackQuery, TgMessage, TgReactionUpdate } from './schemas.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
 import { answerCallbackQuery, editMessageText, escapeHtml, sendMessage, type InlineButton } from './telegram-api.ts';
-import { applyPrefsCommand, describePrefs, favouritesFromList } from './prefs-engine.ts';
+import { applyPrefsCommand, applyThumbsDown, describePrefs, favouritesFromList } from './prefs-engine.ts';
 import { CATEGORY_LABEL, DISLIKE_SUGGESTIONS, EMOJI, EVENT_CATEGORIES, canonicalTag, tagLabel } from './categories.ts';
 import { parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
@@ -1025,9 +1025,8 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
   }
 }
 
-/** The three buttons other tasks will fill in; they answer rather than fail. */
+/** The buttons other tasks will fill in; they answer rather than fail. */
 const SOON: Record<string, string> = {
-  no: 'Скоро навчуся прибирати такі події зі стрічки. Поки що скажи словами, що саме не твоє — я запишу.',
   cal: 'Скоро віддам подію файлом для календаря. Поки що ⏰ нагадаю сам — за добу та за 3 години.',
   share: 'Скоро зроблю «поділитись» одним тапом. Поки що перешли саме це повідомлення — у ньому вже є посилання.',
 };
@@ -1061,6 +1060,16 @@ async function handleCardButton(
   const item = items.find((i) => i.id === itemId) ?? (items.length === 1 ? items[0] : undefined);
   if (!item) {
     return reply('Я вже не памʼятаю, про яку подію було те повідомлення — попроси свіжий список і спробуй там.');
+  }
+
+  if (verb === 'no') {
+    const unlearned = await learnFromThumbsDown(ctx, user, item);
+    ctx.log.info(
+      `chat ${chatId} thumbed down "${item.title}"` +
+        `${unlearned.tag ? ` (${unlearned.tag} → ${unlearned.score}${unlearned.demoted ? ', demoted' : ''})` : ''}` +
+        `${unlearned.blocked ? `, blocked ${unlearned.blocked}` : ''}`,
+    );
+    return reply(thumbsDownSaid(unlearned));
   }
 
   if (verb !== 'r') {
@@ -1171,6 +1180,50 @@ export async function handleReaction(ctx: HandlerContext, update: TgReactionUpda
       `${learned.tag ? `, learned ${learned.tag}` : ''}${learned.follow ? `, now following ${learned.follow}` : ''})`,
   );
   return reply(reminderSaid(outcome, item.title, learned));
+}
+
+/** What one 👎 taught us, in the words the reply is built from. */
+interface Unlearned {
+  /** The category that lost a point, if the event had one we understand. */
+  tag: string | null;
+  /** That category's tally after the hit. */
+  score: number;
+  /** The tally crossed the threshold: the category is in the dislikes now. */
+  demoted: boolean;
+  /** The performer added to the stop list. */
+  blocked: string | null;
+}
+
+/**
+ * The 👎 half of the taste model — see applyThumbsDown for the rules. All this
+ * does is pick the event apart (category, and a performer if the ticket site
+ * named one) and save the result, the way learnFromHeart does.
+ */
+async function learnFromThumbsDown(ctx: HandlerContext, user: BotUser, item: Item): Promise<Unlearned> {
+  const who = item.kind === 'place' ? undefined : (item.performers ?? []).map((n) => n.trim()).find((n) => n.length >= 3);
+  const edit = applyThumbsDown(user.prefs, { tag: item.category, act: who });
+  await saveUserPrefs(ctx.store, user, edit.prefs);
+  return { tag: edit.tag, score: edit.score, demoted: edit.demoted, blocked: edit.blocked };
+}
+
+/**
+ * Say what changed, not "ок". A first 👎 is a nudge and sounds like one; the
+ * one that crosses the threshold is a promise to stop showing the category.
+ */
+function thumbsDownSaid(u: Unlearned): string {
+  const label = u.tag ? escapeHtml(tagLabel(u.tag)) : '';
+  const lines: string[] = [];
+  if (u.tag) {
+    lines.push(
+      u.demoted
+        ? `👎 Зрозумів — більше не показуватиму ${label}.`
+        : `👎 Записав: ${label} тепер важить менше. Поки що не прибираю всю категорію — просто опускаю її нижче.`,
+    );
+  }
+  if (u.blocked) lines.push(`«${escapeHtml(u.blocked)}» прибрав зі стрічки — навіть якщо категорія тобі заходить.`);
+  if (lines.length === 0) return '👎 Записав. Ця подія без категорії та без виконавця, тож зі смаку я нічого не зміг зчитати — скажи словами, що саме не твоє.';
+  lines.push('Передумаєш — «люблю ' + (u.tag ? tagLabel(u.tag) : 'це') + '» все вертає.');
+  return lines.join('\n');
 }
 
 /** What one ❤️ taught us that is worth saying out loud. */
