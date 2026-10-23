@@ -8,7 +8,7 @@
  * examples, so it is safe to run at any time.
  */
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 // type-only imports are erased, so they cannot run before the sandbox env is set
 import type { Store as StoreType } from '../src/db.ts';
 import type { Item } from '../src/types.ts';
@@ -16,6 +16,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const sandbox = mkdtempSync(join(tmpdir(), 'events-finder-test-'));
+// the suite used to leave a database and a preferences file in /tmp per run
+process.on('exit', () => rmSync(sandbox, { recursive: true, force: true }));
 process.env['EVENTS_FINDER_DATA'] = sandbox;
 process.env['EVENTS_FINDER_DB'] = join(sandbox, 'test.db');
 process.env['EVENTS_FINDER_CONFIG'] = new URL('../config.example.yaml', import.meta.url).pathname;
