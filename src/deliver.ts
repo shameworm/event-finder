@@ -9,8 +9,8 @@
 import type { Item, Query } from './types.ts';
 import type { Logger } from './log.ts';
 import type { Store } from './db.ts';
-import { buildMessages, summarize, type Format } from './render.ts';
-import { TelegramError, botToken, sendMessage } from './telegram-api.ts';
+import { buildMessages, summarize, type Format, type OutgoingMessage } from './render.ts';
+import { TelegramError, botToken, sendMessage, sendPhoto } from './telegram-api.ts';
 import { loadConfig } from './config.ts';
 import { sleep } from './util.ts';
 
@@ -51,6 +51,46 @@ export interface DeliverResult {
   chatGone: boolean;
 }
 
+/**
+ * Send one card: as a photo with a caption when it has a poster, as text when
+ * it does not — and as text when Telegram will not take the poster.
+ *
+ * That last case is the whole reason this is a function. A URL Telegram cannot
+ * fetch, or a file it rejects, fails the *entire* sendPhoto call, so without a
+ * retry as text one dead poster would silently drop an event out of somebody's
+ * digest — and, because the message id is what a ❤️ resolves through, take the
+ * reminder for it with them.
+ */
+async function sendCard(
+  message: OutgoingMessage,
+  opts: DeliverOptions,
+  replyTo: number | undefined,
+): Promise<number[]> {
+  const common = {
+    chatId: opts.chatId,
+    dryRun: opts.dryRun,
+    log: opts.log,
+    replyTo,
+    // the buttons belong to the cards — a photo caption carries them too
+    inlineKeyboard: message.inlineKeyboard,
+  };
+  if (message.image && message.caption) {
+    try {
+      return await sendPhoto(message.image, { ...common, caption: message.caption });
+    } catch (err) {
+      // a gone chat is about the person, not the picture — let it through
+      if (err instanceof TelegramError && !err.chatGone) {
+        opts.log.warn(
+          `poster rejected for "${message.items[0]?.title ?? '?'}" (${err.description ?? err.message}) — sending as text: ${message.image}`,
+        );
+      } else {
+        throw err;
+      }
+    }
+  }
+  return sendMessage(message.text, common);
+}
+
 export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
   const cfg = loadConfig();
   const messages = buildMessages({
@@ -78,15 +118,8 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
 
     let ids: number[];
     try {
-      ids = await sendMessage(message.text, {
-        chatId: opts.chatId,
-        dryRun: opts.dryRun,
-        log: opts.log,
-        // only the header answers the request; the events stand on their own
-        replyTo: i === 0 ? opts.replyTo : undefined,
-        // and the other way round: the buttons belong to the cards
-        inlineKeyboard: message.inlineKeyboard,
-      });
+      // only the header answers the request; the events stand on their own
+      ids = await sendCard(message, opts, i === 0 ? opts.replyTo : undefined);
     } catch (err) {
       if (err instanceof TelegramError && err.chatGone) {
         opts.log.warn(`chat ${opts.chatId} is unreachable (${err.description ?? 'blocked'})`);
