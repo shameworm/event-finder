@@ -1252,6 +1252,30 @@ describe('store', () => {
     });
   });
 
+  /**
+   * /stop says "більше нічого не надсилаю" — it used to hold for digests only,
+   * because dueReminders never looked at users.blocked and kept pushing
+   * ❤️ reminders to people who had unsubscribed.
+   */
+  it('gives a chat that said /stop no reminders, and brings them back on /start', async () => {
+    await withTestStore(async (store) => {
+      const soon = makeItem({ ...item, title: 'Blocked soon', url: 'https://x/blocked', startsAt: new Date(Date.now() + 20 * 3600_000).toISOString() })!;
+      await store.ensureUser({ chatId: 'stopper', city: 'kharkiv', prefs: '{}' });
+      await store.addReminder('stopper', soon);
+      assert.ok((await store.dueReminders()).some((d: { row: { chat_id: string } }) => d.row.chat_id === 'stopper'));
+
+      await store.setBlocked('stopper', true);
+      assert.ok(!(await store.dueReminders()).some((d: { row: { chat_id: string } }) => d.row.chat_id === 'stopper'), 'a /stop must silence reminders too');
+      assert.equal((await store.listReminders('stopper')).length, 0, 'and /reminders shows nothing to a stopped chat');
+      // the rows are kept, not deleted — /start (ensureUser) unblocks…
+      assert.equal((await store.listReminders()).filter((r: { chat_id: string }) => r.chat_id === 'stopper').length, 0);
+
+      // …so a returning user gets their reminders back untouched
+      await store.ensureUser({ chatId: 'stopper', city: 'kharkiv', prefs: '{}' });
+      assert.ok((await store.dueReminders()).some((d: { row: { chat_id: string } }) => d.row.chat_id === 'stopper'), '/start brings them back');
+    });
+  });
+
   it('rate limits per person per hour', async () => {
     await withTestStore(async (store) => {
       for (let i = 1; i <= 3; i++) {
@@ -1274,6 +1298,45 @@ describe('store', () => {
       await store.putCache('k2', [item], 0);
       assert.equal(await store.getCache('k2'), null, 'a zero TTL entry is already stale');
       await store.pruneCache();
+    });
+  });
+
+  /**
+   * `messages`, `deliveries` and `usage` only ever grew. The dangerous half of
+   * housekeeping is deleting too much, so that is what this pins down.
+   */
+  it('prunes what has expired and leaves everything still in use', async () => {
+    await withTestStore(async (store) => {
+      await store.prune(); // from a known-clean starting point
+      const before = await store.stats();
+
+      await store.putCache('stale-entry', [item], -60);
+      await store.putCache('warm-entry', [item], 600);
+      await store.recordSent('prune-me', [item]);
+      await store.recordMessage('prune-me', 11, [item]);
+      await store.addReminder('prune-me', item);
+      await store.hitRateLimit('prune-me', 20);
+      assert.equal((await store.stats())['cached'], (before['cached'] ?? 0) + 2);
+
+      await store.prune();
+
+      const after = await store.stats();
+      assert.equal(after['cached'], (before['cached'] ?? 0) + 1, 'the expired entry goes, the warm one stays');
+      assert.equal(after['deliveries'], (before['deliveries'] ?? 0) + 1, 'a digest must not repeat itself after a prune');
+      assert.equal(after['messages'], (before['messages'] ?? 0) + 1, 'a ❤️ still has to resolve to its event');
+      assert.equal((await store.listReminders('prune-me')).length, 1);
+      // and the rate limit still remembers this hour
+      assert.equal((await store.hitRateLimit('prune-me', 20)).used, 2);
+    });
+  });
+
+  it('only asks the database for the reminders that could be due', async () => {
+    await withTestStore(async (store) => {
+      const far = makeItem({ ...item, title: 'Far off', url: 'https://x/far', startsAt: new Date(Date.now() + 40 * 86_400_000).toISOString() })!;
+      await store.addReminder('u-far', far);
+      assert.equal((await store.listReminders('u-far')).length, 1, '/reminders still shows it');
+      const due = await store.dueReminders();
+      assert.ok(!due.some((d: { row: { chat_id: string } }) => d.row.chat_id === 'u-far'), 'a month out is not due');
     });
   });
 

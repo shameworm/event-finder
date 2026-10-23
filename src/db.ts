@@ -174,6 +174,20 @@ async function bootstrap(d: Driver): Promise<void> {
 const nowIso = () => new Date().toISOString();
 
 /**
+ * How long bookkeeping rows are kept by `Store.prune()`. Generous on purpose:
+ * `messages` is what a late ❤️ resolves through, and `deliveries` is what
+ * stops a digest repeating itself.
+ */
+const RETENTION = {
+  messagesDays: 120,
+  deliveriesDays: 180,
+  /** Reminders for events this far in the past are of no use to anyone. */
+  remindersDays: 60,
+  /** Hourly rate-limit buckets. */
+  usageHours: 48,
+};
+
+/**
  * Onboarded enough to be sent something. The /start walkthrough parks its step
  * in `stage`, but only the city is actually required to build a digest — so
  * someone who walked away at "what's your budget?" still gets one, and only
@@ -463,12 +477,22 @@ export class Store {
     return 'added';
   }
 
-  async listReminders(chatId?: string): Promise<ReminderRow[]> {
+  /**
+   * Live reminders. A chat that said /stop ("більше нічого не надсилаю") is
+   * excluded even though its reminder rows stay put — /start brings them back.
+   */
+  async listReminders(chatId?: string, window?: { from: string; to: string }): Promise<ReminderRow[]> {
     const t = this.d.schema;
-    const scope = chatId ? sql` AND chat_id = ${chatId}` : sql``;
+    const scope = chatId ? sql` AND r.chat_id = ${chatId}` : sql``;
+    // the reminder cron runs every 15 minutes and only ever cares about the day
+    // either side of now, so it asks for that slice instead of every row
+    const bound = window ? sql` AND r.starts_at >= ${window.from} AND r.starts_at <= ${window.to}` : sql``;
     const rows = await this.d.all(
-      sql`SELECT id, chat_id, item_id, title, city, venue, starts_at, url, fired_1d, fired_3h
-          FROM ${t.reminders} WHERE cancelled = 0${scope} ORDER BY starts_at`,
+      sql`SELECT r.id, r.chat_id, r.item_id, r.title, r.city, r.venue, r.starts_at, r.url, r.fired_1d, r.fired_3h
+          FROM ${t.reminders} r
+          WHERE r.cancelled = 0${scope}${bound}
+            AND r.chat_id NOT IN (SELECT chat_id FROM ${t.users} WHERE blocked = 1)
+          ORDER BY r.starts_at`,
     );
     return rows.flatMap((r) => {
       const parsed = ReminderRowSchema.safeParse(r);
@@ -479,7 +503,14 @@ export class Store {
   /** Reminders whose 1-day or 3-hour mark has passed but has not fired yet. */
   async dueReminders(now = new Date()): Promise<{ row: ReminderRow; which: '1d' | '3h' }[]> {
     const due: { row: ReminderRow; which: '1d' | '3h' }[] = [];
-    for (const row of await this.listReminders()) {
+    // nothing outside this window can be due. The bound is text comparison on
+    // ISO strings whose offsets may differ from ours, so it is deliberately two
+    // days wide either way; the exact arithmetic below still decides.
+    const window = {
+      from: new Date(now.getTime() - 2 * 86_400_000).toISOString(),
+      to: new Date(now.getTime() + 2 * 86_400_000).toISOString(),
+    };
+    for (const row of await this.listReminders(undefined, window)) {
       if (row.fired_1d === 1 && row.fired_3h === 1) continue;
       const start = Date.parse(row.starts_at);
       if (Number.isNaN(start)) continue;
@@ -532,7 +563,31 @@ export class Store {
   }
 
   async pruneCache(): Promise<void> {
-    await this.d.run(sql`DELETE FROM ${this.d.schema.scrapeCache} WHERE expires_at < ${nowIso()}`);
+    // `<=`, as getCache reads it: an entry whose ttl is up already counts as
+    // stale, and a strict `<` left a 0-ttl row behind whenever the prune
+    // happened in the same millisecond the row was written.
+    await this.d.run(sql`DELETE FROM ${this.d.schema.scrapeCache} WHERE expires_at <= ${nowIso()}`);
+  }
+
+  /**
+   * Housekeeping: drop the cache rows that have expired and the bookkeeping
+   * nobody can use any more. Without this, `messages`, `deliveries` and
+   * `usage` only ever grow — a year of weekly digests for a hundred people is
+   * a few hundred thousand rows about events that have already happened.
+   *
+   * Called at the end of every fan-out job, so there is nothing extra to cron.
+   */
+  async prune(): Promise<void> {
+    await this.pruneCache();
+    const t = this.d.schema;
+    const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString();
+    // a ❤️ resolves through `messages`, so these outlive the digest itself
+    await this.d.run(sql`DELETE FROM ${t.messages} WHERE sent_at < ${daysAgo(RETENTION.messagesDays)}`);
+    await this.d.run(sql`DELETE FROM ${t.deliveries} WHERE last_sent_at < ${daysAgo(RETENTION.deliveriesDays)}`);
+    await this.d.run(sql`DELETE FROM ${t.reminders} WHERE starts_at < ${daysAgo(RETENTION.remindersDays)}`);
+    await this.d.run(
+      sql`DELETE FROM ${t.usage} WHERE bucket < ${new Date(Date.now() - RETENTION.usageHours * 3_600_000).toISOString().slice(0, 13)}`,
+    );
   }
 
   /* -------------------------------------------------------- rate limiting --- */

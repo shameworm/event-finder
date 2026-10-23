@@ -164,6 +164,11 @@ Tables: `users`, `deliveries` (what each person was shown), `messages` (which
 event each message was about, so a ❤️ on it resolves), `reminders`,
 `scrape_cache`, `usage` (rate limits), `state`.
 
+Every fan-out job ends with a prune, so none of these grow without end: expired
+cache rows go immediately, `messages` after 120 days, `deliveries` after 180,
+reminders 60 days past their event, and rate-limit buckets after 48 hours. The
+retention is in `RETENTION` at the top of `src/db.ts`.
+
 ## 5. Run the bot
 
 ```bash
