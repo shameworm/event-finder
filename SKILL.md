@@ -51,10 +51,11 @@ npx tsx scripts/bot.ts --dry-run   # print replies instead of sending
 check nothing is already running (`pgrep -fl "scripts/bot.ts"`). In production it
 belongs under a supervisor — see the README.
 
-What users can send it: `/start` (the walkthrough — see below), `/week`,
-`/weekend`, `/today`, `/tomorrow`, `/places`, `/city`, `/prefs`, `/setup`,
-`/settings`, `/mute week|weekend|follows|places`, `/unmute`, `/reminders`,
-`/follow X`, `/unfollow X`, `/stop`, `/help`, and `/stats` (owner only).
+What users can send it: `/start` (the walkthrough — see below), `/find` (the
+guided search), `/week`, `/weekend`, `/today`, `/tomorrow`, `/near`, `/places`,
+`/saved`, `/city`, `/prefs`, `/setup`, `/settings`,
+`/mute week|weekend|follows|places`, `/unmute`, `/reminders`, `/follow X`,
+`/unfollow X`, `/stop`, `/help`, and `/stats` (owner only).
 Anything else is treated as a preference change if it reads like one, otherwise
 as a search.
 
@@ -80,6 +81,41 @@ sentence («не люблю класику») goes through the usual parser, a b
 («стендап, джаз») is read as favourites and added to whatever is already ticked,
 a name at the follow step is a name, and «пропустити» moves on. Anyone left on
 the earlier one-question `taste` stage is treated as being on the first screen.
+
+**The card is a cursor, not a feed.** A fresh answer sends the header and a
+single event (`bot.cards_at_once`, default 1); the rest waits in the hourly
+stash behind it, along with everything already walked past (`seen`). **Далі →
+(N)** and **← Назад (N)** *replace the event on the card you tapped* rather
+than sending another message, so a forty-event weekend stays one message you
+move through. **📋 Показати списком** on the header is the opt-in for a batch
+of `bot.max_results`. The header counts the whole answer, not the card.
+
+Telegram decides how the replacement happens: `editMessageText` for a card
+without a poster, `editMessageMedia` for one with — and a *re-send plus delete*
+when the step crosses between them, because a text message cannot become a
+photo message or the reverse. All three paths rewrite the `messages` row, so a
+❤️ on the card means the event now showing. A poster Telegram refuses falls
+back to the re-send, which falls back to text, exactly as a first send does.
+
+Every event card carries **ℹ️ Деталі · 🔖 Зберегти · Далі →** above the ⏰/👎
+row. Деталі redraws the same message as the full record of what the source
+gave us — and nothing it did not; 🔖 is a bookmark in the `saved` table, which
+keeps the whole item, so /saved survives the thirty-minute scrape cache and
+does *not* count as a delivery; Далі → hands out one more event from the stash
+behind the newest answer (`lastpage:<chat id>` in the `state` table) and only
+appears when there is one. A card that went out with a poster is a photo
+message, so these redraws go through `editMessageCaption`, not
+`editMessageText`.
+
+`/find` is the same search for people who would rather tap than type: a
+category screen, then a period screen, with the choice parked in the `state`
+table under `find:<chat id>` — the bot also runs in `--once` cron mode, where
+no wizard can live in a variable.
+
+"📍 Поруч" is the home city over the next week, not a radius. Telegram can share
+a location, but the ticket sites index by city and the items carry no
+coordinates, so there is nothing to measure a distance against; `/city` is what
+moves it.
 
 Most of that is also reachable without typing. The bot publishes `BOT_COMMANDS`
 with `setMyCommands` on start-up, so Telegram autocompletes `/` and fills the ☰
