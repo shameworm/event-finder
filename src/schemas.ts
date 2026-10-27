@@ -80,8 +80,14 @@ export const ConfigSchema = z.strictObject({
       allowlist: z.array(z.coerce.string()).default([]),
       /** Searches per user per hour; each one can trigger a scrape. */
       searches_per_hour: z.number().int().positive().default(20),
-      /** Items in an on-demand answer. */
+      /** Items the header's "показати ще" hands out in one go. */
       max_results: z.number().int().positive().default(10),
+      /**
+       * Cards sent for a fresh answer, before anyone taps anything. One, so a
+       * busy weekend arrives as a card you can act on rather than forty
+       * notifications; "Далі →" under it walks the rest, one at a time.
+       */
+      cards_at_once: z.number().int().positive().default(1),
       /** Pause between users when fanning a digest out, to stay under Telegram's rate limit. */
       send_delay_ms: z.number().int().nonnegative().default(60),
       /** Pause between the messages of one digest — each event is its own message. */
@@ -195,8 +201,8 @@ export const TgMessageSchema = z
     text: z.string().optional(),
     /** A poster card arrives as a photo: its words are here, not in `text`. */
     caption: z.string().optional(),
-    /** Present exactly when the message is a photo; the sizes, which we never read. */
-    photo: z.array(z.unknown()).optional(),
+    /** Present exactly when the message is a photo; only its existence is ever used. */
+    photo: z.array(z.object({ file_id: z.string() }).loose()).optional(),
     reply_to_message: z.object({ message_id: z.number().int(), text: z.string().optional() }).loose().optional(),
     from: z.object({ id: z.number(), username: z.string().optional() }).loose().optional(),
   })

@@ -281,7 +281,11 @@ export async function editMessageText(
 /**
  * The same rewrite for a message Telegram took as a photo: its words live in
  * the *caption*, and `editMessageText` on one of those fails with "there is no
- * text in the message to edit" — every poster card in a digest is one of these.
+ * text in the message to edit" — every event card with a poster is one of
+ * these, so redrawing one (a 🔖 tapped on, ⏰ flipped over) comes through here.
+ *
+ * The caption limit is a quarter of a message's, so the caller passes text
+ * that already fits — `renderCaption` is what makes it fit.
  */
 export async function editMessageCaption(
   text: string,
@@ -307,6 +311,57 @@ export async function editMessageCaption(
     );
   } catch (err) {
     // same as editMessageText: a double tap produces an identical caption
+    if (err instanceof TelegramError && (err.description ?? '').includes('message is not modified')) return;
+    throw err;
+  }
+}
+
+/**
+ * Swap the photo *and* the caption of a card that is already in the chat —
+ * what makes "Далі →" a cursor rather than a second message.
+ *
+ * Telegram will only do this to a message that already carries media: a text
+ * message cannot become a photo one, and a photo one cannot become text. So
+ * this is for photo → photo, and the caller needs a fallback for the step
+ * where the next event has no poster and the current card does (or the other
+ * way round). It also throws, like `sendPhoto`, when Telegram cannot fetch the
+ * new picture — the same fallback covers that.
+ */
+export async function editMessageMedia(
+  photo: string,
+  opts: {
+    chatId: string;
+    messageId: number;
+    caption?: string;
+    inlineKeyboard?: InlineButton[][];
+    dryRun?: boolean;
+    log?: Logger;
+  },
+): Promise<void> {
+  if (opts.dryRun) {
+    process.stdout.write(
+      `\n──────── edit media ${opts.messageId} in chat ${opts.chatId} ────────\n[photo ${photo}]\n${opts.caption ?? ''}\n`,
+    );
+    printButtons(opts.inlineKeyboard);
+    return;
+  }
+  const cfg = loadConfig();
+  try {
+    await call(
+      'editMessageMedia',
+      {
+        chat_id: opts.chatId,
+        message_id: opts.messageId,
+        media: {
+          type: 'photo',
+          media: photo,
+          ...(opts.caption ? { caption: opts.caption, parse_mode: cfg.telegram.parse_mode } : {}),
+        },
+        ...(opts.inlineKeyboard ? { reply_markup: { inline_keyboard: opts.inlineKeyboard } } : {}),
+      },
+      TgMessageSchema,
+    );
+  } catch (err) {
     if (err instanceof TelegramError && (err.description ?? '').includes('message is not modified')) return;
     throw err;
   }
