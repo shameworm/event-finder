@@ -200,6 +200,13 @@ async function bootstrap(d: Driver): Promise<void> {
   )`);
   await d.run(sql`CREATE INDEX IF NOT EXISTS idx_saved_chat ON ${t.saved} (chat_id)`);
 
+  await d.run(sql`CREATE TABLE IF NOT EXISTS ${t.taught} (
+    chat_id    text NOT NULL,
+    item_id    text NOT NULL,
+    created_at text NOT NULL,
+    PRIMARY KEY (chat_id, item_id)
+  )`);
+
   await d.run(sql`CREATE TABLE IF NOT EXISTS ${t.scrapeCache} (
     key        text PRIMARY KEY,
     payload    text NOT NULL,
@@ -704,6 +711,27 @@ export class Store {
       sql`SELECT payload FROM ${this.d.schema.saved} WHERE chat_id = ${chatId} ORDER BY starts_at IS NULL, starts_at, created_at`,
     );
     return rows.flatMap((r) => itemsFromPayload(r['payload']));
+  }
+
+  /* --------------------------------------------------------- taste ledger --- */
+
+  /**
+   * Claim this event for the taste model: true the first time, false ever
+   * after. ❤️ and 🔖 are two ways of saying "yes, this one", and the ranker
+   * has to hear one event once however many of them land on it.
+   */
+  async claimTaste(chatId: string, itemId: string): Promise<boolean> {
+    const t = this.d.schema;
+    const rows = await this.d.all(
+      sql`SELECT item_id FROM ${t.taught} WHERE chat_id = ${chatId} AND item_id = ${itemId}`,
+    );
+    if (rows.length > 0) return false;
+    await this.d.run(sql`
+      INSERT INTO ${t.taught} (chat_id, item_id, created_at)
+      VALUES (${chatId}, ${itemId}, ${nowIso()})
+      ON CONFLICT (chat_id, item_id) DO NOTHING
+    `);
+    return true;
   }
 
   /* -------------------------------------------------------- scrape cache --- */
