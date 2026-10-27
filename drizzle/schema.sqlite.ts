@@ -157,3 +157,20 @@ export const saved = sqliteTable(
   },
   (t) => [primaryKey({ columns: [t.chatId, t.itemId] }), index('idx_saved_chat').on(t.chatId)],
 );
+
+/**
+ * One row per event that has already fed this person's taste model. ❤️ and
+ * 🔖 both mean "yes, this one", so without this marker an event that got
+ * both would score its category twice. There is nothing to un-learn here: a
+ * row stays even when the bookmark goes, because 👎 is the only gesture that
+ * takes a point back off.
+ */
+export const taught = sqliteTable(
+  'taught',
+  {
+    chatId: text('chat_id').notNull(),
+    itemId: text('item_id').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.chatId, t.itemId] })],
+);

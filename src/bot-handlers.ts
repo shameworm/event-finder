@@ -115,7 +115,8 @@ const COMMANDS = `<b>Що я вмію</b>
 · <i>я у Львові наступного тижня</i>
 
 Під кожною подією: <b>ℹ️ Деталі</b> — усе, що відомо; <b>🔖 Зберегти</b> — у
-/saved; <b>Далі →</b> — наступна з того ж списку, без нового пошуку.
+/saved, і я запамʼятаю, що таке тобі заходить; <b>Далі →</b> — наступна з того
+ж списку, без нового пошуку.
 
 Тапни ❤️ на події — і я нагадаю за добу та за три години до початку, а ще
 запамʼятаю, що таке тобі заходить. Знімеш ❤️ — скасую нагадування.`;
@@ -1355,9 +1356,10 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
  *   more          the next page of an answer, from the stash behind its
  *                 header; which answer comes from the message it is on
  *   ev:<verb>:<item id>  a button under an event card — ev:i opens its
- *                 details and ev:b comes back, ev:s bookmarks it, ev:n hands
- *                 out one more from the stash, ev:r toggles the reminder,
- *                 ev:no teaches the taste model, ev:share is not built yet
+ *                 details and ev:b comes back, ev:s bookmarks it and teaches
+ *                 the taste model, ev:n hands out one more from the stash,
+ *                 ev:r toggles the reminder and teaches the same way,
+ *                 ev:no teaches it downwards, ev:share is not built yet
  *                 (📅 is a plain link and never calls back)
  *
  * Everything that changes a setting rewrites the panel it was tapped from, so
@@ -1406,6 +1408,8 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
       // a card with a poster is a photo message: its caption is edited, not
       // its text, and Telegram refuses the wrong one outright
       isPhoto: Boolean(cq.message?.photo?.length),
+      // a group has one row in `users`, so nobody's tap may teach it a taste
+      shared: (cq.message?.chat.type ?? 'private') !== 'private',
       reply,
     });
   }
@@ -1769,6 +1773,11 @@ async function stepCard(
  * ⏰ is the same switch as the heart: it goes through `addReminder`, which
  * un-cancels an existing row rather than adding a second one, so hearting and
  * then tapping ⏰ leaves exactly one reminder. Tapping it again cancels.
+ *
+ * 🔖 is the other half of that: no reminder, but the same lesson for the
+ * ranker, because "keep this one" says as much about someone as "remind me".
+ * Taking it off again un-bookmarks and nothing else — 👎 is the gesture for
+ * "not my thing".
  */
 async function handleCardButton(
   ctx: HandlerContext,
@@ -1778,10 +1787,12 @@ async function handleCardButton(
     itemId: string;
     messageId?: number;
     isPhoto: boolean;
+    /** This card is in a group, where the taste model is nobody's to rewrite. */
+    shared?: boolean;
     reply: Reply;
   },
 ): Promise<void> {
-  const { verb, itemId, messageId, isPhoto, reply } = opts;
+  const { verb, itemId, messageId, isPhoto, shared, reply } = opts;
   const chatId = user.chatId;
 
   const items = messageId ? await ctx.store.itemsForMessage(chatId, messageId) : [];
@@ -1862,12 +1873,24 @@ async function handleCardButton(
       if (await ctx.store.isSaved(chatId, item.id)) {
         await ctx.store.unsaveItem(chatId, item.id);
         ctx.log.info(`chat ${chatId} un-saved "${item.title}"`);
-      } else {
-        await ctx.store.saveItem(chatId, item);
-        ctx.log.info(`chat ${chatId} saved "${item.title}"`);
+        // taking the 🔖 off means "not relevant any more", not "I dislike
+        // this" — 👎 is that gesture. Nothing comes back out of the taste model.
+        return showCard();
       }
+      await ctx.store.saveItem(chatId, item);
+      // a 🔖 is the clearest "I want this one" anyone can give us, so the
+      // ranker hears it exactly as it hears a ❤️ — minus the reminder. In a
+      // group it is still a bookmark and nothing more: see handleReaction.
+      const learned = shared ? { tag: null, follow: null } : await learnFromYes(ctx, user, item);
+      ctx.log.info(
+        `chat ${chatId} saved "${item.title}"` +
+          `${shared ? ' (shared chat: taste not touched)' : ''}` +
+          `${learned.tag ? ` (learned ${learned.tag})` : ''}${learned.follow ? `, now following ${learned.follow}` : ''}`,
+      );
       // the card is the receipt: the same message, with 🔖 flipped over
-      return showCard();
+      await showCard();
+      const said = savedSaid(learned);
+      return said ? reply(said) : undefined;
     }
 
     // walking, not searching: nothing is scraped and nothing is re-ranked
@@ -1897,7 +1920,7 @@ async function handleCardButton(
         if (outcome === 'no-date') {
           return reply(`У «${escapeHtml(item.title)}» ще немає часу початку, тож нагадування не поставлю.`);
         }
-        const learned = await learnFromHeart(ctx, user, item);
+        const learned = await learnFromYes(ctx, user, item);
         ctx.log.info(
           `chat ${chatId} belled "${item.title}" (reminder ${outcome}${learned.tag ? `, learned ${learned.tag}` : ''})`,
         );
@@ -1932,7 +1955,7 @@ async function handleBell(ctx: HandlerContext, msg: TgMessage, chatId: string, i
   if (outcome === 'no-date') return `У «${escapeHtml(chosen.title)}» ще немає часу початку.`;
 
   const user = await getUser(ctx.store, chatId, ctx.log);
-  const learned = user ? await learnFromHeart(ctx, user, chosen) : { tag: null, follow: null };
+  const learned = user ? await learnFromYes(ctx, user, chosen) : { tag: null, follow: null };
   return reminderSaid(outcome, chosen.title, learned);
 }
 
@@ -1945,6 +1968,22 @@ function reminderSaid(outcome: string, title: string, learned: Learned): string 
     learned.follow ? `стежу за «${escapeHtml(learned.follow)}» — скажу, щойно оголосять ще щось` : '',
   ].filter(Boolean);
   return notes.length ? `${said}\n(${notes.join('; ')})` : said;
+}
+
+/**
+ * What a 🔖 taught, in one line — or nothing, when it taught nothing. The
+ * button already flipped to "🔖 Збережено", so this says only what the
+ * ranker now knows that it did not know a moment ago.
+ */
+function savedSaid(learned: Learned): string | null {
+  const lines: string[] = [];
+  if (learned.tag) {
+    lines.push(`🔖 Запамʼятав, що тобі заходить «${escapeHtml(tagLabel(learned.tag))}» — підніматиму таке вище.`);
+  }
+  if (learned.follow) {
+    lines.push(`Стежу за «${escapeHtml(learned.follow)}» — скажу, щойно оголосять ще щось.`);
+  }
+  return lines.length ? lines.join('\n') : null;
 }
 
 /**
@@ -1993,7 +2032,7 @@ export async function handleReaction(ctx: HandlerContext, update: TgReactionUpda
   // taste of everyone else in it. The reminder is the group's either way; the
   // taste model stays whatever the group set itself.
   const shared = (update.chat.type ?? 'private') !== 'private';
-  const learned = shared ? { tag: null, follow: null } : await learnFromHeart(ctx, user, item);
+  const learned = shared ? { tag: null, follow: null } : await learnFromYes(ctx, user, item);
   ctx.log.info(
     `chat ${chatId} hearted "${item.title}" (reminder ${outcome}` +
       `${shared ? ', shared chat: taste not touched' : ''}` +
@@ -2017,7 +2056,7 @@ interface Unlearned {
 /**
  * The 👎 half of the taste model — see applyThumbsDown for the rules. All this
  * does is pick the event apart (category, and a performer if the ticket site
- * named one) and save the result, the way learnFromHeart does.
+ * named one) and save the result, the way learnFromYes does.
  */
 async function learnFromThumbsDown(ctx: HandlerContext, user: BotUser, item: Item): Promise<Unlearned> {
   const who = item.kind === 'place' ? undefined : (item.performers ?? []).map((n) => n.trim()).find((n) => n.length >= 3);
@@ -2046,7 +2085,7 @@ function thumbsDownSaid(u: Unlearned): string {
   return lines.join('\n');
 }
 
-/** What one ❤️ taught us that is worth saying out loud. */
+/** What one ❤️, ⏰ or 🔖 taught us that is worth saying out loud. */
 interface Learned {
   /** The tag added to their favourites/interests, if it was not there already. */
   tag: string | null;
@@ -2055,23 +2094,32 @@ interface Learned {
 }
 
 /**
- * A heart is a free sample of someone's taste, so take all of it:
+ * Every way of saying "yes, this one" — ❤️, ⏰, 🔖 — is a free sample of
+ * someone's taste, so take all of it:
  *
  *  · the event's category joins their favourites (a place joins their interests)
- *  · the tally for that tag goes up, every time — that is what makes hearting
- *    twenty concerts mean more to the ranker than hearting one
+ *  · the tally for that tag goes up, every time — that is what makes twenty
+ *    concerts kept mean more to the ranker than one
  *  · whoever is on stage joins the follow list, where the real weight lives:
  *    followed acts are alerted on by name and ignore budget and dislikes
+ *
+ * ...but once per event, however many of those gestures land on it: see
+ * `claimTaste`. Hearting what you already bookmarked is emphasis, not a second
+ * opinion.
  *
  * One save, because two in a row from the same loaded user would lose the
  * first one's changes.
  */
-async function learnFromHeart(ctx: HandlerContext, user: BotUser, item: Item): Promise<Learned> {
+async function learnFromYes(ctx: HandlerContext, user: BotUser, item: Item): Promise<Learned> {
   const nothing: Learned = { tag: null, follow: null };
   const tag = canonicalTag(item.category);
   if (!tag) return nothing;
   const has = (list: string[], value: string) => list.some((v) => normText(v) === normText(value));
   if (has(user.prefs.disliked_categories, tag)) return nothing;
+
+  // one event, one point: ❤️, ⏰ and 🔖 are the same sentence about it, so
+  // whichever lands first is the one the tally hears
+  if (!(await ctx.store.claimTaste(user.chatId, item.id))) return nothing;
 
   const place = item.kind === 'place';
   const list = place ? user.prefs.interests : user.prefs.favourite_categories;
