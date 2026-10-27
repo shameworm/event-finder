@@ -35,7 +35,7 @@ Follow alerts and place tips are still one message per item. Console output
 
 ```bash
 cd ~/.hermes/skills/events-finder
-npx tsx scripts/doctor.ts          # config, secrets, database, users, bot policy
+npx tsx scripts/doctor.ts          # config, secrets, database, users, source health
 ```
 
 Run this first in a fresh session, after any config change, and whenever
@@ -185,6 +185,13 @@ mechanism, and a search result carries no picture at all. Those stay text.
 
 A failing source never stops a run: it is logged and the rest continue. If a run
 reports `⚠️ sources that failed`, say so rather than implying the list is complete.
+
+A source that *throws* is the easy case. The quiet one is a scraper that stops
+matching its site: 200 OK, nothing parsed, `{ ok: true, items: [] }`, and no
+failure anywhere. The fan-out counts those (`src/health.ts`) and tells the owner
+after three consecutive ticks where that source found nothing and others found
+events in the same cities. `scripts/doctor.ts` prints the same counters — read
+them before concluding a city is simply quiet.
 
 ### websearch needs you
 
