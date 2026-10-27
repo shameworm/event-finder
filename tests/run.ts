@@ -53,7 +53,7 @@ const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange
 const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom, pickImage } = await import('../src/normalize.ts');
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
-const { buildDigest, buildMessages, eventKeyboard, renderReminders, renderItem, renderCaption, CAPTION_LIMIT } = await import('../src/render.ts');
+const { buildDigest, buildMessages, eventKeyboard, renderReminders, renderItem, renderCaption, countEvents, countEventsAcc, eventsWaiting, CAPTION_LIMIT } = await import('../src/render.ts');
 const { loadConfig, loadPrefs, resolveCity, cityLocalName, savePrefs } = await import('../src/config.ts');
 const { applyPrefsCommand, applyThumbsDown, describePrefs } = await import('../src/prefs-engine.ts');
 const { tagLabel } = await import('../src/categories.ts');
@@ -1075,12 +1075,12 @@ describe('messages', () => {
     assert.equal(msgs.length, 3);
   });
 
-  it('gives every event card the same four buttons, callback data and all', () => {
+  it('gives every event card the same buttons, callback data and all', () => {
     const msgs = buildMessages({ title: 'T', query, items: [earlier], format: 'text' });
     assert.deepEqual(msgs[0]!.inlineKeyboard, undefined, 'the header is not an event');
     const rows = msgs[1]!.inlineKeyboard!;
     const labels = rows.flat().map((b) => b.text);
-    assert.deepEqual(labels, ['⏰ Нагадати', '👎 Не моє', '📅 В календар', '↗️ Поділитись']);
+    assert.deepEqual(labels, ['ℹ️ Деталі', '🔖 Зберегти', '⏰ Нагадати', '👎 Не моє', '📅 В календар', '↗️ Поділитись']);
     for (const b of rows.flat()) {
       // 📅 is a link, every other button calls back
       if ('url' in b) {
@@ -1096,7 +1096,7 @@ describe('messages', () => {
   it('leaves 📅 off an event whose date is still unknown', () => {
     const undated = makeItem({ city: 'kharkiv', title: 'Колись', url: 'https://m/c', source: 's' })!;
     const labels = eventKeyboard(undated).flat().map((b) => b.text);
-    assert.deepEqual(labels, ['⏰ Нагадати', '👎 Не моє', '↗️ Поділитись']);
+    assert.deepEqual(labels, ['ℹ️ Деталі', '🔖 Зберегти', '⏰ Нагадати', '👎 Не моє', '↗️ Поділитись']);
     assert.equal(googleCalendarUrl(undated), undefined);
   });
 
@@ -2462,8 +2462,44 @@ describe('bot handlers', () => {
       ]);
       await withTaste(store, '3041', ['standup']);
       const out = await say(store, '3041', '/today');
-      assert.ok(out.includes('Вистава'), 'the next best came back');
       assert.ok(out.includes('додав ще 1'), out.slice(-400));
+      // the padded event came back into the answer, and waits behind the card
+      // that went out — one at a time is the shape of an answer now
+      assert.ok(out.includes('Відкритий мікрофон'), out.slice(0, 400));
+      assert.ok(out.includes('Далі → (1)'), out.slice(0, 800));
+    });
+  });
+
+  it('declines the count the way Ukrainian does, in every sentence it appears in', () => {
+    // the subject form, the object form and the verb that has to agree
+    assert.deepEqual([1, 2, 5, 11, 21].map(countEvents), ['1 подія', '2 події', '5 подій', '11 подій', '21 подія']);
+    assert.deepEqual([1, 2, 5].map(countEventsAcc), ['1 подію', '2 події', '5 подій']);
+    assert.deepEqual([1, 2, 5].map(eventsWaiting), ['1 подія чекає', '2 події чекають', '5 подій чекають']);
+  });
+
+  it('never puts the city label straight after a preposition', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3043', city: 'kharkiv' });
+      const hello = await say(store, '3043', '/start');
+      // "у Харків" is the nominative where the locative belongs; the welcome
+      // names the city as a subject instead, which is right for every city
+      assert.ok(!/[ву]\s+Харків\b/.test(hello), hello.slice(0, 400));
+      assert.ok(hello.includes('Твоє місто — <b>Харків</b>'), hello.slice(0, 400));
+    });
+  });
+
+  it('sends one card for a fresh answer, and keeps the rest behind "Далі →"', async () => {
+    await withTestStore(async (store) => {
+      await seedToday(store, [1, 2, 3, 4, 5, 6].map((n) => onToday(`Відкритий мікрофон ${n}`, 'standup', { priceMin: 200 })));
+      await withTaste(store, '3042', ['standup']);
+      const out = await say(store, '3042', '/today');
+
+      // the header, the "шукаю" placeholder and exactly one event card
+      const cards = out.split('──────── to chat 3042').length - 1;
+      assert.equal(cards, 3, `one card, not six: ${out.slice(0, 600)}`);
+      assert.ok(out.includes('6 подій'), 'the header counts the answer, not the batch');
+      assert.ok(out.includes('Далі → (5)'), 'the button says how much is waiting');
+      assert.ok(out.includes('Показую по одній'), out.slice(-500));
     });
   });
 
@@ -3147,7 +3183,7 @@ describe('показати ще', () => {
   it('offers the button on the header only when something was left over', () => {
     const items = tail(2);
     const withRest = buildMessages({ title: 'T', query, items, format: 'text', more: 7 });
-    assert.deepEqual(withRest[0]!.inlineKeyboard, [[{ text: '📥 Показати ще 7', callback_data: 'more' }]]);
+    assert.deepEqual(withRest[0]!.inlineKeyboard, [[{ text: '📋 Показати списком (ще 7)', callback_data: 'more' }]]);
     const whole = buildMessages({ title: 'T', query, items, format: 'text', more: 0 });
     assert.equal(whole[0]!.inlineKeyboard, undefined, 'nothing left over, no button');
   });
@@ -3160,23 +3196,28 @@ describe('показати ще', () => {
       assert.ok(first.includes('Подія 1') && first.includes('Подія 2'), first.slice(0, 400));
       assert.ok(!first.includes('Подія 3'), 'one page at a time');
       assert.equal(first.split('──────── to chat 3501').length - 1, 2, 'each event is its own message');
-      assert.ok(first.includes('edit 42') && first.includes('📥 Показати ще 3'), first.slice(0, 600));
+      assert.ok(first.includes('edit 42') && first.includes('📋 Показати списком (ще 3)'), first.slice(0, 600));
 
       const second = await tapMore(store, '3501');
       assert.ok(second.includes('Подія 3') && second.includes('Подія 4'), second.slice(0, 400));
       assert.ok(!second.includes('Подія 1') && !second.includes('Подія 2'), 'nothing is shown twice');
-      assert.ok(second.includes('📥 Показати ще 1'), second.slice(0, 600));
+      assert.ok(second.includes('📋 Показати списком (ще 1)'), second.slice(0, 600));
     });
   });
 
-  it('takes the button away with the last page, and forgets the stash', async () => {
+  it('takes the button away with the last page, and keeps only what ← Назад needs', async () => {
     await withTestStore(async (store) => {
       await seed(store, '3502', 3, 3);
       const out = await tapMore(store, '3502');
       assert.ok(out.includes('Подія 3'), out.slice(0, 400));
       assert.ok(out.includes('edit 42'), 'the header is redrawn');
-      assert.ok(!out.includes('Показати ще'), 'the last page leaves no button behind');
-      assert.equal(await store.getPage('more:3502:42'), null, 'the stash is cleaned up, not left to expire');
+      assert.ok(!out.includes('Показати списком'), 'the last page leaves no button behind');
+
+      // nothing is left to hand out, but the walk back still has to work; the
+      // stash expires on its own within the hour either way
+      const page = await store.getPage('more:3502:42');
+      assert.deepEqual(page?.rest, [], 'nothing left to show');
+      assert.deepEqual(page?.seen.map((i) => i.title), ['Подія 1', 'Подія 2'], 'the walked-past ones stay for ← Назад');
     });
   });
 
@@ -3401,6 +3442,243 @@ describe('config', () => {
     } finally {
       writeFileSync(process.env['EVENTS_FINDER_PREFS']!, original);
     }
+  });
+});
+
+/* ------------------------------------------------- the conversation, part 2 --- */
+
+describe('welcome, saved events and the guided search', () => {
+  /** Capture what a tap on an inline button produces. */
+  async function press(
+    store: StoreType,
+    chatId: string,
+    data: string,
+    message: Record<string, unknown> = {},
+  ): Promise<string> {
+    return captureOutput(() =>
+      handleCallback({ store, log, dryRun: true }, {
+        id: 'cb',
+        data,
+        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' }, ...message },
+        from: { id: Number(chatId) },
+      } as never),
+    );
+  }
+
+  const gig = (n = 1) =>
+    makeItem({
+      city: 'kharkiv',
+      title: `Збережена подія ${n}`,
+      url: `https://s/${n}`,
+      source: 's',
+      category: 'standup',
+      startsAt: `2026-11-0${n}T19:00:00+02:00`,
+      description: 'Камерний стендап у підвалі, двадцять хвилин на кожного.',
+      venue: 'Підвал',
+    })!;
+
+  it('welcomes a returning user with the four quick actions', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3601', city: 'kharkiv' });
+      const hello = await say(store, '3601', '/start');
+      for (const data of ['go:weekend', 'go:near', 'go:saved', 'go:find', 'go:settings']) {
+        assert.ok(hello.includes(`(${data})`), `${data} is missing from the welcome: ${hello.slice(0, 500)}`);
+      }
+      assert.ok(hello.includes('Знайдімо'), hello.slice(0, 300));
+    });
+  });
+
+  it('suggests the closest command instead of just shrugging', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3602', city: 'kharkiv' });
+      const typo = await say(store, '3602', '/savd');
+      assert.ok(typo.includes('/saved'), typo.slice(0, 300));
+      const nonsense = await say(store, '3602', '/qqqqqqq');
+      assert.ok(nonsense.includes('Не знаю команди'), nonsense.slice(0, 200));
+      assert.ok(!nonsense.includes('Можливо'), 'nothing is close, so nothing is suggested');
+    });
+  });
+
+  it('saves an event from its card, lists it, and unsaves it on a second tap', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3603', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3603', 42, [item]);
+
+      const empty = await say(store, '3603', '/saved');
+      assert.ok(empty.includes('Поки порожньо'), empty.slice(0, 300));
+
+      const saved = await press(store, '3603', `ev:s:${item.id}`);
+      assert.equal((await store.listSaved('3603')).length, 1);
+      assert.ok(saved.includes('edit 42'), 'the card is redrawn, not reposted');
+      assert.ok(saved.includes('🔖 Збережено'), saved.slice(0, 400));
+
+      const list = await say(store, '3603', '/saved');
+      assert.ok(list.includes('Збережена подія 1'), list.slice(0, 400));
+      assert.equal(
+        (await store.decideSend('3603', item)).send,
+        true,
+        'a bookmark must not count as a delivery, or the digest would stop showing it',
+      );
+
+      await press(store, '3603', `ev:s:${item.id}`);
+      assert.equal((await store.listSaved('3603')).length, 0);
+    });
+  });
+
+  it('edits a photo card as a caption, never as text', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3604', city: 'kharkiv' });
+      const item = { ...gig(2), image: 'https://pics/poster.jpg' };
+      await store.recordMessage('3604', 42, [item]);
+      const out = await press(store, '3604', `ev:s:${item.id}`, { photo: [{ file_id: 'abc' }] });
+      assert.ok(out.includes('caption edit 42'), out.slice(0, 300));
+    });
+  });
+
+  it('opens the details of an event and comes back to the card', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3605', city: 'kharkiv' });
+      const item = gig(3);
+      await store.recordMessage('3605', 42, [item]);
+
+      const details = await press(store, '3605', `ev:i:${item.id}`);
+      assert.ok(details.includes('Підвал') && details.includes('підвалі'), details.slice(0, 500));
+      assert.ok(details.includes('До картки'), 'there has to be a way back');
+      assert.ok(details.includes('Квитки') || details.includes('https://s/3'), 'the source link is the point');
+
+      const back = await press(store, '3605', `ev:b:${item.id}`);
+      assert.ok(back.includes('Деталі'), back.slice(0, 400));
+    });
+  });
+
+  it('says so honestly when there is nothing left to walk into', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3606', city: 'kharkiv' });
+      const item = gig(4);
+      await store.recordMessage('3606', 42, [item]);
+
+      // no stash at all: that answer is gone, and saying "останній" would be
+      // claiming to know something about a list we no longer have
+      const gone = await press(store, '3606', `ev:n:${item.id}`);
+      assert.ok(gone.includes('застарів'), gone.slice(0, 300));
+
+      // a stash that is simply exhausted knows exactly where it stands
+      const query = parseRequest('', { prefs, base: '2026-10-20', from: '2026-11-01', to: '2026-11-30' });
+      await store.putPage('more:3606:7', { header: '🗓 Харків', title: '🗓 Харків', query, rest: [], seen: [gig(3)], size: 5 }, 3600);
+      await store.setState('lastpage:3606', '7');
+      const last = await press(store, '3606', `ev:n:${item.id}`);
+      assert.ok(last.includes('останній'), last.slice(0, 300));
+
+      const first = await press(store, '3606', `ev:p:${gig(3).id}`);
+      assert.ok(first.includes('Збережена подія 3'), 'back steps into what was walked past');
+    });
+  });
+
+  it('hands out exactly one more event when "Далі →" has a stash behind it', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3607', city: 'kharkiv' });
+      const shown = gig(5);
+      const rest = [gig(6), gig(7)];
+      await store.recordMessage('3607', 42, [shown]);
+      const query = parseRequest('', { prefs, base: '2026-10-20', from: '2026-11-01', to: '2026-11-30' });
+      await store.putPage('more:3607:7', { header: '🗓 Харків', title: '🗓 Харків', query, rest, size: 5 }, 3600);
+      await store.setState('lastpage:3607', '7');
+
+      const out = await press(store, '3607', `ev:n:${shown.id}`);
+      assert.ok(out.includes('Збережена подія 6'), out.slice(0, 400));
+      assert.ok(!out.includes('Збережена подія 7'), 'one at a time — that is what "Далі" means');
+    });
+  });
+
+  /** Park an answer's tail where the cursor will look for it. */
+  const parkPage = async (
+    store: StoreType,
+    chatId: string,
+    page: { rest: Item[]; seen?: Item[] },
+  ): Promise<void> => {
+    const query = parseRequest('', { prefs, base: '2026-10-20', from: '2026-11-01', to: '2026-11-30' });
+    await store.putPage(
+      `more:${chatId}:7`,
+      { header: '🗓 Харків', title: '🗓 Харків', query, rest: page.rest, seen: page.seen ?? [], size: 10 },
+      3600,
+    );
+    await store.setState(`lastpage:${chatId}`, '7');
+  };
+
+  it('replaces the card in place instead of sending another one', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3610', city: 'kharkiv' });
+      const shown = gig(1);
+      const next = gig(2);
+      await store.recordMessage('3610', 42, [shown]);
+      await parkPage(store, '3610', { rest: [next] });
+
+      const out = await press(store, '3610', `ev:n:${shown.id}`);
+      assert.ok(out.includes('edit 42'), `the card is rewritten: ${out.slice(0, 400)}`);
+      assert.ok(!out.includes('──────── to chat 3610'), 'nothing new is sent into the chat');
+      assert.ok(out.includes('Збережена подія 2'), out.slice(0, 400));
+      // what the message resolves to has to follow what it shows
+      assert.equal((await store.itemsForMessage('3610', 42))[0]?.id, next.id);
+      assert.ok(out.includes('← Назад (1)'), 'the way back appears as soon as there is one');
+    });
+  });
+
+  it('swaps the poster when both cards have one, and never edits across the media line', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3611', city: 'kharkiv' });
+      const withPoster = { ...gig(1), image: 'https://pics/a.jpg' };
+      const alsoPoster = { ...gig(2), image: 'https://pics/b.jpg' };
+      const noPoster = gig(3);
+      await store.recordMessage('3611', 42, [withPoster]);
+      await parkPage(store, '3611', { rest: [alsoPoster, noPoster] });
+
+      const swap = await press(store, '3611', `ev:n:${withPoster.id}`, { photo: [{ file_id: 'x' }] });
+      assert.ok(swap.includes('edit media 42') && swap.includes('https://pics/b.jpg'), swap.slice(0, 400));
+
+      // photo card → event without a poster: Telegram cannot turn a photo
+      // message into a text one, so the card is re-sent and taken back
+      const cross = await press(store, '3611', `ev:n:${alsoPoster.id}`, { photo: [{ file_id: 'x' }] });
+      assert.ok(cross.includes('Збережена подія 3'), cross.slice(0, 400));
+      assert.ok(cross.includes('delete 42'), 'the old card goes, so one card is left');
+      assert.ok(!cross.includes('edit media 42'), cross.slice(0, 400));
+    });
+  });
+
+  it('steps back into what was already walked past', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3612', city: 'kharkiv' });
+      const current = gig(2);
+      const previous = gig(1);
+      await store.recordMessage('3612', 42, [current]);
+      await parkPage(store, '3612', { rest: [gig(3)], seen: [previous] });
+
+      const back = await press(store, '3612', `ev:p:${current.id}`);
+      assert.ok(back.includes('Збережена подія 1'), back.slice(0, 400));
+      assert.ok(back.includes('Далі → (2)'), 'the one we stepped off goes back on the pile');
+      assert.ok(!back.includes('← Назад'), 'there is nothing behind the first one');
+      assert.equal((await store.itemsForMessage('3612', 42))[0]?.id, previous.id);
+    });
+  });
+
+  it('walks the guided search from categories to a period, and can be cancelled', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3608', city: 'kharkiv' });
+      const opened = await say(store, '3608', '/find');
+      assert.ok(opened.includes('Що шукаємо'), opened.slice(0, 300));
+      assert.ok(opened.includes('(find:cat:standup)'), opened.slice(0, 600));
+
+      const picked = await press(store, '3608', 'find:cat:standup');
+      assert.ok(picked.includes('✅ 🎤 стендап'), picked.slice(0, 600));
+      assert.deepEqual(JSON.parse((await store.getState('find:3608')) ?? '{}').cats, ['standup']);
+
+      const when = await press(store, '3608', 'find:when');
+      assert.ok(when.includes('Коли?') && when.includes('(find:run:weekend)'), when.slice(0, 500));
+
+      const cancelled = await press(store, '3608', 'find:cancel');
+      assert.ok(cancelled.includes('скасував'), cancelled.slice(0, 300));
+      assert.equal(await store.getState('find:3608'), '');
+    });
   });
 });
 
