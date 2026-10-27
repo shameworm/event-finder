@@ -14,7 +14,7 @@ user, so a hundred subscribers cost one crawl.
 
 **The bot speaks Ukrainian only.** Every string a user reads — the command menu,
 the settings panel, digests, reminders, prices and date labels — is Ukrainian;
-logs, CLI output and `/stats` stay English, because they are for whoever runs
+logs, CLI output, `/stats` and `/broadcast` stay English, because they are for whoever runs
 it. The copy sits next to the code that sends it, not in a catalogue: there is
 one language, so a lookup layer would buy nothing. Day names come from
 `locale: uk-UA` in config.yaml and city names from each city's `label`.
@@ -59,7 +59,10 @@ What users can send it: `/start` (the walkthrough — see below), `/find` (the
 guided search), `/week`, `/weekend`, `/today`, `/tomorrow`, `/near`, `/places`,
 `/saved`, `/city`, `/prefs`, `/setup`, `/settings`,
 `/mute week|weekend|follows|places`, `/unmute`, `/reminders`, `/follow X`,
-`/unfollow X`, `/stop`, `/help`, and `/stats` (owner only).
+`/unfollow X`, `/stop`, `/help`, `/feedback <text>` (stored in the `feedback`
+table and forwarded to the owner), and — owner only, invisible to everybody
+else — `/stats` and `/broadcast <message>`, which previews and asks before it
+announces anything to every user.
 Anything else is treated as a preference change if it reads like one, otherwise
 as a search.
 

@@ -7,7 +7,7 @@
  */
 import { z } from 'zod';
 import type { Item, Kind } from './types.ts';
-import { SEARCH_PAGE_TTL_SECONDS, lastPageKey, pageKey, type OptIn, type Store } from './db.ts';
+import { SEARCH_PAGE_TTL_SECONDS, lastPageKey, pageKey, type FeedbackRow, type Gesture, type Job, type Metrics, type OptIn, type Store } from './db.ts';
 import type { Logger } from './log.ts';
 import type { TgCallbackQuery, TgMessage, TgReactionUpdate } from './schemas.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
@@ -29,7 +29,7 @@ import { collectCity } from './cache.ts';
 import { ALL_SOURCE_NAMES } from './pipeline.ts';
 import { describeHealth, readAllHealth } from './health.ts';
 import { rank } from './rank.ts';
-import { deliver } from './deliver.ts';
+import { deliver, sendToUser } from './deliver.ts';
 import {
   countEvents,
   countEventsAcc,
@@ -44,9 +44,9 @@ import {
   WALK_HINT,
   type CardState,
 } from './render.ts';
-import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
+import { getUser, isOwner, ownerChatId, registerUser, saveUserPrefs, type BotUser } from './users.ts';
 import { DIGEST_DAYS, DIGEST_HOURS, describeSchedule, hourLabel, toggleDay } from './schedule.ts';
-import { WORD_END, addDays, normText, today } from './util.ts';
+import { WORD_END, addDays, normText, sleep, today } from './util.ts';
 
 export interface HandlerContext {
   store: Store;
@@ -59,7 +59,9 @@ export interface HandlerContext {
  * what sits behind the ☰ menu button. `scripts/bot.ts` uploads it on start-up.
  *
  * Commands that only make sense with an argument (/mute, /follow) or that
- * belong to the operator (/stats) stay out of the menu — they still work.
+ * belong to the operator (/stats, /broadcast) stay out of the menu — they
+ * still work. /feedback is in it on purpose: a channel nobody can find is not
+ * a channel.
  */
 export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: 'week', description: '🗓 Усе на цьому тижні' },
@@ -74,6 +76,7 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: 'city', description: '🏙 Змінити місто' },
   { command: 'prefs', description: '🎛 Що я думаю про твої смаки' },
   { command: 'reminders', description: '⏰ Твої нагадування' },
+  { command: 'feedback', description: '✍️ Написати мені — що зламалось, чого бракує' },
   { command: 'help', description: '❔ Що я вмію' },
   { command: 'stop', description: '🔕 Відписатися' },
 ];
@@ -102,6 +105,7 @@ const COMMANDS = `<b>Що я вмію</b>
 /city — змінити місто
 /prefs — що я думаю про твої смаки
 /reminders — твої нагадування ⏰
+/feedback — написати мені: що зламалось, чого бракує, які події я пропускаю
 /stop — відписатися
 
 Або просто скажи, чого хочеться:
@@ -123,6 +127,13 @@ const COMMANDS = `<b>Що я вмію</b>
 
 Тапни ❤️ на події — і я нагадаю за добу та за три години до початку, а ще
 запамʼятаю, що таке тобі заходить. Знімеш ❤️ — скасую нагадування.`;
+
+/**
+ * What a non-owner hears when they try an operator command. One string,
+ * because /stats and /broadcast must be indistinguishable from each other:
+ * anything more specific would tell a stranger which of them exists.
+ */
+const OWNER_ONLY = 'Ця команда — для власника бота.';
 
 /* ------------------------------------------------------------- utilities --- */
 
@@ -876,6 +887,10 @@ export async function answerSearch(
   }
 
   const ranked = rank(collected, { query, prefs: user.prefs, tz: cfg.timezone });
+  // how often there was not enough of this person's thing on — per city too,
+  // but only when the answer was about exactly one and the number means
+  // something about that city rather than about a handful of them at once
+  await ctx.store.recordRank(ranked.toppedUp, query.cities.length === 1 ? query.cities[0] : undefined);
   // One card goes out, the rest waits. Forty events is forty notifications and
   // a chat nobody can scroll back through; "Далі →" under the card hands them
   // over one at a time, and the header's "показати ще" still gives a batch to
@@ -935,6 +950,9 @@ export async function answerSearch(
       ttlSeconds: SEARCH_PAGE_TTL_SECONDS,
     });
     await ctx.store.setState(lastPageKey(user.chatId), String(outcome.headerMessageId));
+    // an answer with a tail is one that *could* be paged: the denominator of
+    // "do people page?", which is meaningless against answers that fitted
+    await ctx.store.recordStash();
   }
 
   if (failed.length && !outcome.chatGone) {
@@ -985,7 +1003,9 @@ async function showMore(
   }
 
   // "Далі →" under a card asks for one event; "показати ще" on the header asks
-  // for a whole page of them
+  // for a whole page of them — counted apart, because the point of the card
+  // cursor is whether people walk it rather than fall back to a list
+  await ctx.store.recordBatch();
   const step = opts.limit ?? page.size;
   const batch = page.rest.slice(0, step);
   const rest = page.rest.slice(step);
@@ -1129,6 +1149,137 @@ async function showSaved(ctx: HandlerContext, user: BotUser, reply: Reply): Prom
   });
 }
 
+/* ----------------------------------------------------------- the operator --- */
+
+/**
+ * Where an owner's unsent announcement waits for its confirm tap.
+ *
+ * The draft cannot ride in the callback_data: Telegram caps that at 64 bytes,
+ * and an announcement is prose. So it goes in `state` and the button only has
+ * to say "yes".
+ */
+const broadcastKey = (chatId: string) => `broadcast:${chatId}`;
+
+/**
+ * /stats, in English, as whoever runs the bot reads it.
+ *
+ * The row counts say how big the thing is. The four blocks under them
+ * say whether it works: whether people walk an answer or abandon it, what
+ * comes back per job, how much of what goes out is ever touched at all, and
+ * how often the ranker runs out of this person's kind of thing. All of it is
+ * counters — see `Store.bump`.
+ */
+function statsReport(rows: Record<string, number>, m: Metrics): string {
+  const pad = (s: string, n: number) => s.padEnd(n);
+  const block = (lines: string[]) => `<code>${lines.join('\n')}</code>`;
+
+  return [
+    '<b>Bot stats</b>',
+    block(Object.entries(rows).map(([k, v]) => `${pad(`${k}:`, 14)}${v}`)),
+    '',
+    '<b>Do people page?</b>',
+    block([
+      `${pad('answers with a tail:', 24)}${m.paging.answers}`,
+      `${pad('walked at least once:', 24)}${m.paging.paged} (${m.paging.share}%)`,
+      `${pad('"Далі →" taps:', 24)}${m.paging.steps}`,
+      `${pad('average depth:', 24)}${m.paging.depth}`,
+      `${pad('asked for the list:', 24)}${m.paging.batches}`,
+    ]),
+    '',
+    '<b>Reactions per job</b>',
+    block([
+      `${pad('job', 9)}${pad('sent', 7)}❤️  👎  🔖  ⏰`,
+      ...m.jobs.map(
+        (j) => `${pad(j.job, 9)}${pad(String(j.sent), 7)}${pad(String(j.heart), 4)}${pad(String(j.down), 4)}${pad(String(j.save), 4)}${j.remind}`,
+      ),
+    ]),
+    '',
+    '<b>Sent events that got any gesture</b>',
+    block([`${m.coverage.gestured}/${m.coverage.sent} (${m.coverage.share}%)`]),
+    '',
+    '<b>How often rank() pads the list</b>',
+    block([
+      `${m.padding.padded}/${m.padding.calls} answers (${m.padding.share}%), ${m.padding.topups} event(s) added`,
+      ...m.padding.cities.map((c) => `${pad(c.city, 12)}${c.padded}/${c.calls}`),
+    ]),
+  ].join('\n');
+}
+
+/**
+ * The owner's side of /feedback: the newest of what people have written.
+ *
+ * This is why the table exists. The live copy goes to the owner's chat the
+ * moment somebody sends it, and a message in a chat is lost the moment you
+ * scroll past it — so the stored one has to be readable, or storing it was
+ * write-only bookkeeping.
+ */
+function feedbackInbox(rows: FeedbackRow[], total: number): string {
+  if (rows.length === 0) return '<b>Feedback</b> — nothing yet.';
+  return (
+    `<b>Feedback</b> — newest ${rows.length} of ${total}\n\n` +
+    rows
+      .map(
+        (r) =>
+          `<code>${r.created_at.slice(0, 16).replace('T', ' ')} · ${escapeHtml(r.chat_id)}` +
+          `${r.username ? ` @${escapeHtml(r.username)}` : ''}</code>\n${escapeHtml(r.text)}`,
+      )
+      .join('\n\n')
+  );
+}
+
+/**
+ * The second half of /broadcast: the tap on the confirm button.
+ *
+ * Sending is the irreversible part, so the draft is cleared *before* the first
+ * send rather than after the last one — a second tap while this is still
+ * working through a few hundred chats would otherwise announce the same thing
+ * twice. The pacing is `bot.send_delay_ms`, the same pause a digest fan-out
+ * takes between users, and a chat Telegram says is gone is marked blocked by
+ * the same code path a digest uses (`sendToUser`) rather than a second one
+ * written here.
+ */
+async function broadcast(
+  ctx: HandlerContext,
+  chatId: string,
+  verb: string,
+  draw: (screen: { text: string; inlineKeyboard: InlineButton[][] }, inPlace?: boolean) => Promise<void>,
+  reply: Reply,
+): Promise<void> {
+  if (!isOwner(chatId)) return reply(OWNER_ONLY);
+  const key = broadcastKey(chatId);
+  const body = await ctx.store.getState(key);
+
+  if (verb === 'cancel') {
+    await ctx.store.setState(key, '');
+    return draw({ text: '<b>Broadcast cancelled</b> — nothing was sent.', inlineKeyboard: [] });
+  }
+  if (verb !== 'send') return;
+  if (!body) {
+    return draw({ text: '<b>Broadcast</b> — that draft is gone. Send /broadcast again.', inlineKeyboard: [] });
+  }
+
+  await ctx.store.setState(key, '');
+  const audience = await ctx.store.listUsers();
+  await draw({ text: `<b>Broadcasting</b> to ${audience.length}…`, inlineKeyboard: [] });
+
+  const cfg = loadConfig();
+  let delivered = 0;
+  const gone: string[] = [];
+  for (const [i, row] of audience.entries()) {
+    if (i > 0 && !ctx.dryRun && cfg.bot.send_delay_ms) await sleep(cfg.bot.send_delay_ms);
+    if (await sendToUser(body, { chatId: row.chat_id, log: ctx.log, store: ctx.store, dryRun: ctx.dryRun })) delivered++;
+    else gone.push(row.chat_id);
+  }
+  ctx.log.info(`broadcast: ${delivered} delivered, ${gone.length} chat(s) gone of ${audience.length}`);
+
+  return reply(
+    `<b>Broadcast done</b>\n` +
+      `<code>delivered:  ${delivered}\nfell off:   ${gone.length}\naudience:   ${audience.length}</code>` +
+      (gone.length ? `\nMarked blocked: <code>${escapeHtml(gone.join(', '))}</code>` : '') +
+      (ctx.dryRun ? '\n(dry run — nothing left this machine)' : ''),
+  );
+}
+
 /* ------------------------------------------------------------- the router --- */
 
 export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promise<void> {
@@ -1269,20 +1420,99 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
       return reply(`✅ ${escapeHtml(edit.changes.join('; '))}`);
     }
 
+    case '/feedback': {
+      const said = text.slice(command.length).trim();
+      // the owner never needs to write to themselves, so a bare /feedback is
+      // the one place the stored copy can be read back
+      if (!said && isOwner(chatId)) {
+        return reply(feedbackInbox(await ctx.store.listFeedback(10), (await ctx.store.stats())['feedback'] ?? 0));
+      }
+      if (!said) {
+        return reply(
+          'Напиши все одним повідомленням разом із командою, наприклад:\n' +
+            '<code>/feedback «Далі →» показує ту саму подію двічі</code>\n\n' +
+            'Мені цікаво все: що зламалось, чого бракує, які події я пропускаю.',
+        );
+      }
+      // the same hourly buckets that hold /search back, in their own counter:
+      // sharing one would mean a bug report costs somebody a search
+      const limit = await ctx.store.hitRateLimit(chatId, cfg.bot.feedback_per_hour, 'feedback');
+      if (!limit.allowed) {
+        return reply(
+          `Ти написав(ла) мені ${limit.used} ${limit.used > 4 ? 'разів' : 'рази'} за цю годину — більше поки не приймаю, ` +
+            `щоб не загубити те, що вже є. Напиши трохи пізніше, я нікуди не подінусь.`,
+        );
+      }
+      // stored first: the owner's chat being unreachable must not be what
+      // loses somebody's bug report
+      await ctx.store.addFeedback({ chatId, username: msg.from?.username ?? null, text: said });
+      const owner = ownerChatId();
+      if (owner) {
+        try {
+          await sendMessage(
+            `<b>Feedback</b> from <code>${escapeHtml(chatId)}</code>` +
+              `${msg.from?.username ? ` (@${escapeHtml(msg.from.username)})` : ''}\n\n${escapeHtml(said)}`,
+            { chatId: owner, dryRun: ctx.dryRun, log: ctx.log },
+          );
+        } catch (err) {
+          ctx.log.error(`could not pass feedback from ${chatId} to the owner: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      ctx.log.info(`feedback from ${chatId}: ${said.slice(0, 120)}`);
+      return reply('🙏 Дякую — записав і передав. Якщо знадобляться деталі, напишу сюди ж.');
+    }
+
     case '/stats': {
-      if (!isOwner(chatId)) return reply('Ця команда — для власника бота.');
-      const s = await ctx.store.stats();
+      if (!isOwner(chatId)) return reply(OWNER_ONLY);
       // a scraper that quietly stopped matching its site is invisible in the
       // row counts — the only sign is the last time it brought anything back
       const health = describeHealth(await readAllHealth(ctx.store, ALL_SOURCE_NAMES));
       return reply(
-        `<b>Bot stats</b>\n<code>` +
-          Object.entries(s)
-            .map(([k, v]) => `${k}: ${v}`)
-            .join('\n') +
-          `</code>\n\n<b>Sources</b>\n<code>` +
-          health.map((line) => escapeHtml(line)).join('\n') +
-          `</code>`,
+        `${statsReport(await ctx.store.stats(), await ctx.store.metrics())}\n\n` +
+          `<b>Sources</b>\n<code>${health.map((line) => escapeHtml(line)).join('\n')}</code>`,
+      );
+    }
+
+    /**
+     * Announce something to everybody. Owner only, and invisible to everyone
+     * else in exactly the way /stats is.
+     *
+     * Nothing is sent by this command: it previews and asks. The preview is
+     * the announcement itself, sent to the owner as the audience will see it,
+     * which also means a malformed tag fails here — once, to one person —
+     * instead of failing identically for every user on the list.
+     */
+    case '/broadcast': {
+      if (!isOwner(chatId)) return reply(OWNER_ONLY);
+      const body = text.slice(command.length).trim();
+      if (!body) {
+        return reply(
+          'Usage: <code>/broadcast &lt;message&gt;</code>\n' +
+            'HTML is allowed. You get a preview and a confirm button; nothing is sent until you tap it.',
+        );
+      }
+      const audience = await ctx.store.listUsers();
+      if (audience.length === 0) return reply('Nobody to broadcast to yet.');
+      try {
+        await sendMessage(body, { chatId, dryRun: ctx.dryRun, log: ctx.log });
+      } catch (err) {
+        if (err instanceof TelegramError) {
+          return reply(`Telegram would not take that: <code>${escapeHtml(err.description ?? err.message)}</code>. Nothing was sent.`);
+        }
+        throw err;
+      }
+      await ctx.store.setState(broadcastKey(chatId), body);
+      return reply(
+        `<b>Broadcast preview</b> ↑\nThat is what ${audience.length} user(s) would get, one message each, ` +
+          `paced ${cfg.bot.send_delay_ms}ms apart. This cannot be taken back.`,
+        {
+          inlineKeyboard: [
+            [
+              { text: `✅ Send to ${audience.length}`, callback_data: 'bc:send' },
+              { text: '✖️ Cancel', callback_data: 'bc:cancel' },
+            ],
+          ],
+        },
       );
     }
   }
@@ -1338,6 +1568,8 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
  *                 find:clear · find:when · find:run:<period> · find:cancel
  *   more          the next page of an answer, from the stash behind its
  *                 header; which answer comes from the message it is on
+ *   bc:send · bc:cancel   the confirmation under a /broadcast preview; owner
+ *                 only, and the draft itself waits in `state`, not in here
  *   ev:<verb>:<item id>  a button under an event card — ev:i opens its
  *                 details and ev:b comes back, ev:s bookmarks it and teaches
  *                 the taste model, ev:n hands out one more from the stash,
@@ -1398,6 +1630,8 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
   }
 
   if (kind === 'more') return showMore(ctx, user, messageId, cq.message?.text, reply);
+
+  if (kind === 'bc') return broadcast(ctx, chatId, arg, draw, reply);
 
   if (kind === 'go') {
     if (arg === 'settings') return drawPanel(false);
@@ -1659,7 +1893,12 @@ async function stepCard(
   // the card you tapped becomes the cursor, wherever in the chat it sits
   const seen = direction === 'next' ? [...page.seen, current] : page.seen.slice(0, -1);
   const rest = direction === 'next' ? page.rest.slice(1) : [current, ...page.rest];
-  await ctx.store.putPage(key, { ...page, seen, rest, cardMessageId: messageId });
+  // "Далі →" is the whole case for handing events over one at a time, so it is
+  // counted — once per tap, and once more as "this answer was walked at all",
+  // which is the number that says whether the 37 in the stash exist for anyone
+  const paged = page.paged || direction === 'next';
+  if (direction === 'next') await ctx.store.recordStep(!page.paged);
+  await ctx.store.putPage(key, { ...page, seen, rest, paged, cardMessageId: messageId });
 
   const state: CardState = {
     saved: await ctx.store.isSaved(chatId, target.id),
@@ -1695,7 +1934,7 @@ async function stepCard(
       await deleteMessage(messageId, { chatId, dryRun: ctx.dryRun, log: ctx.log });
     }
     const landed = outcome.messageIds[0];
-    if (landed !== undefined) await ctx.store.putPage(key, { ...page, seen, rest, cardMessageId: landed });
+    if (landed !== undefined) await ctx.store.putPage(key, { ...page, seen, rest, paged, cardMessageId: landed });
   };
 
   if (messageId === undefined || wantsPhoto !== isPhoto) {
@@ -1796,6 +2035,15 @@ async function handleCardButton(
     });
   }
 
+  /**
+   * Count a tap against the job that put this card here, not against whatever
+   * the person did most recently — the message is what remembers.
+   */
+  const counted = async (gesture: Gesture): Promise<void> => {
+    const job: Job = messageId ? await ctx.store.jobForMessage(chatId, messageId) : 'search';
+    await ctx.store.recordGesture(chatId, item.id, job, gesture);
+  };
+
   /** Where this card sits in the answer it came from, if that is still around. */
   const cursor = async (): Promise<{ left: number; behind: number }> => {
     const pointer = await ctx.store.getState(lastPageKey(chatId));
@@ -1866,6 +2114,7 @@ async function handleCardButton(
         return showCard();
       }
       await ctx.store.saveItem(chatId, item);
+      await counted('save');
       // a 🔖 is the clearest "I want this one" anyone can give us, so the
       // ranker hears it exactly as it hears a ❤️ — minus the reminder. In a
       // group it is still a bookmark and nothing more: see handleReaction.
@@ -1890,6 +2139,7 @@ async function handleCardButton(
 
     case 'no': {
       const unlearned = await learnFromThumbsDown(ctx, user, item);
+      await counted('down');
       ctx.log.info(
         `chat ${chatId} thumbed down "${item.title}"` +
           `${unlearned.tag ? ` (${unlearned.tag} → ${unlearned.score}${unlearned.demoted ? ', demoted' : ''})` : ''}` +
@@ -1909,6 +2159,7 @@ async function handleCardButton(
           return reply(`У «${escapeHtml(item.title)}» ще немає часу початку, тож нагадування не поставлю.`);
         }
         const learned = await learnFromYes(ctx, user, item);
+        await counted('remind');
         ctx.log.info(
           `chat ${chatId} belled "${item.title}" (reminder ${outcome}${learned.tag ? `, learned ${learned.tag}` : ''})`,
         );
@@ -1941,6 +2192,15 @@ async function handleBell(ctx: HandlerContext, msg: TgMessage, chatId: string, i
 
   const outcome = await ctx.store.addReminder(chatId, chosen);
   if (outcome === 'no-date') return `У «${escapeHtml(chosen.title)}» ще немає часу початку.`;
+
+  // a typed 🔔 only names the message when it is a reply to one; otherwise all
+  // we know is that it was the last thing we sent, so it counts as a search
+  await ctx.store.recordGesture(
+    chatId,
+    chosen.id,
+    replyTo ? await ctx.store.jobForMessage(chatId, replyTo) : 'search',
+    'remind',
+  );
 
   const user = await getUser(ctx.store, chatId, ctx.log);
   const learned = user ? await learnFromYes(ctx, user, chosen) : { tag: null, follow: null };
@@ -2015,6 +2275,9 @@ export async function handleReaction(ctx: HandlerContext, update: TgReactionUpda
 
   const outcome = await ctx.store.addReminder(chatId, item);
   if (outcome === 'no-date') return reply(`У «${escapeHtml(item.title)}» ще немає часу початку.`);
+
+  // the strongest signal there is, counted against whatever sent the card
+  await ctx.store.recordGesture(chatId, item.id, await ctx.store.jobForMessage(chatId, update.message_id), 'heart');
 
   // a group has a single row in `users`, so one member's ❤️ would rewrite the
   // taste of everyone else in it. The reminder is the group's either way; the

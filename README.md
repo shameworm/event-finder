@@ -161,7 +161,7 @@ Create `~/.hermes/.env` (shared with your other Hermes skills) or
 | Variable | What it is | Where to get it |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | **the bot** — required | [@BotFather](https://t.me/BotFather) → `/newbot` |
-| `TELEGRAM_CHAT_ID` | your own chat id: owner of `/stats`, default for the CLI | message your bot, then `https://api.telegram.org/bot<TOKEN>/getUpdates` → `message.chat.id` |
+| `TELEGRAM_CHAT_ID` | your own chat id: owner of `/stats` and `/broadcast`, where `/feedback` is forwarded, default for the CLI | message your bot, then `https://api.telegram.org/bot<TOKEN>/getUpdates` → `message.chat.id` |
 | `TELEGRAM_API_ID` | user API, for reading channels (optional) | [my.telegram.org](https://my.telegram.org) → API development tools |
 | `TELEGRAM_API_HASH` | same | same page |
 | `TELEGRAM_SESSION` | your GramJS login (optional) | written by `scripts/tg-login.ts` (§6) |
@@ -182,8 +182,10 @@ Two things are still worth setting in @BotFather by hand:
 The bot replies in Ukrainian and nothing else, so those two lines are Ukrainian
 too. There is one language, so its copy sits next to the code that sends it —
 `src/bot-handlers.ts` for the conversation, `src/render.ts` for events — rather
-than in a catalogue with a lookup layer on top. Logs, CLI output and `/stats`
-stay English: they are for whoever runs the bot.
+than in a catalogue with a lookup layer on top. Logs, CLI output, `/stats` and
+`/broadcast` stay English: they are for whoever runs the bot. `/feedback` is the
+exception on the operator side of that line — the person writing it is a user,
+so it answers in Ukrainian and only the copy that reaches *you* is English.
 
 ## 4. Storage
 
@@ -489,12 +491,53 @@ them. Those fail when we break a parser; they stay green when a live site moves,
 because the committed fixture does not move with it. The two halves together,
 not either alone.
 
+- **`/feedback <text>`** is the channel pointing the other way: open to
+  anyone, Ukrainian, stored in the `feedback` table **and** forwarded to the
+  owner's chat. Stored as well as forwarded on purpose — a message that only
+  ever existed in one chat is lost the moment you scroll past it. Capped at
+  `bot.feedback_per_hour` per person, in its own hourly bucket, so writing in
+  never costs somebody a search. `/feedback` with no text reads the stored copy
+  back — the newest ten — when the owner sends it.
+
+### Running it: `/stats` and `/broadcast`
+
+Both are owner-only (`TELEGRAM_CHAT_ID`), both are invisible otherwise — they
+are not in the published command menu and they answer a stranger with the same
+one line, so neither can be found by guessing.
+
+- **`/broadcast <message>`** announces something to every active user. It never
+  sends on the command: it replies with the announcement itself, exactly as the
+  audience will see it, and a confirm button under it. HTML is allowed, and a
+  malformed tag fails on that preview — once, to you — instead of failing
+  identically for everyone on the list. Confirming paces the sends with
+  `bot.send_delay_ms` and marks any chat Telegram says is gone as blocked, the
+  same way a digest fan-out does, then reports how many landed and how many
+  fell off. `--dry-run` prints instead of sending.
+
+- **`/stats`** reports the table sizes, and then the four things that say
+  whether any of this works:
+
+  | block | the question |
+  |---|---|
+  | Do people page? | how many answers got at least one `Далі →`, and how deep the people who do walk, go. If nobody pages, the 37 events in a stash do not exist. |
+  | Reactions per job | ❤️ / 👎 / 🔖 / ⏰ counted separately for weekly digests, weekend picks, follow alerts, place tips and on-demand searches |
+  | Gesture coverage | the share of sent events that were ever touched at all |
+  | Padding frequency | how often `rank()` had to let off-taste events back in — overall and per city, which is the direct measure of whether a city has anything worth ranking |
+
+  All of it is **counters**, not a log: keys in a `counters` table, incremented
+  in place. A tap costs an increment, never a row, so nothing here grows with
+  use the way `messages` and `deliveries` do (and those are swept by
+  `Store.prune()`). What makes it work is two additive columns — `messages.job`,
+  so a ❤️ three days later is credited to the digest that earned it, and
+  `deliveries.gestures`, which is only ever read as "was this zero" and is what
+  lets coverage count events instead of taps. Ticket links are **not** tracked.
+
 ### Being a good citizen
 
 The source sites are small businesses, not APIs. What keeps this acceptable:
 1.5 s between requests to the same host, one scrape per city per 30 minutes
-shared by all users, 20 searches per user per hour, and 2 pages per source for
-interactive replies. Raising any of those multiplies load on them, not on you.
+shared by all users, 20 searches per user per hour, 5 `/feedback` messages per
+user per hour, and 2 pages per source for interactive replies. Raising any of those multiplies load on them, not on you.
 
 ## 10. Layout
 
