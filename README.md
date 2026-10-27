@@ -81,7 +81,8 @@ bot:
   public: true             # false = only chat ids in `allowlist` may use it
   allowlist: []
   searches_per_hour: 20    # per user — an on-demand search can trigger a scrape
-  max_results: 10
+  cards_at_once: 1         # cards sent straight away; "Далі →" walks the rest
+  max_results: 10          # how many "📋 Показати списком" hands out in one go
   interactive_pages: 2     # pages per source while someone waits for a reply
   send_delay_ms: 60        # pause between users when fanning out a digest
   message_delay_ms: 400    # pause between the messages of one digest
@@ -89,6 +90,16 @@ bot:
 cache:
   ttl_seconds: 1800        # one scrape per city serves everyone for this long
 ```
+
+**An answer is one card you walk through.** A busy weekend can rank forty
+events, and forty messages is forty notifications in a chat nobody can scroll
+back through. So the first card goes out with the header — which counts the
+whole answer, not the card — and everything else waits in the stash behind it.
+**Далі → (37)** and **← Назад (3)** under the card swap the event *on that same
+message*, so the chat holds one card however far you walk. **📋 Показати
+списком** on the header is the opt-in for a batch of `max_results` at a time.
+Nothing is re-scraped or re-ranked by any of it: they all read the tail
+`answerSearch` parked, which lives for an hour.
 
 `message_delay_ms` exists because every event is its own message: a ten-event
 week is eleven sends to the same chat, and Telegram throttles a sustained burst
