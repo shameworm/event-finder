@@ -3685,4 +3685,135 @@ describe('welcome, saved events and the guided search', () => {
   });
 });
 
+/* ----------------------------------------------- 🔖 and the taste model --- */
+
+describe('the bookmark as a taste signal', () => {
+  /** Tap 🔖 under a card; a group chat is a different chat type, nothing more. */
+  async function bookmark(store: StoreType, chatId: string, itemId: string, chatType = 'private'): Promise<string> {
+    return captureOutput(() =>
+      handleCallback({ store, log, dryRun: true }, {
+        id: 'cb',
+        data: `ev:s:${itemId}`,
+        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: chatType } },
+        from: { id: Number(chatId) },
+      } as never),
+    );
+  }
+
+  /** Put a ❤️ on the same message the card went out as. */
+  async function heart(store: StoreType, chatId: string): Promise<string> {
+    return captureOutput(() =>
+      handleReaction(
+        { store, log, dryRun: true },
+        TgReactionUpdateSchema.parse({
+          chat: { id: chatId, type: 'private' },
+          message_id: 42,
+          user: { id: Number(chatId) },
+          old_reaction: [],
+          new_reaction: [{ type: 'emoji', emoji: '❤️' }],
+        }),
+      ),
+    );
+  }
+
+  const gig = () =>
+    makeItem({
+      city: 'kharkiv',
+      title: 'Стендап у підвалі',
+      url: 'https://b/s1',
+      source: 's',
+      category: 'standup',
+      startsAt: '2026-11-01T19:00:00+02:00',
+    })!;
+
+  it('raises the category in the taste model and says what it learned', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3701', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3701', 42, [item]);
+
+      const out = await bookmark(store, '3701', item.id);
+      const user = await getUser(store, '3701');
+      assert.equal(user?.prefs.taste['standup'], 1, 'the strongest "I want this" signal has to reach the ranker');
+      assert.deepEqual(user?.prefs.favourite_categories, ['standup']);
+      assert.ok(out.includes('Запамʼятав'), out.slice(-500));
+      assert.ok(out.includes('стендап'), out.slice(-500));
+      assert.equal((await store.listSaved('3701')).length, 1, 'and it is still a bookmark');
+      assert.equal((await store.listReminders('3701')).length, 0, 'a bookmark is not a reminder');
+    });
+  });
+
+  it('leaves the taste model alone when the 🔖 comes off', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3702', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3702', 42, [item]);
+
+      await bookmark(store, '3702', item.id);
+      await bookmark(store, '3702', item.id);
+      assert.equal((await store.listSaved('3702')).length, 0, 'the bookmark is gone');
+      const user = await getUser(store, '3702');
+      assert.equal(user?.prefs.taste['standup'], 1, 'un-bookmarking means "not relevant", not "I dislike this"');
+      assert.deepEqual(user?.prefs.favourite_categories, ['standup']);
+      assert.deepEqual(user?.prefs.disliked_categories, []);
+    });
+  });
+
+  it('scores the category once when a ❤️ and a 🔖 land on the same event', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3703', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3703', 42, [item]);
+
+      await heart(store, '3703');
+      await bookmark(store, '3703', item.id);
+
+      assert.equal((await getUser(store, '3703'))?.prefs.taste['standup'], 1, 'one event, one point');
+      assert.equal((await store.listReminders('3703')).length, 1, 'the ❤️ still set the reminder');
+      assert.equal((await store.listSaved('3703')).length, 1);
+    });
+  });
+
+  it('scores it once in the other order too', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3704', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('3704', 42, [item]);
+
+      await bookmark(store, '3704', item.id);
+      await heart(store, '3704');
+
+      assert.equal((await getUser(store, '3704'))?.prefs.taste['standup'], 1, 'one event, one point');
+      assert.equal((await store.listReminders('3704')).length, 1, 'the ❤️ still set the reminder');
+    });
+  });
+
+  it('bookmarks in a group chat and learns nothing from it', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '-3705', city: 'kharkiv' });
+      const item = gig();
+      await store.recordMessage('-3705', 42, [item]);
+
+      const out = await bookmark(store, '-3705', item.id, 'supergroup');
+      assert.equal((await store.listSaved('-3705')).length, 1, 'a group can still keep a bookmark');
+      const user = await getUser(store, '-3705');
+      assert.deepEqual(user?.prefs.taste, {}, 'one member must not rewrite the taste of the whole group');
+      assert.deepEqual(user?.prefs.favourite_categories, []);
+      assert.ok(!out.includes('Запамʼятав'), out.slice(-500));
+    });
+  });
+
+  it('lifts a tally that 👎 pushed below zero', async () => {
+    await withTestStore(async (store) => {
+      const { user } = await registerUser(store, { chatId: '3706', city: 'kharkiv' });
+      await saveUserPrefs(store, user, { ...user.prefs, taste: { standup: -2 } });
+      const item = gig();
+      await store.recordMessage('3706', 42, [item]);
+
+      await bookmark(store, '3706', item.id);
+      assert.equal((await getUser(store, '3706'))?.prefs.taste['standup'], -1, 'a tally below zero still counts up');
+    });
+  });
+});
+
 await run();
