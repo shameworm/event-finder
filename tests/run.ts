@@ -2069,6 +2069,9 @@ describe('fanout', () => {
         log,
         optIn: 'weekend_digest',
         window,
+        // the fixed clock its siblings use: without it the real date decides
+        // whether anyone is due, and this test is about the failure, not the hour
+        now: noon,
         onlyChats: ['2301', '2302', '2303'],
         dryRun: true,
         title: () => 'Weekend',
