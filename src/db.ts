@@ -189,6 +189,17 @@ async function bootstrap(d: Driver): Promise<void> {
   await d.run(sql`CREATE INDEX IF NOT EXISTS idx_rem_start ON ${t.reminders} (starts_at)`);
   await d.run(sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_rem_chat_item ON ${t.reminders} (chat_id, item_id)`);
 
+  await d.run(sql`CREATE TABLE IF NOT EXISTS ${t.saved} (
+    chat_id    text NOT NULL,
+    item_id    text NOT NULL,
+    title      text NOT NULL,
+    starts_at  text,
+    payload    text NOT NULL,
+    created_at text NOT NULL,
+    PRIMARY KEY (chat_id, item_id)
+  )`);
+  await d.run(sql`CREATE INDEX IF NOT EXISTS idx_saved_chat ON ${t.saved} (chat_id)`);
+
   await d.run(sql`CREATE TABLE IF NOT EXISTS ${t.scrapeCache} (
     key        text PRIMARY KEY,
     payload    text NOT NULL,
@@ -302,10 +313,19 @@ export const PendingPageSchema = z.object({
   query: QuerySchema,
   /** Ranked, in order, none of them shown yet. */
   rest: z.array(ItemSchema),
+  /**
+   * The ones already walked past, oldest first — what "← Назад" steps back
+   * into. Defaulted, so a stash parked before the cursor existed still parses.
+   */
+  seen: z.array(ItemSchema).default([]),
+  /** The message the cursor is currently drawn on, when there is one. */
+  cardMessageId: z.number().int().optional(),
   /** How many to hand out per tap — the same page size the first answer used. */
   size: z.number().int().positive(),
 });
 export type PendingPage = z.infer<typeof PendingPageSchema>;
+/** What a caller has to supply; the defaulted fields may be left out. */
+export type PendingPageInput = z.input<typeof PendingPageSchema>;
 
 function itemsFromPayload(payload: unknown): Item[] {
   if (typeof payload !== 'string' || !payload) return [];
@@ -641,6 +661,51 @@ export class Store {
     );
   }
 
+  /* -------------------------------------------------------- saved events --- */
+
+  /**
+   * Bookmark one event. The whole item is kept, not a reference into the
+   * scrape cache: that cache is thirty minutes deep, and a bookmark is for
+   * next month.
+   */
+  async saveItem(chatId: string, item: Item): Promise<'added' | 'exists'> {
+    const t = this.d.schema;
+    const already = await this.isSaved(chatId, item.id);
+    const payload = JSON.stringify(item);
+    await this.d.run(sql`
+      INSERT INTO ${t.saved} (chat_id, item_id, title, starts_at, payload, created_at)
+      VALUES (${chatId}, ${item.id}, ${item.title}, ${item.startsAt ?? null}, ${payload}, ${nowIso()})
+      ON CONFLICT (chat_id, item_id) DO UPDATE SET
+        title     = ${item.title},
+        starts_at = ${item.startsAt ?? null},
+        payload   = ${payload}
+    `);
+    return already ? 'exists' : 'added';
+  }
+
+  async unsaveItem(chatId: string, itemId: string): Promise<void> {
+    await this.d.run(sql`DELETE FROM ${this.d.schema.saved} WHERE chat_id = ${chatId} AND item_id = ${itemId}`);
+  }
+
+  async isSaved(chatId: string, itemId: string): Promise<boolean> {
+    const rows = await this.d.all(
+      sql`SELECT item_id FROM ${this.d.schema.saved} WHERE chat_id = ${chatId} AND item_id = ${itemId}`,
+    );
+    return rows.length > 0;
+  }
+
+  /**
+   * Everything this person bookmarked, soonest first — events whose date has
+   * passed last, since a bookmark is not a reminder and nobody asked us to
+   * throw theirs away.
+   */
+  async listSaved(chatId: string): Promise<Item[]> {
+    const rows = await this.d.all(
+      sql`SELECT payload FROM ${this.d.schema.saved} WHERE chat_id = ${chatId} ORDER BY starts_at IS NULL, starts_at, created_at`,
+    );
+    return rows.flatMap((r) => itemsFromPayload(r['payload']));
+  }
+
   /* -------------------------------------------------------- scrape cache --- */
 
   /** Cached items for a city/window/source key, or null when stale or absent. */
@@ -679,7 +744,7 @@ export class Store {
    * `expires_at`, and `pruneCache` already sweeps it, so a stash nobody comes
    * back for disappears within the hour instead of growing forever.
    */
-  async putPage(key: string, page: PendingPage, ttlSeconds: number): Promise<void> {
+  async putPage(key: string, page: PendingPageInput, ttlSeconds: number): Promise<void> {
     const t = this.d.schema;
     const now = Date.now();
     const payload = JSON.stringify(page);
@@ -792,6 +857,7 @@ export class Store {
       activeUsers: await count(t.users, sql`blocked = 0 AND ${ONBOARDED}`),
       deliveries: await count(t.deliveries),
       reminders: await count(t.reminders, sql`cancelled = 0`),
+      saved: await count(t.saved),
       messages: await count(t.messages),
       cached: await count(t.scrapeCache),
     };

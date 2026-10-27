@@ -134,3 +134,23 @@ export const state = pgTable('state', {
   key: text('key').primaryKey(),
   value: text('value'),
 });
+
+/**
+ * Events someone put a 🔖 on. Separate from `reminders` on purpose: a reminder
+ * needs a start time and expires with the event, while a saved event is a
+ * bookmark — it keeps the whole item, so the card can be redrawn later without
+ * going back to the ticket site.
+ */
+export const saved = pgTable(
+  'saved',
+  {
+    chatId: text('chat_id').notNull(),
+    itemId: text('item_id').notNull(),
+    title: text('title').notNull(),
+    startsAt: text('starts_at'),
+    /** The whole Item as JSON, so the card survives the scrape cache. */
+    payload: text('payload').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.chatId, t.itemId] }), index('idx_saved_chat').on(t.chatId)],
+);

@@ -22,6 +22,17 @@ function plural(n: number, [one, few, many]: [string, string, string]): string {
 }
 
 export const countEvents = (n: number): string => `${n} ${plural(n, ['подія', 'події', 'подій'])}`;
+
+/**
+ * The accusative, for "відфільтрував ще 1 подію". Ukrainian declines the noun
+ * after a number as well as pluralising it, so a sentence that puts the count
+ * anywhere but the subject needs its own form — "ще 1 події" is simply wrong.
+ */
+export const countEventsAcc = (n: number): string => `${n} ${plural(n, ['подію', 'події', 'подій'])}`;
+
+/** "1 подія чекає", "2 події чекають" — the verb agrees with the count too. */
+export const eventsWaiting = (n: number): string =>
+  `${countEvents(n)} ${plural(n, ['чекає', 'чекають', 'чекають'])}`;
 export const countPlaces = (n: number): string => `${n} ${plural(n, ['місце', 'місця', 'місць'])}`;
 
 export const countReminders = (n: number): string => `${n} ${plural(n, ['нагадування', 'нагадування', 'нагадувань'])}`;
@@ -224,6 +235,19 @@ export interface DigestOptions {
   changeNotes?: Map<string, string>;
   /** How many ranked events did not fit; puts a "показати ще" button on the header. */
   more?: number;
+  /**
+   * The state of one card's buttons (saved? reminded?), asked per item so the
+   * renderer never has to touch the database itself.
+   */
+  cardState?: (item: Item) => CardState;
+  /** Buttons for the header when nothing matched — the empty state's way out. */
+  emptyKeyboard?: InlineButton[][];
+  /**
+   * How many events the answer actually found, when only some of them are
+   * being sent. The header counts the whole answer, not this batch of it —
+   * "37 подій" is the useful number when one card is on its way.
+   */
+  found?: number;
 }
 
 /**
@@ -326,10 +350,22 @@ export interface OutgoingMessage {
  * missing — "дата уточнюється" is nothing a calendar can hold, so an event
  * without a start time gets no 📅 instead of a 📅 that apologises.
  */
-export function eventKeyboard(item: Item, opts: { reminded?: boolean } = {}): InlineButton[][] {
+export function eventKeyboard(item: Item, opts: CardState = {}): InlineButton[][] {
   const ev = (verb: string) => `ev:${verb}:${item.id}`;
   const google = googleCalendarUrl(item);
+  // the cursor row: only the halves that lead somewhere. A button that answers
+  // "нічого немає" is worse than no button, and the counts are the point of
+  // walking one at a time — they say how much is there without sending it.
+  const nav: InlineButton[] = [
+    ...(opts.prevCount ? [{ text: `← Назад (${opts.prevCount})`, callback_data: ev('p') }] : []),
+    ...(opts.nextCount ? [{ text: `Далі → (${opts.nextCount})`, callback_data: ev('n') }] : []),
+  ];
   return [
+    [
+      { text: 'ℹ️ Деталі', callback_data: ev('i') },
+      { text: opts.saved ? '🔖 Збережено' : '🔖 Зберегти', callback_data: ev('s') },
+    ],
+    ...(nav.length ? [nav] : []),
     [
       { text: opts.reminded ? '⏰ Не нагадувати' : '⏰ Нагадати', callback_data: ev('r') },
       { text: '👎 Не моє', callback_data: ev('no') },
@@ -341,8 +377,93 @@ export function eventKeyboard(item: Item, opts: { reminded?: boolean } = {}): In
   ];
 }
 
+/** What the buttons under a card have to know about it right now. */
+export interface CardState {
+  reminded?: boolean;
+  saved?: boolean;
+  /** How many events are still waiting behind this one; 0 or absent hides "Далі →". */
+  nextCount?: number;
+  /** How many have already been walked past; 0 or absent hides "← Назад". */
+  prevCount?: number;
+}
+
 /**
- * The header's own button: the rest of the ranked list, one tap away.
+ * The details screen: the same event, with everything the source actually gave
+ * us and nothing it did not. Missing fields are left out rather than filled in
+ * with a plausible guess — a venue we invented would send somebody to the
+ * wrong address.
+ */
+export function renderDetails(item: Item, opts: { format?: Format; tz?: string } = {}): string {
+  const cfg = loadConfig();
+  const format = opts.format ?? 'html';
+  const tz = opts.tz ?? cfg.timezone;
+  const emoji = EMOJI[item.category] ?? '✨';
+
+  const timeKnown = item.startsAt ? !(item.confidence === 'low' && localTime(item.startsAt, tz) === '00:00') : false;
+  const lines: string[] = [
+    `${emoji} ${bold(item.title, format)}${STATUS_BADGE[item.status] ?? ''}`,
+  ];
+
+  if (item.startsAt) {
+    const day = dayLabel(item.startsAt.slice(0, 10), cfg.locale);
+    lines.push(plain(`📅 ${day}${timeKnown ? ` · ${localTime(item.startsAt, tz)}` : ' · час уточнюється'}`, format));
+  }
+  const place = [item.venue, item.address].filter((x): x is string => Boolean(x?.trim())).join(', ');
+  if (place) lines.push(plain(`📍 ${place}`, format));
+  lines.push(plain(`🏙 ${cityLabel(item.city)}`, format));
+  const price = priceText(item);
+  if (price) lines.push(plain(`💸 ${price}`, format));
+  if (item.performers?.length) lines.push(plain(`🎤 ${item.performers.slice(0, 5).join(', ')}`, format));
+  if (item.description) lines.push('', plain(truncate(item.description, 700), format));
+  lines.push('', plain(`Джерело: ${item.sources.join(', ') || item.source}`, format));
+  lines.push(link(item.kind === 'place' ? 'сторінка місця →' : 'сторінка події →', item.url, format));
+  if (item.confidence === 'low') {
+    lines.push(plain('⚠️ Це з телеграм-каналу чи пошуку — дату й час варто перевірити за посиланням.', format));
+  }
+  return lines.join('\n');
+}
+
+/**
+ * The details screen as a caption, for a card that went out as a photo.
+ *
+ * Same trick as `renderCaption`: shorten the description — the one field that
+ * can be arbitrarily long — rather than clamp rendered HTML, which would cut a
+ * tag in half and have Telegram reject the edit.
+ */
+export function renderDetailsCaption(item: Item, opts: { format?: Format; tz?: string } = {}): string {
+  const full = renderDetails(item, opts);
+  if (full.length <= CAPTION_LIMIT) return full;
+  for (const len of [400, 200, 80]) {
+    const text = renderDetails({ ...item, description: truncate(item.description ?? '', len) || undefined }, opts);
+    if (text.length <= CAPTION_LIMIT) return text;
+  }
+  return renderDetails({ ...item, description: undefined, performers: undefined }, opts);
+}
+
+/** The buttons under the details screen: act on it, or go back to the card. */
+export function detailsKeyboard(item: Item, opts: CardState = {}): InlineButton[][] {
+  const ev = (verb: string) => `ev:${verb}:${item.id}`;
+  const google = googleCalendarUrl(item);
+  return [
+    [
+      { text: opts.saved ? '🔖 Збережено' : '🔖 Зберегти', callback_data: ev('s') },
+      { text: opts.reminded ? '⏰ Не нагадувати' : '⏰ Нагадати', callback_data: ev('r') },
+    ],
+    [
+      { text: item.kind === 'place' ? '🔗 Сторінка' : '🎟 Квитки', url: item.url },
+      ...(google ? [{ text: '📅 В календар', url: google }] : []),
+    ],
+    [{ text: '⬅️ До картки', callback_data: ev('b') }],
+  ];
+}
+
+/**
+ * The header's own button: a whole page of the rest, for anyone who would
+ * rather scroll a list than walk it.
+ *
+ * This is the batch half of the pair. The one-at-a-time half is "Далі →"
+ * under the card, and the difference is deliberate: a fresh answer sends a
+ * single card, and this button is the explicit way to ask for more than that.
  *
  * `callback_data` is the bare `more` — which message to continue comes from
  * the callback itself (chat + the header's message id), so nothing has to be
@@ -350,7 +471,7 @@ export function eventKeyboard(item: Item, opts: { reminded?: boolean } = {}): In
  * somebody else's page.
  */
 export function moreButton(rest: number): InlineButton[][] {
-  return [[{ text: `📥 Показати ще ${rest}`, callback_data: 'more' }]];
+  return [[{ text: `📋 Показати списком (ще ${rest})`, callback_data: 'more' }]];
 }
 
 /**
@@ -380,12 +501,15 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
     }
   }
 
+  // the header counts the answer, not the batch: one card may be on its way
+  // while thirty-six wait behind it
+  const found = Math.max(opts.found ?? 0, kept.length);
   const facts = [
     opts.query.cities.map((c) => cityLabel(c)).join(', '),
     // dates only: the title already names the window, and "(цього тижня)"
     // under a "Цього тижня" heading is just noise
     placesOnly ? '' : rangeDates(opts.query),
-    kept.length ? (placesOnly ? countPlaces(kept.length) : countEvents(kept.length)) : '',
+    found ? (placesOnly ? countPlaces(found) : countEvents(found)) : '',
   ]
     .filter(Boolean)
     .join(' · ');
@@ -393,8 +517,11 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
   const tail = kept.length === 0 ? opts.footer ?? NOTHING_FOUND : opts.footer ?? (placesOnly ? PLACES_HINT : REMINDER_HINT);
   const header = `${bold(opts.title, format)}\n${plain(facts, format)}\n\n${plain(tail, format)}`;
 
+  const headerKeyboard =
+    kept.length === 0 ? opts.emptyKeyboard : opts.more && opts.more > 0 ? moreButton(opts.more) : undefined;
+
   return [
-    { text: header, items: [], ...(opts.more && opts.more > 0 ? { inlineKeyboard: moreButton(opts.more) } : {}) },
+    { text: header, items: [], ...(headerKeyboard?.length ? { inlineKeyboard: headerKeyboard } : {}) },
     ...kept.map((item) => {
       const itemOpts: RenderItemOptions = {
         format,
@@ -407,7 +534,7 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
         text: renderItem(item, itemOpts),
         items: [item],
         // places have no start time to remind about and no ticket to share
-        ...(item.kind === 'event' ? { inlineKeyboard: eventKeyboard(item) } : {}),
+        ...(item.kind === 'event' ? { inlineKeyboard: eventKeyboard(item, opts.cardState?.(item)) } : {}),
         ...(item.image && caption ? { image: item.image, caption } : {}),
       };
     }),
