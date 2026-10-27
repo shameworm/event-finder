@@ -9,8 +9,8 @@
 import type { Item, Query } from './types.ts';
 import type { Logger } from './log.ts';
 import type { Store } from './db.ts';
-import { buildMessages, summarize, type Format, type OutgoingMessage } from './render.ts';
-import { TelegramError, botToken, sendMessage, sendPhoto } from './telegram-api.ts';
+import { buildMessages, summarize, type CardState, type Format, type OutgoingMessage } from './render.ts';
+import { TelegramError, botToken, sendMessage, sendPhoto, type InlineButton } from './telegram-api.ts';
 import { loadConfig } from './config.ts';
 import { sleep } from './util.ts';
 
@@ -32,8 +32,20 @@ export interface DeliverOptions {
   replyTo?: number;
   /** Record the items as sent, so they are not repeated. Default: true when sending. */
   record?: boolean;
+  /**
+   * Record which message showed which event. Defaults to `record`, and is
+   * separated from it for lists that must not count as "already sent" but
+   * whose buttons still have to resolve — /saved is the one that does this.
+   */
+  recordMessages?: boolean;
   /** How many ranked items did not fit; puts a "показати ще" button on the header. */
   more?: number;
+  /** The state of each card's buttons — saved, reminded, is there a next one. */
+  cardState?: (item: Item) => CardState;
+  /** Buttons on the header when nothing matched; see the empty state. */
+  emptyKeyboard?: InlineButton[][];
+  /** How many events the answer found, when only the first of them is sent. */
+  found?: number;
   /**
    * Send the header. The second and later pages of an answer are events only —
    * their header is already in the chat, being edited in place.
@@ -103,12 +115,16 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
     footer: opts.footer,
     changeNotes: opts.changeNotes,
     more: opts.more,
+    cardState: opts.cardState,
+    emptyKeyboard: opts.emptyKeyboard,
+    found: opts.found,
   });
   const headerText = messages[0]?.text ?? '';
   // a follow-up page has no header of its own: it continues one already sent
   if (opts.withHeader === false) messages.splice(0, 1);
   const text = messages.map((m) => m.text).join('\n\n');
   const shouldRecord = opts.record ?? !opts.dryRun;
+  const shouldRecordMessages = opts.recordMessages ?? shouldRecord;
   const messageIds: number[] = [];
 
   for (const [i, message] of messages.entries()) {
@@ -131,13 +147,15 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
     messageIds.push(...ids);
 
     // one event per message, so a ❤️ on this message means exactly this event
-    //
-    // recorded here rather than after the loop: a digest that died on its
-    // seventh message used to record nothing at all, so the retry sent the
-    // first six events a second time
-    if (opts.store && opts.chatId && shouldRecord && message.items.length > 0) {
-      for (const id of ids) await opts.store.recordMessage(opts.chatId, id, message.items);
-      await opts.store.recordSent(opts.chatId, message.items);
+    if (opts.store && opts.chatId && message.items.length > 0) {
+      if (shouldRecordMessages) {
+        for (const id of ids) await opts.store.recordMessage(opts.chatId, id, message.items);
+      }
+      // recorded here rather than after the loop: a digest that died on its
+      // seventh message used to record nothing at all, so the retry sent the
+      // first six events a second time — and a bookmark (/saved) asks for the
+      // message rows without ever recording a delivery
+      if (shouldRecord) await opts.store.recordSent(opts.chatId, message.items);
     }
   }
 
