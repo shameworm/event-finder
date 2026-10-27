@@ -5,19 +5,42 @@
  * Used by `scripts/bot.ts`, both as a long-polling service and in --once
  * cron mode, so the behaviour is identical either way.
  */
+import { z } from 'zod';
 import type { Item, Kind } from './types.ts';
 import type { OptIn, Store } from './db.ts';
 import type { Logger } from './log.ts';
 import type { TgCallbackQuery, TgMessage, TgReactionUpdate } from './schemas.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
-import { answerCallbackQuery, deleteMessage, editMessageCaption, editMessageText, escapeHtml, sendMessage, type InlineButton } from './telegram-api.ts';
+import {
+  answerCallbackQuery,
+  deleteMessage,
+  editMessageCaption,
+  editMessageMedia,
+  editMessageText,
+  TelegramError,
+  escapeHtml,
+  sendMessage,
+  type InlineButton,
+} from './telegram-api.ts';
 import { applyPrefsCommand, applyThumbsDown, describePrefs, favouritesFromList } from './prefs-engine.ts';
 import { CATEGORY_LABEL, DISLIKE_SUGGESTIONS, EMOJI, EVENT_CATEGORIES, canonicalTag, tagLabel } from './categories.ts';
-import { parseRequest, thisWeekRange, weekendRange } from './request.ts';
+import { nextWeekRange, parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
-import { countEvents, eventKeyboard, moreButton, renderCaption, renderItem, renderReminders } from './render.ts';
+import {
+  countEvents,
+  countEventsAcc,
+  detailsKeyboard,
+  eventKeyboard,
+  moreButton,
+  renderCaption,
+  renderDetails,
+  renderDetailsCaption,
+  renderItem,
+  renderReminders,
+  type CardState,
+} from './render.ts';
 import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
 import { DIGEST_DAYS, DIGEST_HOURS, describeSchedule, hourLabel, toggleDay } from './schedule.ts';
 import { WORD_END, addDays, normText, today } from './util.ts';
@@ -39,6 +62,8 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: 'week', description: '🗓 Усе на цьому тижні' },
   { command: 'weekend', description: '🎉 З пʼятниці по неділю' },
   { command: 'today', description: '📅 Що сьогодні' },
+  { command: 'find', description: '🔎 Пошук по категоріях' },
+  { command: 'saved', description: '🔖 Збережені події' },
   { command: 'tomorrow', description: '📅 Що завтра' },
   { command: 'places', description: '📍 Нові кавʼярні, бари та галереї' },
   { command: 'settings', description: '⚙️ Розсилки, година, місто і смаки' },
@@ -63,9 +88,11 @@ const OPT_INS: { key: OptIn; emoji: string; label: string; hint: string; names: 
 
 const COMMANDS = `<b>Що я вмію</b>
 
+/find — пошук кнопками: категорія + період
 /week — усе на цьому тижні
 /weekend — з пʼятниці по неділю
 /today · /tomorrow — просто зараз
+/saved — твої збережені події 🔖
 /places — нові кавʼярні, бари й галереї, куди варто зайти
 /settings — розсилки, коли писати, місто і смаки, кнопками
 /setup — зібрати смаки заново, крок за кроком
@@ -87,6 +114,9 @@ const COMMANDS = `<b>Що я вмію</b>
 · <i>максимум 800 грн</i>
 · <i>я у Львові наступного тижня</i>
 
+Під кожною подією: <b>ℹ️ Деталі</b> — усе, що відомо; <b>🔖 Зберегти</b> — у
+/saved; <b>Далі →</b> — наступна з того ж списку, без нового пошуку.
+
 Тапни ❤️ на події — і я нагадаю за добу та за три години до початку, а ще
 запамʼятаю, що таке тобі заходить. Знімеш ❤️ — скасую нагадування.`;
 
@@ -96,6 +126,39 @@ function rows<T>(items: T[], perRow: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += perRow) out.push(items.slice(i, i + perRow));
   return out;
+}
+
+/**
+ * The published command whose name is closest to what was typed — a prefix
+ * match, or one typo away. Nothing is suggested when nothing is close: a wrong
+ * guess reads as the bot not listening.
+ */
+export function closestCommand(typed: string): string | null {
+  const word = typed.replace(/^\//, '').toLowerCase();
+  if (!word) return null;
+  const names = BOT_COMMANDS.map((c) => c.command);
+  const prefix = names.find((n) => n.startsWith(word) || word.startsWith(n));
+  if (prefix) return prefix;
+  // one insertion, deletion or substitution apart, counted the cheap way
+  const close = names.find((n) => Math.abs(n.length - word.length) <= 1 && distance(n, word) <= 1);
+  return close ?? null;
+}
+
+/** Levenshtein, capped at the one edit `closestCommand` cares about. */
+function distance(a: string, b: string): number {
+  let row = [...Array(b.length + 1).keys()];
+  for (let i = 1; i <= a.length; i++) {
+    const next = [i];
+    for (let j = 1; j <= b.length; j++) {
+      next[j] = Math.min(
+        (row[j] ?? 0) + 1,
+        (next[j - 1] ?? 0) + 1,
+        (row[j - 1] ?? 0) + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    row = next;
+  }
+  return row[b.length] ?? 99;
 }
 
 function cityKeyboard(): { text: string }[][] {
@@ -114,16 +177,54 @@ function cityButtons(current: string): InlineButton[][] {
   ];
 }
 
-/** Shown under the welcome, so a new user has something to tap straight away. */
+/**
+ * The home screen: the four things worth a tap, then the two that used to be
+ * here. Two buttons per row, because three is where labels start being cut off
+ * on a phone.
+ */
 function quickActions(): InlineButton[][] {
   return [
     [
-      { text: '🗓 Цей тиждень', callback_data: 'go:week' },
-      { text: '🎉 Вихідні', callback_data: 'go:weekend' },
+      { text: '🎉 Ці вихідні', callback_data: 'go:weekend' },
+      { text: '📍 Поруч', callback_data: 'go:near' },
     ],
     [
-      { text: '📍 Місця', callback_data: 'go:places' },
+      { text: '🔖 Збережені', callback_data: 'go:saved' },
+      { text: '🎛 Смаки', callback_data: 'go:prefs' },
+    ],
+    [
+      { text: '🔎 Знайти', callback_data: 'go:find' },
       { text: '⚙️ Налаштування', callback_data: 'go:settings' },
+    ],
+  ];
+}
+
+/** The greeting itself, in the words of someone who is about to be useful. */
+function welcome(user: BotUser): string {
+  return (
+    `<b>Привіт! 👋 Знайдімо, куди піти.</b>\n\n` +
+    `Я шукаю концерти, стендап, театр, виставки, лекції, вечірки та фестивалі — ` +
+    `і нові місця, куди варто зайти. ` +
+    `Чим більше ти тапаєш ❤️ і 👎, тим точніше я влучаю.\n\n` +
+    `Твоє місто — <b>${escapeHtml(cityLabel(user.city))}</b>, /city щоб змінити.\n\n` +
+    `<b>Чого хочеться?</b> Тисни кнопку — або просто напиши, ` +
+    `наприклад «<i>стендап на вихідних</i>».`
+  );
+}
+
+/**
+ * What a person sees when nothing matched. The footer says why; these say what
+ * to do about it, which is the part a tap can fix.
+ */
+function emptyStateButtons(): InlineButton[][] {
+  return [
+    [
+      { text: '🗓 Ширший період', callback_data: 'go:week' },
+      { text: '🏙 Інше місто', callback_data: 'set:city' },
+    ],
+    [
+      { text: '🎛 Мої смаки', callback_data: 'set:prefs' },
+      { text: '🔎 Інший пошук', callback_data: 'go:find' },
     ],
   ];
 }
@@ -528,6 +629,85 @@ function settingsPanel(user: BotUser): { text: string; inlineKeyboard: InlineBut
   };
 }
 
+/* ------------------------------------------------------- the guided search --- */
+
+/**
+ * /find: the same search as typing a sentence, for the times when nobody feels
+ * like writing one. Two screens — what, then when — and the "what" survives
+ * between them.
+ *
+ * The context lives in the `state` table rather than in memory, because the bot
+ * also runs in --once cron mode: a process that answers one update and exits
+ * cannot hold a wizard open in a variable.
+ */
+const FindStateSchema = z.object({ cats: z.array(z.string()).default([]) });
+type FindState = z.infer<typeof FindStateSchema>;
+
+const findKey = (chatId: string) => `find:${chatId}`;
+
+async function getFind(ctx: HandlerContext, chatId: string): Promise<FindState> {
+  const raw = await ctx.store.getState(findKey(chatId));
+  if (!raw) return { cats: [] };
+  try {
+    const parsed = FindStateSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : { cats: [] };
+  } catch {
+    return { cats: [] };
+  }
+}
+
+async function setFind(ctx: HandlerContext, chatId: string, state: FindState): Promise<void> {
+  await ctx.store.setState(findKey(chatId), JSON.stringify(state));
+}
+
+/** The periods /find offers, and the window each one means. */
+const FIND_PERIODS: { key: string; label: string; range: (base: string) => { from: string; to: string; label: string } }[] = [
+  { key: 'today', label: '📅 Сьогодні', range: (b) => ({ from: b, to: b, label: 'сьогодні' }) },
+  { key: 'tomorrow', label: '📅 Завтра', range: (b) => ({ from: addDays(b, 1), to: addDays(b, 1), label: 'завтра' }) },
+  { key: 'weekend', label: '🎉 Ці вихідні', range: weekendRange },
+  { key: 'week', label: '🗓 Цей тиждень', range: thisWeekRange },
+  { key: 'nextweek', label: '🗓 Наступний тиждень', range: nextWeekRange },
+  { key: 'month', label: '📆 Найближчий місяць', range: (b) => ({ from: b, to: addDays(b, 30), label: 'найближчий місяць' }) },
+];
+
+const findChosen = (state: FindState): string =>
+  state.cats.length ? state.cats.map((c) => tagLabel(c)).join(', ') : 'будь-що';
+
+function findCategoriesScreen(state: FindState): Screen {
+  return {
+    text:
+      `<b>🔎 Що шукаємо?</b>\n\nОбери категорії — або нічого, і я покажу все, що тобі заходить.` +
+      `\n\nЗараз: <b>${escapeHtml(findChosen(state))}</b>`,
+    inlineKeyboard: [
+      ...rows(
+        EVENT_CATEGORIES.filter((c) => c !== 'other').map((c) => ({
+          text: tick(hasTag(state.cats, c), `${EMOJI[c]} ${CATEGORY_LABEL[c]}`),
+          callback_data: `find:cat:${c}`,
+        })),
+        2,
+      ),
+      [
+        { text: 'Далі →', callback_data: 'find:when' },
+        { text: '♻️ Скинути', callback_data: 'find:clear' },
+      ],
+      [{ text: '❌ Скасувати', callback_data: 'find:cancel' }],
+    ],
+  };
+}
+
+function findWhenScreen(state: FindState): Screen {
+  return {
+    text: `<b>🔎 Коли?</b>\n\nШукаю: <b>${escapeHtml(findChosen(state))}</b>`,
+    inlineKeyboard: [
+      ...rows(FIND_PERIODS.map((p) => ({ text: p.label, callback_data: `find:run:${p.key}` })), 2),
+      [
+        { text: '⬅️ Назад', callback_data: 'find:open' },
+        { text: '❌ Скасувати', callback_data: 'find:cancel' },
+      ],
+    ],
+  };
+}
+
 /* ------------------------------------------------------------- the heart --- */
 
 /**
@@ -603,6 +783,49 @@ const MORE_TTL_SECONDS = 3600;
 const pageKey = (chatId: string, messageId: number): string => `more:${chatId}:${messageId}`;
 
 /**
+ * The header of the newest answer in this chat, so "Далі →" under a *card* can
+ * find the stash its own message id knows nothing about.
+ *
+ * It is only a pointer: the page it names still expires on its own, and a
+ * pointer at a page that is gone is answered the same way a stale "показати
+ * ще" is.
+ */
+const lastPageKey = (chatId: string): string => `lastpage:${chatId}`;
+
+/**
+ * The line under the header: what this answer is doing and why it looks the
+ * way it does.
+ *
+ * Three things can need saying at once — that the rest is one tap away, that
+ * the taste filter loosened, that it tightened — so they are composed rather
+ * than chosen between: picking one would have the bot go quiet about the other.
+ */
+function footerFor(n: { shown: number; waiting: number; toppedUp: number; offTaste: number }): string | undefined {
+  if (n.shown === 0) {
+    return 'Нічого не знайшлося. Спробуй ширший період («наступного тижня»), інше місто, або глянь /prefs — можливо, я щось відфільтровую.';
+  }
+  const notes: string[] = [];
+  if (n.waiting > 0) {
+    // no count here on purpose: the header is written once and then only has
+    // its button redrawn, so a number in it would still say 36 when four are
+    // left. The buttons under the card carry the counts, and they are read
+    // fresh on every step.
+    notes.push(
+      'Показую по одній, щоб не завалити тебе повідомленнями — гортай «Далі →» і «← Назад» під карткою.',
+    );
+  }
+  if (n.toppedUp > 0) {
+    notes.push(
+      `Твого на цей період знайшлося небагато, тож додав ще ${n.toppedUp} — просто щоб ти знав(ла), що є. ` +
+        `Скажи, що любиш («додай театр до улюблених»), і я звужу.`,
+    );
+  } else if (n.offTaste > 0) {
+    notes.push(`Показав тільки те, що тобі заходить — ще ${countEventsAcc(n.offTaste)} відфільтрував. /prefs, якщо це занадто вузько.`);
+  }
+  return notes.length ? notes.join('\n\n') : undefined;
+}
+
+/**
  * Run a search for one user and send them the result.
  * Goes through the shared city cache, so several users asking the same thing
  * cost one scrape.
@@ -611,7 +834,16 @@ export async function answerSearch(
   ctx: HandlerContext,
   user: BotUser,
   text: string,
-  opts: { from?: string; to?: string; label?: string; kinds?: Kind[]; top?: number; reply: Reply } = { reply: async () => {} },
+  opts: {
+    from?: string;
+    to?: string;
+    label?: string;
+    kinds?: Kind[];
+    top?: number;
+    /** Categories picked with buttons, for /find; free text supplies its own. */
+    like?: string[];
+    reply: Reply;
+  } = { reply: async () => {} },
 ): Promise<number> {
   const cfg = loadConfig();
   const base = today(cfg.timezone);
@@ -623,6 +855,7 @@ export async function answerSearch(
     from: opts.from,
     to: opts.to,
     kinds: opts.kinds,
+    like: opts.like,
   });
   if (opts.label) query.rangeLabel = opts.label;
 
@@ -635,9 +868,20 @@ export async function answerSearch(
     return 0;
   }
 
-  // sent directly rather than through `reply`, because taking the hourglass
-  // back again needs the message id Telegram gives it
-  const placeholder = await sendMessage('⏳ Шукаю…', { chatId: user.chatId, dryRun: ctx.dryRun, log: ctx.log });
+  // loading feedback that says what it is loading, and is taken back once the
+  // answer it stood in for has arrived
+  const what = [
+    query.like.length ? query.like.map((t) => tagLabel(t)).join(', ') : kinds.includes('place') ? 'місця' : 'події',
+    query.rangeLabel,
+    query.cities.map((c) => cityLabel(c)).join(', '),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const placeholder = await sendMessage(`🔎 Шукаю: ${escapeHtml(what)}…`, {
+    chatId: user.chatId,
+    dryRun: ctx.dryRun,
+    log: ctx.log,
+  });
 
   const collected: Item[] = [];
   const failed: string[] = [];
@@ -656,16 +900,22 @@ export async function answerSearch(
   }
 
   const ranked = rank(collected, { query, prefs: user.prefs, tz: cfg.timezone });
-  const pageSize = opts.top ?? cfg.bot.max_results;
-  const items = ranked.items.slice(0, pageSize);
-  // what the page size cut off: kept for the "показати ще" button, not dropped
-  const rest = ranked.items.slice(pageSize);
+  // One card goes out, the rest waits. Forty events is forty notifications and
+  // a chat nobody can scroll back through; "Далі →" under the card hands them
+  // over one at a time, and the header's "показати ще" still gives a batch to
+  // anyone who would rather have one.
+  const first = opts.top ?? cfg.bot.cards_at_once;
+  const items = ranked.items.slice(0, first);
+  const rest = ranked.items.slice(first);
   const offTaste = ranked.dropped.filter((d) => d.why === 'not in their taste').length;
 
   const title =
     kinds.includes('place')
       ? `📍 Місця — ${query.cities.map((c) => cityLabel(c)).join(', ')}`
       : `🗓 ${query.cities.map((c) => cityLabel(c)).join(', ')}`;
+
+  // one read, so every card knows whether its 🔖 is already on
+  const saved = new Set((await ctx.store.listSaved(user.chatId)).map((i) => i.id));
 
   const outcome = await deliver({
     title,
@@ -677,30 +927,35 @@ export async function answerSearch(
     dryRun: ctx.dryRun,
     maxPerDay: 0,
     more: rest.length,
+    cardState: (item) => ({ saved: saved.has(item.id), nextCount: rest.length }),
+    emptyKeyboard: emptyStateButtons(),
+    found: ranked.items.length,
     // an on-demand answer is allowed to repeat things: they asked for it
     record: !ctx.dryRun,
-    // the filter has to admit when it loosened, or a short list looks like a bug
-    footer:
-      items.length === 0
-        ? 'Нічого не знайшлося. Спробуй ширший період («наступного тижня»), інше місто, або глянь /prefs — можливо, я щось відфільтровую.'
-        : ranked.toppedUp > 0
-          ? `Твого на цей період знайшлося небагато, тож додав ще ${ranked.toppedUp} — просто щоб ти знав(ла), що є. ` +
-            `Скажи, що любиш («додай театр до улюблених»), і я звужу.`
-          : offTaste > 0
-            ? `Показав тільки те, що тобі заходить — ще ${offTaste} події відфільтрував. /prefs, якщо це занадто вузько.`
-            : undefined,
+    // the answer has to admit both of the things that surprise people: that it
+    // is handing the list over one card at a time, and that it filtered
+    footer: footerFor({
+      shown: items.length,
+      waiting: rest.length,
+      toppedUp: ranked.toppedUp,
+      offTaste,
+    }),
   });
-  // the hourglass stood in for an answer that has now arrived
-  for (const id of placeholder) await deleteMessage(id, { chatId: user.chatId, dryRun: ctx.dryRun, log: ctx.log });
+  // the spinner has served its purpose; leaving it would push the first card
+  // off the screen on a phone
+  if (!outcome.chatGone) {
+    for (const id of placeholder) await deleteMessage(id, { chatId: user.chatId, dryRun: ctx.dryRun, log: ctx.log });
+  }
 
   // park the tail next to the header it belongs to, so paging through it later
   // costs a database read rather than another crawl of somebody's site
   if (rest.length > 0 && outcome.headerMessageId !== undefined && !outcome.chatGone) {
     await ctx.store.putPage(
       pageKey(user.chatId, outcome.headerMessageId),
-      { header: outcome.headerText, title, query, rest, size: pageSize },
+      { header: outcome.headerText, title, query, rest, size: cfg.bot.max_results },
       MORE_TTL_SECONDS,
     );
+    await ctx.store.setState(lastPageKey(user.chatId), String(outcome.headerMessageId));
   }
 
   if (failed.length && !outcome.chatGone) {
@@ -726,6 +981,7 @@ async function showMore(
   messageId: number | undefined,
   fallbackHeader: string | undefined,
   reply: Reply,
+  opts: { limit?: number } = {},
 ): Promise<void> {
   if (messageId === undefined) return;
   const key = pageKey(user.chatId, messageId);
@@ -749,8 +1005,16 @@ async function showMore(
     return;
   }
 
-  const batch = page.rest.slice(0, page.size);
-  const rest = page.rest.slice(page.size);
+  // "Далі →" under a card asks for one event; "показати ще" on the header asks
+  // for a whole page of them
+  const step = opts.limit ?? page.size;
+  const batch = page.rest.slice(0, step);
+  const rest = page.rest.slice(step);
+  const saved = new Set((await ctx.store.listSaved(user.chatId)).map((i) => i.id));
+  // every card in the batch is its own cursor, so each one needs to know how
+  // much is behind *it* — the first of the batch has the old history, the
+  // second has that plus one, and so on
+  const behind = new Map(batch.map((item, i) => [item.id, page.seen.length + i]));
 
   const outcome = await deliver({
     title: page.title,
@@ -762,12 +1026,20 @@ async function showMore(
     dryRun: ctx.dryRun,
     maxPerDay: 0,
     record: !ctx.dryRun,
+    cardState: (item) => ({
+      saved: saved.has(item.id),
+      nextCount: rest.length,
+      prevCount: behind.get(item.id) ?? 0,
+    }),
     // the header is already in the chat, a few messages up, being edited
     withHeader: false,
   });
   if (outcome.chatGone) return;
 
-  if (rest.length > 0) await ctx.store.putPage(key, { ...page, rest }, MORE_TTL_SECONDS);
+  // everything handed out but the last card is history now; the last one is
+  // the card the cursor sits on, and stepCard is what moves it into `seen`
+  const seen = [...page.seen, ...batch.slice(0, -1)];
+  if (rest.length > 0 || seen.length > 0) await ctx.store.putPage(key, { ...page, rest, seen }, MORE_TTL_SECONDS);
   else await ctx.store.dropPage(key);
 
   await editMessageText(page.header, {
@@ -780,7 +1052,7 @@ async function showMore(
 }
 
 /** The canned searches, reachable both as a command and as a quick-action button. */
-export type Preset = 'week' | 'weekend' | 'today' | 'tomorrow' | 'places';
+export type Preset = 'week' | 'weekend' | 'today' | 'tomorrow' | 'places' | 'near';
 
 async function runPreset(ctx: HandlerContext, user: BotUser, preset: Preset, reply: Reply): Promise<void> {
   const cfg = loadConfig();
@@ -788,7 +1060,7 @@ async function runPreset(ctx: HandlerContext, user: BotUser, preset: Preset, rep
   switch (preset) {
     case 'week': {
       const r = thisWeekRange(base);
-      await answerSearch(ctx, user, '', { from: r.from, to: r.to, label: r.label, reply, top: cfg.digest.week_top });
+      await answerSearch(ctx, user, '', { from: r.from, to: r.to, label: r.label, reply });
       return;
     }
     case 'weekend': {
@@ -808,10 +1080,74 @@ async function runPreset(ctx: HandlerContext, user: BotUser, preset: Preset, rep
         to: addDays(base, 30),
         label: 'зараз відкрито',
         kinds: ['place'],
-        top: cfg.digest.places_top,
+        reply,
+      });
+      return;
+
+    // "поруч" is the home city, not a radius: Telegram can share a location,
+    // but the ticket sites this bot reads index events by city and nothing
+    // here has coordinates to measure a distance against. The honest version
+    // of "near me" is therefore "where you live, over the next week" — and
+    // /city is what moves it.
+    case 'near':
+      await answerSearch(ctx, user, '', {
+        from: base,
+        to: addDays(base, 7),
+        label: `${cityLabel(user.city)}, найближчий тиждень`,
         reply,
       });
   }
+}
+
+/* -------------------------------------------------------- saved events --- */
+
+/**
+ * The 🔖 list: the events this person bookmarked, as the same cards they were
+ * bookmarked from.
+ *
+ * The items come out of the `saved` table rather than from a fresh scrape, so
+ * nothing is fetched and nothing can disagree with what they saved — and the
+ * list is explicitly *not* recorded as "sent", because bookmarking an event
+ * must not stop it turning up in next week's digest. The message→item rows are
+ * still written, which is what lets the buttons under these cards resolve.
+ */
+async function showSaved(ctx: HandlerContext, user: BotUser, reply: Reply): Promise<void> {
+  const cfg = loadConfig();
+  const items = await ctx.store.listSaved(user.chatId);
+  if (items.length === 0) {
+    await reply(
+      `<b>🔖 Збережені</b>\n\nПоки порожньо. Тисни <b>🔖 Зберегти</b> під будь-якою подією — ` +
+        `вона залишиться тут, навіть коли список пошуку застаріє.`,
+      { inlineKeyboard: quickActions() },
+    );
+    return;
+  }
+
+  const base = today(cfg.timezone);
+  const dates = items.map((i) => i.startsAt?.slice(0, 10)).filter((d): d is string => Boolean(d));
+  const query = parseRequest('', {
+    prefs: user.prefs,
+    base,
+    from: dates.length ? dates.reduce((a, b) => (a < b ? a : b)) : base,
+    to: dates.length ? dates.reduce((a, b) => (a > b ? a : b)) : base,
+  });
+  query.rangeLabel = 'збережене';
+
+  await deliver({
+    title: '🔖 Збережені',
+    query,
+    items,
+    log: ctx.log,
+    store: ctx.store,
+    chatId: user.chatId,
+    dryRun: ctx.dryRun,
+    maxPerDay: 0,
+    // a bookmark is not a delivery: it must not teach the deduper anything
+    record: false,
+    recordMessages: !ctx.dryRun,
+    cardState: () => ({ saved: true }),
+    footer: 'Тисни 🔖 ще раз під подією, щоб прибрати її звідси.',
+  });
 }
 
 /* ------------------------------------------------------------- the router --- */
@@ -854,9 +1190,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
       await showStep(ctx, user, step, reply, lead);
       return;
     }
-    await reply(`З поверненням. Твоє місто — ${escapeHtml(cityLabel(user.city))}.\n\n${COMMANDS}`, {
-      inlineKeyboard: quickActions(),
-    });
+    await reply(welcome(user), { inlineKeyboard: quickActions() });
     return;
   }
 
@@ -890,8 +1224,19 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
     case '/today':
     case '/tomorrow':
     case '/places':
+    case '/near':
       await runPreset(ctx, user, command.slice(1) as Preset, reply);
       return;
+
+    case '/find': {
+      const state: FindState = { cats: [] };
+      await setFind(ctx, chatId, state);
+      const screen = findCategoriesScreen(state);
+      return reply(screen.text, { inlineKeyboard: screen.inlineKeyboard });
+    }
+
+    case '/saved':
+      return showSaved(ctx, user, reply);
 
     case '/city': {
       const rest = text.slice(command.length).trim();
@@ -958,7 +1303,15 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
     }
   }
 
-  if (command) return reply(`Не знаю команди ${escapeHtml(command)}.\n\n${COMMANDS}`);
+  if (command) {
+    const near = closestCommand(command);
+    return reply(
+      `Не знаю команди ${escapeHtml(command)}.` +
+        (near ? ` Можливо, <b>/${escapeHtml(near)}</b>?` : '') +
+        `\n\n${COMMANDS}`,
+      { inlineKeyboard: quickActions() },
+    );
+  }
 
   /* --- 🔔 reminder ------------------------------------------------------ */
   const { bell, index } = parseBell(text);
@@ -996,11 +1349,16 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
  *                 onb:unfollow:<index> · onb:next · onb:skip
  *                 onb:step:<step> · onb:taste · onb:start · onb:later
  *                 when:hour:<0-23> · when:day:<0-6> (tap to flip a day on/off)
+ *   go:near · go:saved · go:find · go:prefs
+ *   find:…        the guided search: find:open · find:cat:<category>
+ *                 find:clear · find:when · find:run:<period> · find:cancel
  *   more          the next page of an answer, from the stash behind its
  *                 header; which answer comes from the message it is on
- *   ev:<verb>:<item id>  a button under an event card — ev:r toggles the
- *                 reminder, ev:no and ev:share are not built yet (📅 is a
- *                 plain link and never calls back)
+ *   ev:<verb>:<item id>  a button under an event card — ev:i opens its
+ *                 details and ev:b comes back, ev:s bookmarks it, ev:n hands
+ *                 out one more from the stash, ev:r toggles the reminder,
+ *                 ev:no teaches the taste model, ev:share is not built yet
+ *                 (📅 is a plain link and never calls back)
  *
  * Everything that changes a setting rewrites the panel it was tapped from, so
  * the chat keeps one settings screen rather than a stack of confirmations.
@@ -1045,8 +1403,9 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
       verb: cut < 0 ? arg : arg.slice(0, cut),
       itemId: cut < 0 ? '' : arg.slice(cut + 1),
       messageId,
-      photo: (cq.message?.photo?.length ?? 0) > 0,
-      draw,
+      // a card with a poster is a photo message: its caption is edited, not
+      // its text, and Telegram refuses the wrong one outright
+      isPhoto: Boolean(cq.message?.photo?.length),
       reply,
     });
   }
@@ -1056,8 +1415,70 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
   if (kind === 'go') {
     if (arg === 'settings') return drawPanel(false);
     if (arg === 'help') return reply(COMMANDS, { inlineKeyboard: quickActions() });
-    const presets: Preset[] = ['week', 'weekend', 'today', 'tomorrow', 'places'];
+    if (arg === 'saved') return showSaved(ctx, user, reply);
+    if (arg === 'prefs') return draw(tasteMenu(user), false);
+    if (arg === 'find') {
+      const state: FindState = { cats: [] };
+      await setFind(ctx, chatId, state);
+      const screen = findCategoriesScreen(state);
+      return draw(screen, false);
+    }
+    const presets: Preset[] = ['week', 'weekend', 'today', 'tomorrow', 'places', 'near'];
     if (presets.includes(arg as Preset)) return runPreset(ctx, user, arg as Preset, reply);
+    return;
+  }
+
+  if (kind === 'find') {
+    const cut = arg.indexOf(':');
+    const verb = cut < 0 ? arg : arg.slice(0, cut);
+    const payload = cut < 0 ? '' : arg.slice(cut + 1);
+    const state = await getFind(ctx, chatId);
+
+    switch (verb) {
+      case 'open':
+        return draw(findCategoriesScreen(state));
+
+      case 'cat': {
+        if (!EVENT_CATEGORIES.includes(payload as never)) return;
+        const next: FindState = {
+          cats: hasTag(state.cats, payload) ? state.cats.filter((c) => c !== payload) : [...state.cats, payload],
+        };
+        await setFind(ctx, chatId, next);
+        return draw(findCategoriesScreen(next));
+      }
+
+      case 'clear': {
+        const next: FindState = { cats: [] };
+        await setFind(ctx, chatId, next);
+        return draw(findCategoriesScreen(next));
+      }
+
+      case 'when':
+        return draw(findWhenScreen(state));
+
+      case 'cancel':
+        await ctx.store.setState(findKey(chatId), '');
+        return draw({ text: 'Гаразд, скасував пошук. /find — коли захочеш почати заново.', inlineKeyboard: quickActions() });
+
+      case 'run': {
+        const period = FIND_PERIODS.find((pp) => pp.key === payload);
+        if (!period) return;
+        const range = period.range(today(loadConfig().timezone));
+        // the screens have done their job; the answer is its own context now
+        await ctx.store.setState(findKey(chatId), '');
+        await draw({
+          text: `<b>🔎 ${escapeHtml(findChosen(state))}</b> · ${escapeHtml(range.label)}`,
+          inlineKeyboard: [],
+        });
+        return answerSearch(ctx, user, '', {
+          from: range.from,
+          to: range.to,
+          label: range.label,
+          like: state.cats,
+          reply,
+        }).then(() => undefined);
+      }
+    }
     return;
   }
 
@@ -1193,11 +1614,157 @@ const SOON: Record<string, string> = {
 };
 
 /**
+ * Walk the answer by one, in either direction, **on the card that was tapped**.
+ *
+ * This is the whole point of handing events over one at a time: the card is a
+ * cursor, not a feed. Tapping "Далі →" replaces the event in front of you
+ * instead of pushing another message into the chat, so a forty-event weekend
+ * is one message you move through, however far you walk.
+ *
+ * Telegram decides how that replacement happens. A message can have its text
+ * edited or its media swapped, but it cannot cross between the two: a photo
+ * card whose next event has no poster (or the reverse) has to be taken back
+ * and re-sent. Both paths end with the same thing on screen — one card — and
+ * the messages table is rewritten either way, so a ❤️ or an ⏰ on it means the
+ * event now showing and not the one that used to be there.
+ *
+ * The history lives in the stash next to the tail (`seen`), so "← Назад" costs
+ * a database read rather than another crawl of somebody's site, and the whole
+ * thing expires in an hour like the tail it walks.
+ */
+async function stepCard(
+  ctx: HandlerContext,
+  user: BotUser,
+  opts: {
+    current: Item;
+    direction: 'next' | 'prev';
+    messageId?: number;
+    isPhoto: boolean;
+    reply: Reply;
+  },
+): Promise<void> {
+  const { current, direction, messageId, isPhoto, reply } = opts;
+  const chatId = user.chatId;
+
+  const pointer = await ctx.store.getState(lastPageKey(chatId));
+  const header = Number(pointer);
+  const key = pointer && Number.isInteger(header) ? pageKey(chatId, header) : null;
+  const page = key ? await ctx.store.getPage(key) : null;
+  if (!key || !page) {
+    return reply('Той список уже застарів — попроси свіжий, і погортаємо далі.', { inlineKeyboard: quickActions() });
+  }
+
+  const target = direction === 'next' ? page.rest[0] : page.seen[page.seen.length - 1];
+  if (!target) {
+    return reply(
+      direction === 'next'
+        ? 'Це був останній із того списку. Попроси новий — або глянь /saved.'
+        : 'Це перша подія у списку — назад уже нікуди.',
+      { inlineKeyboard: quickActions() },
+    );
+  }
+
+  // the card you tapped becomes the cursor, wherever in the chat it sits
+  const seen = direction === 'next' ? [...page.seen, current] : page.seen.slice(0, -1);
+  const rest = direction === 'next' ? page.rest.slice(1) : [current, ...page.rest];
+  await ctx.store.putPage(key, { ...page, seen, rest, cardMessageId: messageId }, MORE_TTL_SECONDS);
+
+  const state: CardState = {
+    saved: await ctx.store.isSaved(chatId, target.id),
+    reminded: await ctx.store.hasReminder(chatId, target.id),
+    nextCount: rest.length,
+    prevCount: seen.length,
+  };
+  const format = ctx.dryRun ? ('text' as const) : ('html' as const);
+  const itemOpts = { format, withDay: true };
+  const keyboard = eventKeyboard(target, state);
+  const caption = target.image ? renderCaption(target, itemOpts) : null;
+  const wantsPhoto = Boolean(target.image && caption);
+
+  /** Take the card back and send the new one; the fallback, and the last resort. */
+  const resend = async (): Promise<void> => {
+    const outcome = await deliver({
+      title: page.title,
+      query: page.query,
+      items: [target],
+      log: ctx.log,
+      store: ctx.store,
+      chatId,
+      dryRun: ctx.dryRun,
+      maxPerDay: 0,
+      record: !ctx.dryRun,
+      withHeader: false,
+      cardState: () => state,
+    });
+    if (outcome.chatGone) return;
+    // sent first, taken back second: the other order leaves a gap where the
+    // answer has visibly disappeared
+    if (messageId !== undefined) {
+      await deleteMessage(messageId, { chatId, dryRun: ctx.dryRun, log: ctx.log });
+    }
+    const landed = outcome.messageIds[0];
+    if (landed !== undefined) await ctx.store.putPage(key, { ...page, seen, rest, cardMessageId: landed }, MORE_TTL_SECONDS);
+  };
+
+  if (messageId === undefined || wantsPhoto !== isPhoto) {
+    await resend();
+  } else {
+    try {
+      if (wantsPhoto && target.image && caption) {
+        await editMessageMedia(target.image, {
+          chatId,
+          messageId,
+          caption,
+          inlineKeyboard: keyboard,
+          dryRun: ctx.dryRun,
+          log: ctx.log,
+        });
+      } else {
+        await editMessageText(renderItem(target, itemOpts), {
+          chatId,
+          messageId,
+          inlineKeyboard: keyboard,
+          dryRun: ctx.dryRun,
+          log: ctx.log,
+        });
+      }
+      // the message now shows a different event, so what it resolves to has to
+      // change with it — this is what a ❤️ on the card reads
+      await ctx.store.recordMessage(chatId, messageId, [target]);
+      if (!ctx.dryRun) await ctx.store.recordSent(chatId, [target]);
+    } catch (err) {
+      // a poster Telegram will not fetch fails the edit, not the walk
+      if (err instanceof TelegramError && !err.chatGone) {
+        ctx.log.warn(`could not redraw card ${messageId} (${err.description ?? err.message}) — sending it instead`);
+        await resend();
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  // the header keeps the batch button honest, and loses it with the last page
+  await editMessageText(page.header, {
+    chatId,
+    messageId: header,
+    inlineKeyboard: rest.length > 0 ? moreButton(rest.length) : [],
+    dryRun: ctx.dryRun,
+    log: ctx.log,
+  });
+}
+
+/**
  * A tap on one of the buttons under an event card: `ev:<verb>:<item id>`.
  *
  * The event is resolved the way a ❤️ resolves one — through the messages
  * table, from the chat and the message the button sits on — and the id in the
  * callback data only picks the right one out when that message carried several.
+ * A bookmarked event is the last resort: it carries its own copy, so its
+ * buttons outlive the row that says which message showed it.
+ *
+ * Everything that changes the card's state (🔖, ⏰) redraws that same message
+ * rather than answering under it, which is why `isPhoto` has to come in: a
+ * card with a poster is a photo message and only its caption can be edited.
  *
  * ⏰ is the same switch as the heart: it goes through `addReminder`, which
  * un-cancels an existing row rather than adding a second one, so hearting and
@@ -1210,63 +1777,139 @@ async function handleCardButton(
     verb: string;
     itemId: string;
     messageId?: number;
-    /** The card went out as a photo, so its redraw has to be a caption. */
-    photo?: boolean;
-    draw: (screen: { text: string; inlineKeyboard: InlineButton[][] }, inPlace?: boolean) => Promise<void>;
+    isPhoto: boolean;
     reply: Reply;
   },
 ): Promise<void> {
-  const { verb, itemId, messageId, draw, reply } = opts;
+  const { verb, itemId, messageId, isPhoto, reply } = opts;
   const chatId = user.chatId;
 
   const items = messageId ? await ctx.store.itemsForMessage(chatId, messageId) : [];
-  const item = items.find((i) => i.id === itemId) ?? (items.length === 1 ? items[0] : undefined);
+  const item =
+    items.find((i) => i.id === itemId) ??
+    (items.length === 1 ? items[0] : undefined) ??
+    // the message→item row can be swept while the card is still on screen; a
+    // bookmarked event carries its own copy, so its buttons go on working
+    (itemId ? (await ctx.store.listSaved(chatId)).find((i) => i.id === itemId) : undefined);
   if (!item) {
-    return reply('Я вже не памʼятаю, про яку подію було те повідомлення — попроси свіжий список і спробуй там.');
+    return reply('Я вже не памʼятаю, про яку подію було те повідомлення — попроси свіжий список і спробуй там.', {
+      inlineKeyboard: quickActions(),
+    });
   }
 
-  if (verb === 'no') {
-    const unlearned = await learnFromThumbsDown(ctx, user, item);
-    ctx.log.info(
-      `chat ${chatId} thumbed down "${item.title}"` +
-        `${unlearned.tag ? ` (${unlearned.tag} → ${unlearned.score}${unlearned.demoted ? ', demoted' : ''})` : ''}` +
-        `${unlearned.blocked ? `, blocked ${unlearned.blocked}` : ''}`,
-    );
-    return reply(thumbsDownSaid(unlearned));
-  }
+  /** Where this card sits in the answer it came from, if that is still around. */
+  const cursor = async (): Promise<{ left: number; behind: number }> => {
+    const pointer = await ctx.store.getState(lastPageKey(chatId));
+    const header = Number(pointer);
+    if (!pointer || !Number.isInteger(header)) return { left: 0, behind: 0 };
+    const page = await ctx.store.getPage(pageKey(chatId, header));
+    return { left: page?.rest.length ?? 0, behind: page?.seen.length ?? 0 };
+  };
 
-  if (verb !== 'r') {
-    const said = SOON[verb];
-    return said ? reply(said) : undefined;
-  }
+  /** Everything the buttons under this card say about it, read fresh. */
+  const cardState = async (): Promise<CardState> => {
+    const { left, behind } = await cursor();
+    return {
+      reminded: await ctx.store.hasReminder(chatId, item.id),
+      saved: await ctx.store.isSaved(chatId, item.id),
+      nextCount: left,
+      prevCount: behind,
+    };
+  };
 
-  const reminded = await ctx.store.hasReminder(chatId, item.id);
-  if (reminded) {
-    await ctx.store.cancelReminder(chatId, item.id);
-    ctx.log.info(`chat ${chatId} un-belled "${item.title}"`);
-  } else {
-    const outcome = await ctx.store.addReminder(chatId, item);
-    if (outcome === 'no-date') {
-      return reply(`У «${escapeHtml(item.title)}» ще немає часу початку, тож нагадування не поставлю.`);
+  /**
+   * Redraw this card in place — as a caption when it went out with a poster,
+   * as text when it did not. Either way the message stays where it is in the
+   * chat, instead of a copy of it arriving at the bottom.
+   */
+  const redraw = async (screen: { text: string; caption: string; inlineKeyboard: InlineButton[][] }): Promise<void> => {
+    if (messageId === undefined) {
+      await reply(screen.text, { inlineKeyboard: screen.inlineKeyboard });
+      return;
     }
-    const learned = await learnFromHeart(ctx, user, item);
-    ctx.log.info(`chat ${chatId} belled "${item.title}" (reminder ${outcome}${learned.tag ? `, learned ${learned.tag}` : ''})`);
-  }
+    const common = { chatId, messageId, inlineKeyboard: screen.inlineKeyboard, dryRun: ctx.dryRun, log: ctx.log };
+    if (isPhoto) await editMessageCaption(screen.caption, common);
+    else await editMessageText(screen.text, common);
+  };
 
-  // the card itself is the feedback: the same text, with ⏰ flipped over —
-  // as a caption under the poster when the card is a photo, where Telegram
-  // allows 1024 characters, not the 4096 a message gets
-  const itemOpts = { format: ctx.dryRun ? ('text' as const) : ('html' as const), withDay: true };
-  const keyboard = eventKeyboard(item, { reminded: !reminded });
-  if (opts.photo) {
-    const caption = renderCaption(item, itemOpts);
-    // renderCaption gives up only on an absurd URL; rather than edit the photo
-    // into a caption Telegram will reject, hand over a card of its own
-    return caption
-      ? draw({ text: caption, inlineKeyboard: keyboard })
-      : draw({ text: renderItem(item, itemOpts), inlineKeyboard: keyboard }, false);
+  const format = ctx.dryRun ? ('text' as const) : ('html' as const);
+  const showCard = async (): Promise<void> => {
+    const state = await cardState();
+    const itemOpts = { format, withDay: true };
+    await redraw({
+      text: renderItem(item, itemOpts),
+      caption: renderCaption(item, itemOpts) ?? renderItem(item, { ...itemOpts, compact: true }),
+      inlineKeyboard: eventKeyboard(item, state),
+    });
+  };
+  const showDetails = async (): Promise<void> => {
+    const state = await cardState();
+    await redraw({
+      text: renderDetails(item, { format }),
+      caption: renderDetailsCaption(item, { format }),
+      inlineKeyboard: detailsKeyboard(item, state),
+    });
+  };
+
+  switch (verb) {
+    case 'i':
+      return showDetails();
+
+    case 'b':
+      return showCard();
+
+    case 's': {
+      if (await ctx.store.isSaved(chatId, item.id)) {
+        await ctx.store.unsaveItem(chatId, item.id);
+        ctx.log.info(`chat ${chatId} un-saved "${item.title}"`);
+      } else {
+        await ctx.store.saveItem(chatId, item);
+        ctx.log.info(`chat ${chatId} saved "${item.title}"`);
+      }
+      // the card is the receipt: the same message, with 🔖 flipped over
+      return showCard();
+    }
+
+    // walking, not searching: nothing is scraped and nothing is re-ranked
+    case 'n':
+      return stepCard(ctx, user, { current: item, direction: 'next', messageId, isPhoto, reply });
+
+    case 'p':
+      return stepCard(ctx, user, { current: item, direction: 'prev', messageId, isPhoto, reply });
+
+    case 'no': {
+      const unlearned = await learnFromThumbsDown(ctx, user, item);
+      ctx.log.info(
+        `chat ${chatId} thumbed down "${item.title}"` +
+          `${unlearned.tag ? ` (${unlearned.tag} → ${unlearned.score}${unlearned.demoted ? ', demoted' : ''})` : ''}` +
+          `${unlearned.blocked ? `, blocked ${unlearned.blocked}` : ''}`,
+      );
+      return reply(thumbsDownSaid(unlearned));
+    }
+
+    case 'r': {
+      const reminded = await ctx.store.hasReminder(chatId, item.id);
+      if (reminded) {
+        await ctx.store.cancelReminder(chatId, item.id);
+        ctx.log.info(`chat ${chatId} un-belled "${item.title}"`);
+      } else {
+        const outcome = await ctx.store.addReminder(chatId, item);
+        if (outcome === 'no-date') {
+          return reply(`У «${escapeHtml(item.title)}» ще немає часу початку, тож нагадування не поставлю.`);
+        }
+        const learned = await learnFromHeart(ctx, user, item);
+        ctx.log.info(
+          `chat ${chatId} belled "${item.title}" (reminder ${outcome}${learned.tag ? `, learned ${learned.tag}` : ''})`,
+        );
+      }
+      return showCard();
+    }
+
+    default: {
+      const said = SOON[verb];
+      return said ? reply(said) : undefined;
+    }
   }
-  return draw({ text: renderItem(item, itemOpts), inlineKeyboard: keyboard });
 }
 
 async function handleBell(ctx: HandlerContext, msg: TgMessage, chatId: string, index?: number): Promise<string> {
