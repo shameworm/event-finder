@@ -9,11 +9,12 @@ import type { Item, Kind, Query } from './types.ts';
 import { DIGEST_PAGE_TTL_SECONDS, lastPageKey, pageKey, type OptIn, type Store } from './db.ts';
 import type { Logger } from './log.ts';
 import { loadConfig } from './config.ts';
-import { collectCity } from './cache.ts';
+import { collectCity, type CollectOptions } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
 import { WALK_HINT } from './render.ts';
 import { allUsers, citiesFor, type BotUser } from './users.ts';
+import { recordTick, type SourceObservation } from './health.ts';
 import { digestDueNow, inQuietHours, wantsOnlyMine, type DigestKind } from './schedule.ts';
 import { localTime, localWeekday, sleep, today } from './util.ts';
 
@@ -39,6 +40,8 @@ export interface FanoutJob {
   sources?: string[];
   maxPages?: number;
   dryRun?: boolean;
+  /** Passed through to the collectors; the test suite serves fixtures with it. */
+  fetchText?: CollectOptions['fetchText'];
   /** Say nothing rather than sending an empty digest. Default true. */
   skipEmpty?: boolean;
   /**
@@ -83,6 +86,15 @@ export interface FanoutResult {
   quiet: number;
   /** Wanted "only when there is something of mine" and there was not. */
   notTheirs: number;
+  /**
+   * Sources that went quiet once too often and that the owner was told about
+   * on this tick. See src/health.ts — these are the ones that returned nothing
+   * while others found events in the same cities, which is the only way an
+   * ok-but-empty scraper ever makes a noise.
+   */
+  deadSources: string[];
+  /** Sources that started returning items again on this tick. */
+  recoveredSources: string[];
 }
 
 export async function fanout(job: FanoutJob): Promise<FanoutResult> {
@@ -94,6 +106,7 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
   const empty = (): FanoutResult => ({
     users: 0, recipients: 0, items: 0, cities: 0, scrapes: 0, cacheHits: 0,
     failedSources: [], failedUsers: 0, notNow: 0, quiet: 0, notTheirs: 0,
+    deadSources: [], recoveredSources: [],
   });
 
   let users = await allUsers(job.store, job.optIn, job.log);
@@ -144,6 +157,11 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
     cities: wanted.size,
   };
   const sentTo = new Set<string>();
+  /**
+   * This tick's picture, per city and source, for the dead-source detector.
+   * Only real scrapes land here — a cache hit asked nobody anything.
+   */
+  const observed: SourceObservation[] = [];
 
   for (const [city, cityUsers] of wanted) {
     const collected = await collectCity({
@@ -155,10 +173,12 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
       kinds,
       sources: job.sources,
       maxPages: job.maxPages,
+      fetchText: job.fetchText,
     });
     if (collected.cached) result.cacheHits++;
     else result.scrapes++;
     for (const f of collected.failedSources) if (!result.failedSources.includes(f)) result.failedSources.push(f);
+    for (const s of collected.perSource ?? []) observed.push({ ...s, city });
 
     if (collected.items.length === 0) {
       job.log.info(`${city}: nothing collected`);
@@ -180,12 +200,20 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
     }
   }
 
+  // the detector only ever reads runs that already happened, so this costs no
+  // extra requests to anybody's site
+  const health = await recordTick(job.store, observed, { log: job.log, dryRun: job.dryRun });
+  result.deadSources = health.dead;
+  result.recoveredSources = health.recovered;
+
   await job.store.prune();
   job.log.info(
     `${job.optIn}: ${result.items} item(s) to ${result.recipients}/${result.users} user(s); ` +
       `${result.scrapes} scrape(s), ${result.cacheHits} cache hit(s)` +
       `${result.failedUsers ? `; ${result.failedUsers} user(s) failed` : ''}` +
-      `${result.failedSources.length ? `; failed: ${result.failedSources.join(', ')}` : ''}`,
+      `${result.failedSources.length ? `; failed: ${result.failedSources.join(', ')}` : ''}` +
+      `${result.deadSources.length ? `; looks dead: ${result.deadSources.join(', ')}` : ''}` +
+      `${result.recoveredSources.length ? `; back: ${result.recoveredSources.join(', ')}` : ''}`,
   );
   return result;
 

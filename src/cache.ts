@@ -49,6 +49,13 @@ export interface CollectResult {
   items: Item[];
   cached: boolean;
   failedSources: string[];
+  /**
+   * What each source came back with, for src/health.ts.
+   *
+   * Absent on a cache hit on purpose: a hit means nobody asked the sites
+   * anything, so it is no evidence either way about whether they still work.
+   */
+  perSource?: { source: string; items: number; ok: boolean; skipped: boolean }[];
 }
 
 /**
@@ -124,5 +131,17 @@ async function scrapeCity(
   if (ttl > 0 && (result.all.length > 0 || result.failedSources.length === 0)) {
     await opts.store.putCache(key, result.all, ttl);
   }
-  return { items: result.all, cached: false, failedSources: result.failedSources };
+  return {
+    items: result.all,
+    cached: false,
+    failedSources: result.failedSources,
+    // pipeline results are one per source for one city, and their items are
+    // pre-ranking: what the parser actually pulled off the page
+    perSource: result.results.map((r) => ({
+      source: r.source,
+      items: r.items.length,
+      ok: r.ok,
+      skipped: r.skipped ?? false,
+    })),
+  };
 }

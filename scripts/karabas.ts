@@ -25,7 +25,7 @@ export async function collect(ctx: SourceContext): Promise<SourceResult> {
   const sourceCfg = cfg.cities[ctx.city]?.karabas;
   if (!sourceCfg?.subdomain) {
     ctx.log.warn(`${SOURCE}: no karabas.subdomain for city "${ctx.city}" in config.yaml — skipping`);
-    return { source: SOURCE, ok: true, items: [] };
+    return { source: SOURCE, ok: true, items: [], skipped: true };
   }
 
   const paths = sourceCfg.paths?.length ? sourceCfg.paths : ['/'];
