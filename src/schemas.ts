@@ -80,6 +80,12 @@ export const ConfigSchema = z.strictObject({
       allowlist: z.array(z.coerce.string()).default([]),
       /** Searches per user per hour; each one can trigger a scrape. */
       searches_per_hour: z.number().int().positive().default(20),
+      /**
+       * /feedback messages per user per hour. Its own budget, in its own
+       * hourly bucket: a bug report must not cost somebody a search, and a
+       * channel pointing at one human still needs a floodgate.
+       */
+      feedback_per_hour: z.number().int().positive().default(5),
       /** Items the header's "показати ще" hands out in one go. */
       max_results: z.number().int().positive().default(10),
       /**

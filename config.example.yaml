@@ -35,6 +35,8 @@ bot:
   public: true             # false = only chat ids in `allowlist` may use it
   allowlist: []            # e.g. ["123456789"] — only used when public: false
   searches_per_hour: 20    # per user; an on-demand search can trigger a scrape
+  feedback_per_hour: 5     # /feedback messages per user per hour — its own
+                           # hourly bucket, so writing in never costs a search
   cards_at_once: 1         # cards sent straight away; "Далі →" walks the rest one by one
   max_results: 10          # how many "показати ще" on the header hands out in one go
   interactive_pages: 2     # pages per source when someone is waiting on a reply

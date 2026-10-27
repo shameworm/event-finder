@@ -1503,6 +1503,10 @@ interface FakeCall {
   body: Record<string, unknown>;
 }
 
+/**
+ * A stubbed Bot API: for the cases whose point is what the *send* does, which
+ * a dry run never reaches — a poster Telegram rejects, a chat it says is gone.
+ */
 async function withFakeTelegram<T>(
   reply: (call: FakeCall) => { ok: boolean; description?: string; status?: number },
   body: (calls: FakeCall[]) => Promise<T>,
@@ -2715,6 +2719,11 @@ async function captureOutput(body: () => Promise<unknown>): Promise<string> {
   return chunks.join('');
 }
 
+interface FakeCall {
+  method: string;
+  body: Record<string, unknown>;
+}
+
 /** Capture what the bot would say to one message. */
 async function say(store: StoreType, chatId: string, text: string, extra: Record<string, unknown> = {}): Promise<string> {
   return captureOutput(() =>
@@ -3699,6 +3708,7 @@ describe('deliver', () => {
     });
   });
 
+  /** A card with a poster, for the two tests that go through `withFakeTelegram`. */
   const withPoster = (n: number) =>
     makeItem({
       city: 'kharkiv',
@@ -4581,6 +4591,397 @@ describe('/stats', () => {
         if (owner === undefined) delete process.env['TELEGRAM_CHAT_ID'];
         else process.env['TELEGRAM_CHAT_ID'] = owner;
       }
+    });
+  });
+});
+
+/* ----------------------------------------------------------- the operator --- */
+
+describe('the operator', () => {
+  /**
+   * isOwner() reads TELEGRAM_CHAT_ID, so every case here pins it — including
+   * the ones about *not* being the owner, which would otherwise depend on
+   * whatever is in the machine's ~/.hermes/.env.
+   */
+  async function withOwner<T>(chatId: string, body: () => Promise<T>): Promise<T> {
+    const real = process.env['TELEGRAM_CHAT_ID'];
+    process.env['TELEGRAM_CHAT_ID'] = chatId;
+    try {
+      return await body();
+    } finally {
+      if (real === undefined) delete process.env['TELEGRAM_CHAT_ID'];
+      else process.env['TELEGRAM_CHAT_ID'] = real;
+    }
+  }
+
+  /**
+   * Every case in this file shares one database, so "every user" means every
+   * user the whole suite has ever registered. This narrows the audience to the
+   * chats one case is about, and puts the rest back afterwards.
+   */
+  async function withAudience<T>(store: StoreType, chatIds: string[], body: () => Promise<T>): Promise<T> {
+    const others = (await store.listUsers()).map((u) => u.chat_id).filter((id) => !chatIds.includes(id));
+    for (const id of others) await store.setBlocked(id, true);
+    try {
+      return await body();
+    } finally {
+      for (const id of others) await store.setBlocked(id, false);
+    }
+  }
+
+  /**
+   * The counters are global too, and `bump` takes a negative — which is all a
+   * reset needs to be for a case that wants to read an absolute number.
+   */
+  async function zeroCounters(store: StoreType): Promise<void> {
+    for (const [key, n] of Object.entries(await store.counters())) await store.bump(key, -n);
+  }
+
+  /** A registered user who has already been offered the one-time setup nudge. */
+  async function member(store: StoreType, chatId: string, city = 'kharkiv'): Promise<void> {
+    await registerUser(store, { chatId, city });
+    await store.setState(`setup_offered:${chatId}`, 'done');
+  }
+
+  async function press(store: StoreType, chatId: string, data: string): Promise<string> {
+    return captureOutput(() =>
+      handleCallback({ store, log, dryRun: true }, {
+        id: 'cb',
+        data,
+        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' } },
+        from: { id: Number(chatId) },
+      } as never),
+    );
+  }
+
+  it('answers /broadcast and /stats the same way to anyone who is not the owner', async () => {
+    await withTestStore(async (store) => {
+      await withOwner('4001', async () => {
+        await member(store, '4002');
+        const stats = await say(store, '4002', '/stats');
+        const bc = await say(store, '4002', '/broadcast привіт усім');
+        assert.ok(stats.includes('для власника бота'), stats.slice(0, 300));
+        // word for word the same answer: a different one would tell a stranger
+        // which of the two commands exists
+        assert.equal(bc.trim(), stats.trim());
+        assert.equal(await store.getState('broadcast:4002'), null, 'a stranger cannot even leave a draft');
+      });
+    });
+  });
+
+  it('previews a broadcast and sends nothing until the confirm button is tapped', async () => {
+    await withTestStore(async (store) => {
+      await withOwner('4101', async () => {
+        for (const chatId of ['4101', '4102']) await member(store, chatId);
+        await member(store, '4103', 'lviv');
+        await withAudience(store, ['4101', '4102', '4103'], async () => {
+          const preview = await say(store, '4101', '/broadcast Я тепер умію /find');
+          assert.ok(preview.includes('Я тепер умію /find'), 'the preview is the announcement itself');
+          assert.ok(preview.includes('Broadcast preview'), preview.slice(0, 400));
+          assert.ok(preview.includes('(bc:send)') && preview.includes('(bc:cancel)'), preview.slice(-400));
+          assert.ok(!preview.includes('to chat 4102'), 'nothing reaches a user from the preview');
+          assert.equal(await store.getState('broadcast:4101'), 'Я тепер умію /find');
+
+          const sent = await press(store, '4101', 'bc:send');
+          for (const chatId of ['4101', '4102', '4103']) {
+            assert.ok(sent.includes(`to chat ${chatId}`), `${chatId} was skipped\n${sent}`);
+          }
+          assert.ok(sent.includes('delivered:  3'), sent.slice(-500));
+          assert.ok(sent.includes('fell off:   0'), sent.slice(-500));
+          assert.equal(await store.getState('broadcast:4101'), '', 'the draft is spent, so a second tap cannot repeat it');
+
+          const again = await press(store, '4101', 'bc:send');
+          assert.ok(again.includes('that draft is gone'), again.slice(0, 400));
+          assert.ok(!again.includes('to chat 4102'), 'and it really does not send again');
+        });
+      });
+    });
+  });
+
+  it('throws a broadcast away when it is cancelled', async () => {
+    await withTestStore(async (store) => {
+      await withOwner('4111', async () => {
+        await member(store, '4111');
+        await member(store, '4112');
+        await withAudience(store, ['4111', '4112'], async () => {
+          await say(store, '4111', '/broadcast щось не те');
+          const out = await press(store, '4111', 'bc:cancel');
+          assert.ok(out.includes('Broadcast cancelled'), out.slice(0, 400));
+          assert.ok(!out.includes('to chat 4112'), out.slice(0, 400));
+          assert.equal(await store.getState('broadcast:4111'), '');
+        });
+      });
+    });
+  });
+
+  /**
+   * The one thing a send to every user has to get right. A chat that has
+   * blocked the bot must come out of the audience, or every broadcast and
+   * every digest from here on spends a slot on it.
+   */
+  it('marks a chat that has blocked the bot, and reports how many fell off', async () => {
+    await withTestStore(async (store) => {
+      await withOwner('4201', async () => {
+        for (const chatId of ['4201', '4202', '4203']) await member(store, chatId);
+        await withAudience(store, ['4201', '4202', '4203'], async () => {
+          await store.setState('broadcast:4201', 'Привіт!');
+          const report = await withFakeTelegram(
+            (call) =>
+              call.body['chat_id'] === '4203'
+                ? { ok: false, status: 403, description: 'Forbidden: bot was blocked by the user' }
+                : { ok: true },
+            async (calls) => {
+              await handleCallback({ store, log }, {
+                id: 'cb',
+                data: 'bc:send',
+                message: { message_id: 42, date: 0, chat: { id: '4201', type: 'private' } },
+                from: { id: 4201 },
+              } as never);
+              return String(calls.at(-1)?.body['text'] ?? '');
+            },
+          );
+
+          assert.equal((await store.getUser('4203'))?.blocked, 1, 'the blocked chat is marked blocked');
+          assert.equal((await store.getUser('4202'))?.blocked, 0);
+          assert.ok(report.includes('delivered:  2'), report);
+          assert.ok(report.includes('fell off:   1'), report);
+          assert.ok(report.includes('4203'), 'the report names who fell off');
+          assert.ok(!(await store.listUsers()).some((u) => u.chat_id === '4203'), 'and it is out of the audience');
+        });
+      });
+    });
+  });
+
+  it('stores feedback, passes it to the owner, and thanks the person', async () => {
+    await withTestStore(async (store) => {
+      await withOwner('4401', async () => {
+        await member(store, '4402');
+        const out = await say(store, '4402', '/feedback «Далі →» показує ту саму подію двічі', {
+          from: { id: 4402, username: 'olena' },
+        });
+        assert.ok(out.includes('Дякую'), out.slice(-400));
+        assert.ok(out.includes('to chat 4401'), 'the owner hears about it too');
+        assert.ok(out.includes('olena'), 'and knows who said it');
+
+        const mine = (await store.listFeedback(500)).filter((r) => r.chat_id === '4402');
+        assert.equal(mine.length, 1);
+        assert.equal(mine[0]!.username, 'olena');
+        assert.equal(mine[0]!.text, '«Далі →» показує ту саму подію двічі');
+      });
+    });
+  });
+
+  it('reads the stored feedback back to the owner on a bare /feedback', async () => {
+    await withTestStore(async (store) => {
+      await withOwner('4431', async () => {
+        await member(store, '4431');
+        await member(store, '4432');
+        await say(store, '4432', '/feedback у Полтаві нічого не знаходить', { from: { id: 4432, username: 'ihor' } });
+        const inbox = await say(store, '4431', '/feedback');
+        assert.ok(inbox.includes('Feedback'), inbox.slice(0, 300));
+        assert.ok(inbox.includes('у Полтаві нічого не знаходить'), inbox);
+        assert.ok(inbox.includes('@ihor'), inbox);
+        assert.ok(!inbox.includes('одним повідомленням'), 'the owner gets the inbox, not the usage hint');
+      });
+    });
+  });
+
+  it('asks for the message when /feedback arrives on its own', async () => {
+    await withTestStore(async (store) => {
+      await member(store, '4411');
+      const out = await say(store, '4411', '/feedback');
+      assert.ok(out.includes('одним повідомленням'), out.slice(0, 400));
+      assert.equal((await store.listFeedback(500)).filter((r) => r.chat_id === '4411').length, 0);
+    });
+  });
+
+  it('rate-limits feedback in its own hourly bucket, without costing a search', async () => {
+    await withTestStore(async (store) => {
+      await member(store, '4421');
+      const limit = loadConfig().bot.feedback_per_hour;
+      for (let i = 0; i < limit; i++) await say(store, '4421', `/feedback думка ${i}`);
+      const over = await say(store, '4421', '/feedback ще одна думка');
+
+      assert.ok(over.includes('більше поки не приймаю'), over.slice(0, 400));
+      const mine = (await store.listFeedback(500)).filter((r) => r.chat_id === '4421');
+      assert.equal(mine.length, limit, 'the one over the line is not stored');
+      // the search budget is a different bucket, so writing in never spends one
+      assert.equal((await store.hitRateLimit('4421', 100)).used, 1);
+    });
+  });
+
+  /* ----------------------------------------------------------- the metrics --- */
+
+  /**
+   * Distinct *words*, not distinct numbers: an item's id is a hash of its
+   * title signature and its day, and a digit is not part of that signature —
+   * "Подія 4" and "Подія 5" would be one event in `deliveries`.
+   */
+  const gig = (title: string, hour = 19) =>
+    makeItem({
+      city: 'kharkiv',
+      title,
+      url: `https://m/${encodeURIComponent(title)}`,
+      source: 's',
+      category: 'standup',
+      startsAt: `2026-10-23T${hour}:00:00+03:00`,
+    })!;
+  const someQuery = parseRequest('', { prefs, base: '2026-10-20', from: '2026-10-23', to: '2026-10-25' });
+
+  it('counts an answer as walked once, however many times it is stepped', async () => {
+    await withTestStore(async (store) => {
+      await member(store, '4501');
+      const items = ['Відкритий мікрофон', 'Імпровізація у підвалі', 'Монологи на даху'].map((t, i) => gig(t, 17 + i));
+      await zeroCounters(store);
+      await store.recordStash();
+      await store.recordStash(); // a second answer nobody ever touched
+      await store.putPage(
+        'more:4501:40',
+        { header: '🗓 Харків', title: '🗓 Харків', query: someQuery, rest: items.slice(1), size: 10, ttlSeconds: 3600 },
+      );
+      await store.setState('lastpage:4501', '40');
+      await store.recordMessage('4501', 42, [items[0]!]);
+
+      await press(store, '4501', `ev:n:${items[0]!.id}`);
+      await press(store, '4501', `ev:n:${items[1]!.id}`);
+
+      const m = await store.metrics();
+      assert.equal(m.paging.answers, 2, 'both answers had a tail');
+      assert.equal(m.paging.paged, 1, 'only one of them was ever walked');
+      assert.equal(m.paging.steps, 2);
+      assert.equal(m.paging.depth, 2, 'averaged over the answers that were walked, not over all of them');
+      assert.equal(m.paging.share, 50);
+      assert.equal(m.paging.batches, 0);
+      assert.equal((await store.getPage('more:4501:40'))?.paged, true);
+    });
+  });
+
+  it('counts the header’s list button apart from the card cursor', async () => {
+    await withTestStore(async (store) => {
+      await member(store, '4511');
+      await zeroCounters(store);
+      await store.putPage(
+        'more:4511:42',
+        { header: '🗓 Харків', title: '🗓 Харків', query: someQuery, rest: [gig('Жарти наживо'), gig('Квартет на пероні', 20)], size: 1, ttlSeconds: 3600 },
+      );
+      await press(store, '4511', 'more');
+      const m = await store.metrics();
+      assert.equal(m.paging.batches, 1);
+      assert.equal(m.paging.steps, 0, 'asking for a list is not walking the cursor');
+      assert.equal(m.paging.paged, 0);
+    });
+  });
+
+  it('counts ❤️, 👎 and 🔖 against the job that sent the card', async () => {
+    await withTestStore(async (store) => {
+      await member(store, '4601');
+      const weekly = gig('Стендап-концерт у середу');
+      const mine = gig('Виставка плакатів', 16);
+      await zeroCounters(store);
+      // one card from the weekly digest, one from an answer they asked for
+      await store.recordSent('4601', [weekly], 'weekly');
+      await store.recordMessage('4601', 42, [weekly], 'weekly');
+      await store.recordSent('4601', [mine], 'search');
+      await store.recordMessage('4601', 43, [mine], 'search');
+
+      await press(store, '4601', `ev:s:${weekly.id}`);
+      await press(store, '4601', `ev:no:${weekly.id}`);
+      await captureOutput(() =>
+        handleReaction({ store, log, dryRun: true }, TgReactionUpdateSchema.parse({
+          chat: { id: '4601', type: 'private' },
+          message_id: 42,
+          date: 0,
+          old_reaction: [],
+          new_reaction: [{ type: 'emoji', emoji: '❤️' }],
+        })),
+      );
+
+      const m = await store.metrics();
+      const job = (name: string) => m.jobs.find((j) => j.job === name);
+      assert.deepEqual(job('weekly'), { job: 'weekly', sent: 1, heart: 1, down: 1, save: 1, remind: 0 });
+      assert.deepEqual(job('search'), { job: 'search', sent: 1, heart: 0, down: 0, save: 0, remind: 0 });
+      assert.deepEqual(job('places'), { job: 'places', sent: 0, heart: 0, down: 0, save: 0, remind: 0 });
+      // three gestures, one event: coverage counts events, not taps
+      assert.deepEqual(m.coverage, { sent: 2, gestured: 1, share: 50 });
+    });
+  });
+
+  it('counts how often rank() had to pad a list, overall and per city', async () => {
+    await withTestStore(async (store) => {
+      const window = { from: '2026-10-23', to: '2026-10-25', label: 'weekend' };
+      const classical = makeItem({
+        city: 'kharkiv', title: 'Класика при свічках', url: 'https://x/cl2', source: 'karabas',
+        category: 'concert', startsAt: '2026-10-24T18:00:00+03:00', status: 'scheduled',
+      })!;
+      await store.putCache(
+        cacheKey({ city: 'kharkiv', from: window.from, to: window.to, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().http.max_pages),
+        [classical],
+        600,
+      );
+      await member(store, '4701');
+      const user = (await getUser(store, '4701'))!;
+      // they like stand-up; the only thing on is a classical concert, so the
+      // ranker has to let it back in rather than send an empty digest
+      await saveUserPrefs(store, user, { ...user.prefs, favourite_categories: ['standup'], disliked_categories: [] });
+      await zeroCounters(store);
+
+      await fanout({
+        store, log, optIn: 'weekly_digest', window, dryRun: true,
+        title: () => 'W', onlyChats: ['4701'], now: { hour: 12, weekday: 1 },
+      });
+
+      const m = await store.metrics();
+      assert.equal(m.padding.calls, 1);
+      assert.equal(m.padding.padded, 1);
+      assert.equal(m.padding.topups, 1);
+      assert.equal(m.padding.share, 100);
+      assert.deepEqual(m.padding.cities, [{ city: 'kharkiv', calls: 1, padded: 1 }]);
+    });
+  });
+
+  /**
+   * The constraint behind all of this: a tap must cost an increment, not a row.
+   * Ten taps on one card leave the table exactly as wide as the first tap did.
+   */
+  it('keeps the metrics as counters rather than a row per tap', async () => {
+    await withTestStore(async (store) => {
+      await member(store, '4801');
+      const item = gig('Лекція про панельки');
+      await store.recordSent('4801', [item], 'weekly');
+      await store.recordMessage('4801', 42, [item], 'weekly');
+
+      await press(store, '4801', `ev:s:${item.id}`);
+      const afterOne = Object.keys(await store.counters()).length;
+      for (let i = 0; i < 10; i++) await press(store, '4801', `ev:s:${item.id}`);
+
+      assert.equal(Object.keys(await store.counters()).length, afterOne, 'ten more taps, not one more row');
+      assert.equal((await store.metrics()).coverage.gestured >= 1, true, 'and the event is still counted once');
+    });
+  });
+
+  it('reports every metric to the owner, in English, under /stats', async () => {
+    await withTestStore(async (store) => {
+      await withOwner('4901', async () => {
+        await member(store, '4901');
+        await zeroCounters(store);
+        await store.recordStash();
+        await store.recordStep(true);
+        await store.recordRank(3, 'kharkiv');
+        const out = await say(store, '4901', '/stats');
+        for (const heading of [
+          'Bot stats',
+          'Do people page?',
+          'Reactions per job',
+          'Sent events that got any gesture',
+          'How often rank() pads the list',
+        ]) {
+          assert.ok(out.includes(heading), `${heading} is missing from /stats:\n${out}`);
+        }
+        assert.ok(out.includes('feedback:'), 'the row counts cover the new table too');
+        assert.ok(out.includes('walked at least once:   1 (100%)'), out);
+        assert.ok(out.includes('1/1 answers (100%), 3 event(s) added'), out);
+        assert.ok(out.includes('kharkiv     1/1'), out);
+      });
     });
   });
 });

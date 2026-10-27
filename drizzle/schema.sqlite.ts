@@ -69,6 +69,13 @@ export const deliveries = sqliteTable(
     lastSentAt: text('last_sent_at').notNull(),
     sendCount: integer('send_count').notNull().default(1),
     payload: text('payload'),
+    /**
+     * How many times this person touched this event — ❤️, 👎, 🔖 or ⏰. Only
+     * ever read as "was it ever zero", which is what lets /stats report the
+     * share of sent events that got any gesture at all without keeping a row
+     * per tap. Additive with a default, so old rows read as "never touched".
+     */
+    gestures: integer('gestures').notNull().default(0),
   },
   (t) => [primaryKey({ columns: [t.chatId, t.itemId] }), index('idx_deliveries_last').on(t.lastSentAt)],
 );
@@ -82,6 +89,13 @@ export const messages = sqliteTable(
     itemId: text('item_id').notNull(),
     sentAt: text('sent_at').notNull(),
     payload: text('payload'),
+    /**
+     * Which job put this card in the chat — see `Job` in src/db.ts. It is how
+     * a ❤️ three days later is counted against the weekly digest rather than
+     * against a search. Defaulted to 'search', the on-demand case, so rows
+     * written before this column read as what they almost all were.
+     */
+    job: text('job').notNull().default('search'),
   },
   (t) => [primaryKey({ columns: [t.chatId, t.messageId] })],
 );
@@ -173,4 +187,33 @@ export const taught = sqliteTable(
     createdAt: text('created_at').notNull(),
   },
   (t) => [primaryKey({ columns: [t.chatId, t.itemId] })],
+);
+
+/**
+ * The metrics counters: one row per key, incremented in place.
+ *
+ * Deliberately not a log. "How many people tapped Далі →" is a number, and a
+ * row per tap would grow forever for an answer nobody will ever ask again —
+ * see `Store.prune()` for how the rest of the bookkeeping is kept bounded.
+ */
+export const counters = sqliteTable('counters', {
+  key: text('key').primaryKey(),
+  n: integer('n').notNull().default(0),
+});
+
+/**
+ * What users said with /feedback. Kept rather than forwarded: a message
+ * relayed to the owner's chat and nowhere else is lost the moment they scroll
+ * past it, and this is the only channel pointing this way.
+ */
+export const feedback = sqliteTable(
+  'feedback',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    chatId: text('chat_id').notNull(),
+    username: text('username'),
+    text: text('text').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [index('idx_feedback_created').on(t.createdAt)],
 );

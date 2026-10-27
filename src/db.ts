@@ -226,6 +226,27 @@ async function bootstrap(d: Driver): Promise<void> {
     value text
   )`);
 
+  await d.run(sql`CREATE TABLE IF NOT EXISTS ${t.counters} (
+    key text PRIMARY KEY,
+    n   integer NOT NULL DEFAULT 0
+  )`);
+
+  await d.run(sql`CREATE TABLE IF NOT EXISTS ${t.feedback} (
+    id         ${pk},
+    chat_id    text NOT NULL,
+    username   text,
+    text       text NOT NULL,
+    created_at text NOT NULL
+  )`);
+  await d.run(sql`CREATE INDEX IF NOT EXISTS idx_feedback_created ON ${t.feedback} (created_at)`);
+
+  // the metrics columns, on tables that already exist in every database out
+  // there. Both are additive with a default that reads the old rows the only
+  // way they can be read: nobody has touched this event, and the card came
+  // from a search (which, before the digests were instrumented, it had).
+  await addColumn(d, 'deliveries', 'gestures', `integer NOT NULL DEFAULT 0`);
+  await addColumn(d, 'messages', 'job', `text NOT NULL DEFAULT 'search'`);
+
   // tables from the single-user version this bot replaced; they only held
   // dedupe bookkeeping, so dropping them costs at most one repeated digest
   for (const legacy of ['sent', 'announced', 'alerts']) {
@@ -310,6 +331,7 @@ export interface SendDecision {
 export type OptIn = 'weekly_digest' | 'weekend_digest' | 'follow_alerts' | 'place_tips';
 
 /**
+/**
  * How long an answer's unshown tail stays pageable.
  *
  * An answer you asked for a minute ago gets an hour: long enough to scroll
@@ -339,6 +361,59 @@ export const pageKey = (chatId: string, messageId: number): string => `more:${ch
 export const lastPageKey = (chatId: string): string => `lastpage:${chatId}`;
 
 /**
+ * Where a card came from. Every scheduled job, plus `search` for the answers
+ * people ask for themselves — which is the default, because a card whose
+ * origin we no longer know was almost certainly one of those.
+ *
+ * This is the axis /stats reports reactions along: a ❤️ on a weekly digest and
+ * a ❤️ on a /today answer say different things about the ranking.
+ */
+export const JOBS = ['weekly', 'weekend', 'follows', 'places', 'search'] as const;
+export type Job = (typeof JOBS)[number];
+
+/** The four things a person can do to a card, and the only four we count. */
+export const GESTURES = ['heart', 'down', 'save', 'remind'] as const;
+export type Gesture = (typeof GESTURES)[number];
+
+/** The job behind one of the scheduled fan-outs. */
+export function jobOf(optIn: OptIn): Job {
+  return (
+    optIn === 'weekly_digest' ? 'weekly'
+    : optIn === 'weekend_digest' ? 'weekend'
+    : optIn === 'follow_alerts' ? 'follows'
+    : 'places'
+  );
+}
+
+/** One row of /feedback. */
+export const FeedbackRowSchema = z.object({
+  id: z.coerce.number().int(),
+  chat_id: z.coerce.string(),
+  username: z.string().nullable().default(null),
+  text: z.string(),
+  created_at: z.string(),
+});
+export type FeedbackRow = z.infer<typeof FeedbackRowSchema>;
+
+/**
+ * What /stats reports beyond the row counts: whether the card cursor is used,
+ * what comes back per job, how much of what goes out is ever touched, and how
+ * often the ranker runs out of things this person likes.
+ *
+ * Every number here is read from the `counters` table — see `Store.bump`.
+ */
+export interface Metrics {
+  /** Do people page? `answers` is the denominator: answers that had a tail. */
+  paging: { answers: number; paged: number; steps: number; batches: number; depth: number; share: number };
+  /** What each job sent, and what came back on it. */
+  jobs: { job: Job; sent: number; heart: number; down: number; save: number; remind: number }[];
+  /** The share of sent events that got any gesture at all. */
+  coverage: { sent: number; gestured: number; share: number };
+  /** How often rank() had to let off-taste items back in to fill a list. */
+  padding: { calls: number; padded: number; topups: number; share: number; cities: { city: string; calls: number; padded: number }[] };
+}
+
+/**
  * What one answer left over: the events it ranked but had no room to show,
  * plus the header text they hang under so the "показати ще" button on it can
  * be redrawn (or taken away) without rebuilding the answer from scratch.
@@ -360,6 +435,13 @@ export const PendingPageSchema = z.object({
   seen: z.array(ItemSchema).default([]),
   /** The message the cursor is currently drawn on, when there is one. */
   cardMessageId: z.number().int().optional(),
+  /**
+   * Has anyone tapped "Далі →" on this answer yet? It is what makes
+   * `answer.paged` count answers rather than taps, and it lives here because
+   * the stash is the only thing that knows about one answer and then goes
+   * away. Defaulted, like `seen`, so an older stash still parses.
+   */
+  paged: z.boolean().default(false),
   /** How many to hand out per tap — the same page size the first answer used. */
   size: z.number().int().positive(),
   /**
@@ -570,10 +652,22 @@ export class Store {
     return { fresh, skipped };
   }
 
-  async recordSent(chatId: string, items: Item[]): Promise<void> {
+  /**
+   * Remember that this person was shown these events, and count the send.
+   *
+   * The counter only moves the *first* time an event reaches someone, so that
+   * "share of sent events that got any gesture" compares like with like: a
+   * card redrawn four times as somebody walks back and forth past it is one
+   * event sent to one person, not four.
+   */
+  async recordSent(chatId: string, items: Item[], job: Job = 'search'): Promise<void> {
     const t = this.d.schema;
     const ts = nowIso();
     for (const i of items) {
+      const already = await this.d.all(
+        sql`SELECT item_id FROM ${t.deliveries} WHERE chat_id = ${chatId} AND item_id = ${i.id}`,
+      );
+      if (already.length === 0) await this.bump(`sent.${job}`);
       await this.d.run(sql`
         INSERT INTO ${t.deliveries} (chat_id, item_id, kind, title, city, starts_at, url, fingerprint, first_sent_at, last_sent_at, send_count, payload)
         VALUES (${chatId}, ${i.id}, ${i.kind}, ${i.title}, ${i.city}, ${i.startsAt ?? null}, ${i.url}, ${fingerprint(i)}, ${ts}, ${ts}, 1, ${JSON.stringify(i)})
@@ -595,16 +689,34 @@ export class Store {
 
   /* ------------------------------------------------------ message → items --- */
 
-  async recordMessage(chatId: string, messageId: number, items: Item[]): Promise<void> {
+  /**
+   * Point one Telegram message at the event(s) it showed, and record which job
+   * put it there — that is how a ❤️ arriving days later is counted against the
+   * digest that earned it rather than against whatever the person did last.
+   *
+   * A card swap rewrites this row (see `stepCard`), job included: the message
+   * is showing a different event now, from whatever handed that one over.
+   */
+  async recordMessage(chatId: string, messageId: number, items: Item[], job: Job = 'search'): Promise<void> {
     if (items.length === 0) return;
     const t = this.d.schema;
     await this.d.run(sql`
-      INSERT INTO ${t.messages} (message_id, chat_id, item_id, sent_at, payload)
-      VALUES (${messageId}, ${chatId}, ${items[0]!.id}, ${nowIso()}, ${JSON.stringify(items)})
+      INSERT INTO ${t.messages} (message_id, chat_id, item_id, sent_at, payload, job)
+      VALUES (${messageId}, ${chatId}, ${items[0]!.id}, ${nowIso()}, ${JSON.stringify(items)}, ${job})
       ON CONFLICT (chat_id, message_id) DO UPDATE SET
         item_id = ${items[0]!.id},
-        payload = ${JSON.stringify(items)}
+        payload = ${JSON.stringify(items)},
+        job     = ${job}
     `);
+  }
+
+  /** Which job put this message in the chat; 'search' when we no longer know. */
+  async jobForMessage(chatId: string, messageId: number): Promise<Job> {
+    const rows = await this.d.all(
+      sql`SELECT job FROM ${this.d.schema.messages} WHERE chat_id = ${chatId} AND message_id = ${messageId}`,
+    );
+    const job = rows[0]?.['job'];
+    return typeof job === 'string' && (JOBS as readonly string[]).includes(job) ? (job as Job) : 'search';
   }
 
   async itemsForMessage(chatId: string, messageId: number): Promise<Item[]> {
@@ -887,9 +999,12 @@ export class Store {
    * Scraping is the expensive part, so the budget is about protecting the
    * source sites as much as this process.
    */
-  async hitRateLimit(chatId: string, limitPerHour: number): Promise<{ allowed: boolean; used: number }> {
+  async hitRateLimit(chatId: string, limitPerHour: number, kind?: string): Promise<{ allowed: boolean; used: number }> {
     const t = this.d.schema;
-    const bucket = new Date().toISOString().slice(0, 13); // YYYY-MM-DDTHH
+    // The kind is a *suffix*, not a prefix: `prune()` drops old buckets with a
+    // text comparison against an hour stamp, and "feedback:2026-…" would sort
+    // below every such bound and never be swept. "2026-…#feedback" still does.
+    const bucket = new Date().toISOString().slice(0, 13) + (kind ? `#${kind}` : ''); // YYYY-MM-DDTHH[#kind]
     await this.d.run(sql`
       INSERT INTO ${t.usage} (chat_id, bucket, count) VALUES (${chatId}, ${bucket}, 1)
       ON CONFLICT (chat_id, bucket) DO UPDATE SET count = ${t.usage}.count + 1
@@ -917,6 +1032,155 @@ export class Store {
     `);
   }
 
+  /* ------------------------------------------------------------ feedback --- */
+
+  /**
+   * Keep what somebody said. Not pruned: `prune()` throws away bookkeeping
+   * about events that have already happened, and this is the only thing a user
+   * ever sends *us* on purpose.
+   */
+  async addFeedback(input: { chatId: string; username?: string | null; text: string }): Promise<void> {
+    const t = this.d.schema;
+    await this.d.run(sql`
+      INSERT INTO ${t.feedback} (chat_id, username, text, created_at)
+      VALUES (${input.chatId}, ${input.username ?? null}, ${input.text}, ${nowIso()})
+    `);
+  }
+
+  /** The newest feedback first — what an operator actually wants to read. */
+  async listFeedback(limit = 20): Promise<FeedbackRow[]> {
+    const rows = await this.d.all(
+      sql`SELECT id, chat_id, username, text, created_at FROM ${this.d.schema.feedback}
+          ORDER BY created_at DESC, id DESC LIMIT ${limit}`,
+    );
+    return rows.flatMap((r) => {
+      const parsed = FeedbackRowSchema.safeParse(r);
+      return parsed.success ? [parsed.data] : [];
+    });
+  }
+
+  /* ------------------------------------------------------------ counters --- */
+
+  /**
+   * Add to one counter. This is the whole metrics mechanism: a key and a
+   * number, updated in place.
+   *
+   * Nothing here keeps a row per tap. A hundred people walking a forty-event
+   * weekend is a hundred-odd increments against half a dozen keys, and the
+   * table stays the size it is today for as long as the bot runs.
+   */
+  async bump(key: string, by = 1): Promise<void> {
+    const t = this.d.schema;
+    await this.d.run(sql`
+      INSERT INTO ${t.counters} (key, n) VALUES (${key}, ${by})
+      ON CONFLICT (key) DO UPDATE SET n = ${t.counters}.n + ${by}
+    `);
+  }
+
+  async counters(): Promise<Record<string, number>> {
+    const rows = await this.d.all(sql`SELECT key, n FROM ${this.d.schema.counters}`);
+    const out: Record<string, number> = {};
+    for (const r of rows) if (typeof r['key'] === 'string') out[r['key']] = Number(r['n'] ?? 0);
+    return out;
+  }
+
+  /**
+   * One answer was ranked for one person. `toppedUp` is what rank() had to let
+   * back in because there was not enough of their thing on, so a high padded
+   * share is the bot saying "there is nothing here worth ranking" — per city
+   * too, when the answer was about exactly one.
+   */
+  async recordRank(toppedUp: number, city?: string): Promise<void> {
+    await this.bump('rank.calls');
+    if (city) await this.bump(`rank.calls.${city}`);
+    if (toppedUp <= 0) return;
+    await this.bump('rank.padded');
+    await this.bump('rank.topups', toppedUp);
+    if (city) await this.bump(`rank.padded.${city}`);
+  }
+
+  /** An answer went out with a tail — the denominator of "do people page?". */
+  async recordStash(): Promise<void> {
+    await this.bump('answer.tail');
+  }
+
+  /** A "Далі →" tap. `first` is true for the first one on a given answer. */
+  async recordStep(first: boolean): Promise<void> {
+    await this.bump('page.next');
+    if (first) await this.bump('answer.paged');
+  }
+
+  /** The header's "показати списком" — a batch, not a step of the cursor. */
+  async recordBatch(): Promise<void> {
+    await this.bump('page.batch');
+  }
+
+  /**
+   * Somebody reacted to a card. Two numbers come out of this: the gesture
+   * against the job that sent it, and — once per event per person, however
+   * many times they tap — the fact that this event was touched at all.
+   *
+   * The "touched already?" flag lives on the delivery row rather than in a
+   * table of taps. A gesture on something with no delivery row (a /saved card,
+   * or an event sent over six months ago) still counts for its job; it just
+   * cannot be counted towards coverage, because there is nothing left to say
+   * whether it was the first.
+   */
+  async recordGesture(chatId: string, itemId: string, job: Job, gesture: Gesture): Promise<void> {
+    const t = this.d.schema;
+    await this.bump(`gesture.${job}.${gesture}`);
+    const rows = await this.d.all(
+      sql`SELECT gestures FROM ${t.deliveries} WHERE chat_id = ${chatId} AND item_id = ${itemId}`,
+    );
+    if (rows.length === 0) return;
+    await this.d.run(
+      sql`UPDATE ${t.deliveries} SET gestures = gestures + 1 WHERE chat_id = ${chatId} AND item_id = ${itemId}`,
+    );
+    if (Number(rows[0]?.['gestures'] ?? 0) === 0) await this.bump('gesture.events');
+  }
+
+  /** The counters, worked out into the four questions /stats asks of them. */
+  async metrics(): Promise<Metrics> {
+    const c = await this.counters();
+    const n = (key: string) => c[key] ?? 0;
+    const share = (part: number, whole: number) => (whole > 0 ? Math.round((part / whole) * 100) : 0);
+    const mean = (part: number, whole: number) => (whole > 0 ? Math.round((part / whole) * 10) / 10 : 0);
+
+    const answers = n('answer.tail');
+    const paged = n('answer.paged');
+    const steps = n('page.next');
+
+    const jobs = JOBS.map((job) => ({
+      job,
+      sent: n(`sent.${job}`),
+      heart: n(`gesture.${job}.heart`),
+      down: n(`gesture.${job}.down`),
+      save: n(`gesture.${job}.save`),
+      remind: n(`gesture.${job}.remind`),
+    }));
+    const sent = jobs.reduce((total, j) => total + j.sent, 0);
+    const gestured = n('gesture.events');
+
+    const calls = n('rank.calls');
+    const padded = n('rank.padded');
+    const cities = Object.keys(c)
+      .flatMap((key) => (key.startsWith('rank.calls.') ? [key.slice('rank.calls.'.length)] : []))
+      .sort()
+      .map((city) => ({ city, calls: n(`rank.calls.${city}`), padded: n(`rank.padded.${city}`) }))
+      // a city nobody has searched says nothing about that city
+      .filter((c) => c.calls > 0);
+
+    return {
+      // the average is over the answers that were walked, not over all of
+      // them: mixing in the ones nobody touched would report a depth of 0.4
+      // and hide that the people who do page, page a long way
+      paging: { answers, paged, steps, batches: n('page.batch'), depth: mean(steps, paged), share: share(paged, answers) },
+      jobs,
+      coverage: { sent, gestured, share: share(gestured, sent) },
+      padding: { calls, padded, topups: n('rank.topups'), share: share(padded, calls), cities },
+    };
+  }
+
   async stats(): Promise<Record<string, number>> {
     const t = this.d.schema;
     const count = async (table: object, where?: SQL): Promise<number> => {
@@ -933,6 +1197,7 @@ export class Store {
       saved: await count(t.saved),
       messages: await count(t.messages),
       cached: await count(t.scrapeCache),
+      feedback: await count(t.feedback),
     };
   }
 }

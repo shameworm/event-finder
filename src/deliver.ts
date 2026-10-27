@@ -14,7 +14,7 @@
  */
 import type { Item, Query } from './types.ts';
 import type { Logger } from './log.ts';
-import type { Store } from './db.ts';
+import type { Job, Store } from './db.ts';
 import { buildMessages, summarize, type CardState, type Format, type OutgoingMessage } from './render.ts';
 import { TelegramError, botToken, sendMessage, sendPhoto, type InlineButton } from './telegram-api.ts';
 import { loadConfig } from './config.ts';
@@ -57,6 +57,11 @@ export interface DeliverOptions {
    * their header is already in the chat, being edited in place.
    */
   withHeader?: boolean;
+  /**
+   * Which job this is, recorded against every message so a ❤️ on it is
+   * counted against the right one later. Defaults to 'search'.
+   */
+  job?: Job;
 }
 
 export interface DeliverResult {
@@ -109,6 +114,45 @@ async function sendCard(
   return sendMessage(message.text, common);
 }
 
+/**
+ * Telegram says this chat is gone: say so once, and stop sending there.
+ *
+ * Both halves matter and both are easy to forget, which is why every sender in
+ * this project goes through here — `deliver()` below, and `/broadcast`, which
+ * would otherwise keep writing to a few hundred chats that will never read it.
+ */
+async function noteChatGone(
+  err: TelegramError,
+  opts: { store?: Store; chatId?: string; log: Logger },
+): Promise<void> {
+  opts.log.warn(`chat ${opts.chatId} is unreachable (${err.description ?? 'blocked'})`);
+  if (opts.store && opts.chatId) await opts.store.setBlocked(opts.chatId, true);
+}
+
+/**
+ * Send one plain message to one person — no card, no header, no bookkeeping
+ * about events, because what goes out this way is not one.
+ *
+ * Returns false when the chat is gone, having marked it blocked. That is the
+ * only outcome a fan-out over every user has to handle, and it is handled the
+ * same way here as it is in `deliver()`.
+ */
+export async function sendToUser(
+  text: string,
+  opts: { chatId: string; log: Logger; store?: Store; dryRun?: boolean },
+): Promise<boolean> {
+  try {
+    await sendMessage(text, { chatId: opts.chatId, dryRun: opts.dryRun, log: opts.log });
+    return true;
+  } catch (err) {
+    if (err instanceof TelegramError && err.chatGone) {
+      await noteChatGone(err, opts);
+      return false;
+    }
+    throw err;
+  }
+}
+
 export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
   const cfg = loadConfig();
   const messages = buildMessages({
@@ -144,8 +188,7 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
       ids = await sendCard(message, opts, i === 0 ? opts.replyTo : undefined);
     } catch (err) {
       if (err instanceof TelegramError && err.chatGone) {
-        opts.log.warn(`chat ${opts.chatId} is unreachable (${err.description ?? 'blocked'})`);
-        if (opts.store && opts.chatId) await opts.store.setBlocked(opts.chatId, true);
+        await noteChatGone(err, opts);
         return { messageIds, text, headerText, headerMessageId: undefined, chatGone: true };
       }
       throw err;
@@ -155,13 +198,13 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
     // one event per message, so a ❤️ on this message means exactly this event
     if (opts.store && opts.chatId && message.items.length > 0) {
       if (shouldRecordMessages) {
-        for (const id of ids) await opts.store.recordMessage(opts.chatId, id, message.items);
+        for (const id of ids) await opts.store.recordMessage(opts.chatId, id, message.items, opts.job);
       }
       // recorded here rather than after the loop: a digest that died on its
       // seventh message used to record nothing at all, so the retry sent the
       // first six events a second time — and a bookmark (/saved) asks for the
       // message rows without ever recording a delivery
-      if (shouldRecord) await opts.store.recordSent(opts.chatId, message.items);
+      if (shouldRecord) await opts.store.recordSent(opts.chatId, message.items, opts.job);
     }
   }
 

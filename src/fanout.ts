@@ -6,7 +6,7 @@
  * and filter per person and send them their own version. One crawl, N digests.
  */
 import type { Item, Kind, Query } from './types.ts';
-import { DIGEST_PAGE_TTL_SECONDS, lastPageKey, pageKey, type OptIn, type Store } from './db.ts';
+import { DIGEST_PAGE_TTL_SECONDS, jobOf, lastPageKey, pageKey, type OptIn, type Store } from './db.ts';
 import type { Logger } from './log.ts';
 import { loadConfig } from './config.ts';
 import { collectCity, type CollectOptions } from './cache.ts';
@@ -230,6 +230,10 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
     };
 
     const ranked = rank(collected, { query, prefs: user.prefs, tz: cfg.timezone });
+    // One city, one person, one ranking: the cleanest place there is to record
+    // how often this city has nothing of somebody's on. Counted before the
+    // 'mine' check below, which is itself a consequence of the same number.
+    await job.store.recordRank(ranked.toppedUp, city);
     // "only when there is something really mine": a non-zero toppedUp means
     // rank() had to let off-taste items back in to fill the list, i.e. there
     // was not enough of their thing on. Saying nothing is the whole point.
@@ -287,6 +291,8 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
             footer: [rest.length > 0 ? WALK_HINT : '', job.footer].filter(Boolean).join('\n\n') || undefined,
           }
         : { maxPerDay: job.maxPerDay, footer: job.footer }),
+      // so a ❤️ on this card, whenever it lands, is counted against this job
+      job: jobOf(job.optIn),
     });
 
     // Park the tail next to the header it hangs under, in the shape
