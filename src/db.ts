@@ -310,9 +310,42 @@ export interface SendDecision {
 export type OptIn = 'weekly_digest' | 'weekend_digest' | 'follow_alerts' | 'place_tips';
 
 /**
+ * How long an answer's unshown tail stays pageable.
+ *
+ * An answer you asked for a minute ago gets an hour: long enough to scroll
+ * back up and keep tapping, short enough that the prices and sold-out flags in
+ * it have not gone stale.
+ *
+ * A digest gets a day, because nobody asked for it at the moment it arrived. It
+ * turns up at 09:00 and is read at 13:00, and an hour-old stash would answer
+ * the reader's own digest with "той список уже застарів". Both live in
+ * `scrape_cache` with an `expires_at` that `pruneCache` sweeps, so neither
+ * grows: one row per digest per user, replaced in place on every step.
+ */
+export const SEARCH_PAGE_TTL_SECONDS = 3600;
+export const DIGEST_PAGE_TTL_SECONDS = 24 * 3600;
+
+/** Where one answer's leftovers live: next to the header that paginates them. */
+export const pageKey = (chatId: string, messageId: number): string => `more:${chatId}:${messageId}`;
+
+/**
+ * The header of the newest answer in this chat, so "Далі →" under a *card* can
+ * find the stash its own message id knows nothing about.
+ *
+ * It is only a pointer: the page it names still expires on its own, and a
+ * pointer at a page that is gone is answered the same way a stale "показати
+ * ще" is.
+ */
+export const lastPageKey = (chatId: string): string => `lastpage:${chatId}`;
+
+/**
  * What one answer left over: the events it ranked but had no room to show,
  * plus the header text they hang under so the "показати ще" button on it can
  * be redrawn (or taken away) without rebuilding the answer from scratch.
+ *
+ * Both an on-demand search and a scheduled digest write this, and `stepCard`
+ * walks it without caring which did — the only difference between them is the
+ * `ttlSeconds` the writer asked for.
  */
 export const PendingPageSchema = z.object({
   header: z.string(),
@@ -329,6 +362,13 @@ export const PendingPageSchema = z.object({
   cardMessageId: z.number().int().optional(),
   /** How many to hand out per tap — the same page size the first answer used. */
   size: z.number().int().positive(),
+  /**
+   * How long this stash lives, and keeps living: every step of the cursor
+   * rewrites the row, and reading the life off the stash itself is what stops
+   * a rewrite from cutting a digest's day down to a search's hour. Defaulted,
+   * so a stash parked before the digests had one still parses.
+   */
+  ttlSeconds: z.number().int().positive().default(SEARCH_PAGE_TTL_SECONDS),
 });
 export type PendingPage = z.infer<typeof PendingPageSchema>;
 /** What a caller has to supply; the defaulted fields may be left out. */
@@ -770,10 +810,15 @@ export class Store {
    *
    * It lives in the scrape-cache table on purpose: that table already carries
    * `expires_at`, and `pruneCache` already sweeps it, so a stash nobody comes
-   * back for disappears within the hour instead of growing forever.
+   * back for disappears on its own instead of growing forever.
+   *
+   * The life comes off the page rather than from a parameter, so the writer
+   * decides it once — an hour for a search, a day for a digest — and the many
+   * rewrites a walk through the stash does cannot quietly shorten it.
    */
-  async putPage(key: string, page: PendingPageInput, ttlSeconds: number): Promise<void> {
+  async putPage(key: string, page: PendingPageInput): Promise<void> {
     const t = this.d.schema;
+    const ttlSeconds = page.ttlSeconds ?? SEARCH_PAGE_TTL_SECONDS;
     const now = Date.now();
     const payload = JSON.stringify(page);
     await this.d.run(sql`

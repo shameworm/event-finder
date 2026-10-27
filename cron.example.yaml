@@ -8,6 +8,11 @@
 # (digest_hour / digest_days, set from /settings → 🕘 Коли писати),
 # not in this file. A tick that matches nobody exits without scraping anything.
 #
+# A digest arrives as ONE CARD with a header, not one message per event: the
+# rest of the ranked week waits in a stash for 24 hours and «Далі →» under the
+# card walks it. So a fifteen-event week is two sends per user, not sixteen.
+# The follow-alert and place-tip jobs are unchanged — one message per item.
+#
 # Do not "optimise" these back to `0 9 * * 1`: that would pin everybody to one
 # hour again and quietly ignore the hour they picked.
 #
@@ -36,7 +41,7 @@ cron:
     timezone: Europe/Kyiv
     cwd: ~/.hermes/skills/events-finder
     command: npx tsx scripts/digest.ts --week
-    description: This week's events, per user, in their own city, at their own hour.
+    description: This week's events, per user, in their own city, at their own hour — header plus one card.
 
   # ── 2. Every hour on Thursday — weekend picks, top 5 ──────────────────────
   #
@@ -48,7 +53,7 @@ cron:
     timezone: Europe/Kyiv
     cwd: ~/.hermes/skills/events-finder
     command: npx tsx scripts/digest.ts --weekend --top 5
-    description: The five best things this weekend (Fri–Sun), per user, at their own hour.
+    description: The five best things this weekend (Fri–Sun), per user, at their own hour — header plus one card.
 
   # ── 3. Every 6 hours — follow-list watch, alert immediately ───────────────
   #
