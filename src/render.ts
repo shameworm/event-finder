@@ -43,6 +43,19 @@ export const CANCEL_HINT = 'Тисни ⏰ під подією ще раз аб�
 export const PLACES_HINT = 'Скажи, як тобі — і я підлаштую підказки.';
 export const NOTHING_FOUND = 'Цього разу нічого не знайшлося. Спробуй ширший період або інше місто.';
 
+/**
+ * The one thing a header has to admit when it is not a list: that the rest is
+ * behind the card rather than missing.
+ *
+ * No count in it on purpose. A header is written once and then only has its
+ * button redrawn, so a number here would still say 36 when four are left — the
+ * buttons under the card carry the counts, and those are read fresh on every
+ * step. Shared by the on-demand answer and the scheduled digest, because they
+ * are the same card and the same walk.
+ */
+export const WALK_HINT =
+  'Показую по одній, щоб не завалити тебе повідомленнями — гортай «Далі →» і «← Назад» під карткою.';
+
 const STATUS_BADGE: Record<string, string> = {
   soldout: ' — 🚫 КВИТКІВ НЕМАЄ',
   cancelled: ' — ❌ СКАСОВАНО',
@@ -475,15 +488,18 @@ export function moreButton(rest: number): InlineButton[][] {
 }
 
 /**
- * The Telegram shape: a short header, then **one message per event**.
+ * The Telegram shape: a short header, then **one message per event it is given**
+ * — which, for both an answer and a digest, is one card with the rest in the
+ * stash behind it.
  *
  * One message per event is what makes the heart work. Every event message is
  * stored against its single item (see src/deliver.ts), so a ❤️ reaction on it
  * resolves to exactly one event with nothing to disambiguate — no numbering,
  * no "which one did you mean".
  *
- * The header carries the city, the window and the count; the events keep their
- * own day, since there are no day headings to group them under any more.
+ * The header carries the city, the window and the count — the count of the
+ * whole answer, not of the card, which is what `found` is for. The events keep
+ * their own day, since there are no day headings to group them under any more.
  */
 export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
   const cfg = loadConfig();

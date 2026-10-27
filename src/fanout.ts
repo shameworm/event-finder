@@ -6,12 +6,13 @@
  * and filter per person and send them their own version. One crawl, N digests.
  */
 import type { Item, Kind, Query } from './types.ts';
-import type { OptIn, Store } from './db.ts';
+import { DIGEST_PAGE_TTL_SECONDS, lastPageKey, pageKey, type OptIn, type Store } from './db.ts';
 import type { Logger } from './log.ts';
 import { loadConfig } from './config.ts';
 import { collectCity } from './cache.ts';
 import { rank } from './rank.ts';
 import { deliver } from './deliver.ts';
+import { WALK_HINT } from './render.ts';
 import { allUsers, citiesFor, type BotUser } from './users.ts';
 import { digestDueNow, inQuietHours, wantsOnlyMine, type DigestKind } from './schedule.ts';
 import { localTime, localWeekday, sleep, today } from './util.ts';
@@ -221,20 +222,61 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
 
     if (items.length === 0 && (job.skipEmpty ?? true)) return;
 
-    // deliver() already splits a digest into one message per event, so the
-    // job does not need to decide that
+    // A digest is one card with a cursor, the same as an answer somebody asked
+    // for. Fifteen events as fifteen messages is fifteen notifications in a
+    // chat nobody scrolls back through — the problem the cursor already solved
+    // for search, and the reason the per-day cap stops applying here: the tail
+    // is not a flood any more, it is a stash.
+    //
+    // Not every scheduled job wants this. A follow alert is one event and a
+    // place tip is three; neither is something you page through, so they keep
+    // sending as they always did.
+    const title = job.title(user, city);
+    const paged = Boolean(job.digest);
+    const card = paged ? items.slice(0, cfg.bot.cards_at_once) : items;
+    const rest = paged ? items.slice(cfg.bot.cards_at_once) : [];
+    // one read, so the card knows whether its 🔖 is already on — a digest can
+    // land on something they bookmarked out of a search last week
+    const saved = paged ? new Set((await job.store.listSaved(user.chatId)).map((i) => i.id)) : new Set<string>();
+
     const outcome = await deliver({
-      title: job.title(user, city),
+      title,
       query,
-      items,
+      items: card,
       log: job.log,
       store: job.store,
       chatId: user.chatId,
       dryRun: job.dryRun,
-      maxPerDay: job.maxPerDay,
-      footer: job.footer,
       changeNotes,
+      ...(paged
+        ? {
+            maxPerDay: 0,
+            more: rest.length,
+            // the header counts the week, not the card in front of it
+            found: items.length,
+            cardState: (item: Item) => ({ saved: saved.has(item.id), nextCount: rest.length }),
+            // and it has to admit that the rest is behind the card, not missing
+            footer: [rest.length > 0 ? WALK_HINT : '', job.footer].filter(Boolean).join('\n\n') || undefined,
+          }
+        : { maxPerDay: job.maxPerDay, footer: job.footer }),
     });
+
+    // Park the tail next to the header it hangs under, in the shape
+    // `stepCard` already walks, and point this chat's cursor at it. Nothing
+    // here is a second pagination: it is the same stash a search writes, with
+    // a day's life instead of an hour's because nobody asked for a digest at
+    // the moment it arrived.
+    if (paged && rest.length > 0 && outcome.headerMessageId !== undefined && !outcome.chatGone) {
+      await job.store.putPage(pageKey(user.chatId, outcome.headerMessageId), {
+        header: outcome.headerText,
+        title,
+        query,
+        rest,
+        size: cfg.bot.max_results,
+        ttlSeconds: DIGEST_PAGE_TTL_SECONDS,
+      });
+      await job.store.setState(lastPageKey(user.chatId), String(outcome.headerMessageId));
+    }
     const delivered = !outcome.chatGone;
     if (delivered) {
       result.items += items.length;

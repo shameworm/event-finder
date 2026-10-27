@@ -53,7 +53,7 @@ const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange
 const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom, pickImage } = await import('../src/normalize.ts');
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
-const { buildDigest, buildMessages, eventKeyboard, renderReminders, renderItem, renderCaption, countEvents, countEventsAcc, eventsWaiting, CAPTION_LIMIT } = await import('../src/render.ts');
+const { buildDigest, buildMessages, eventKeyboard, renderReminders, renderItem, renderCaption, countEvents, countEventsAcc, eventsWaiting, CAPTION_LIMIT, REMINDER_HINT, WALK_HINT } = await import('../src/render.ts');
 const { loadConfig, loadPrefs, resolveCity, cityLocalName, savePrefs } = await import('../src/config.ts');
 const { applyPrefsCommand, applyThumbsDown, describePrefs } = await import('../src/prefs-engine.ts');
 const { tagLabel } = await import('../src/categories.ts');
@@ -64,7 +64,7 @@ const { TgMessageSchema, TgCallbackQuerySchema, TgReactionUpdateSchema } = await
 const { parsePost, findDate, findTime, findVenue } = await import('../scripts/telegram.ts');
 const { resultToItem, buildQueries } = await import('../scripts/websearch.ts');
 const { collect: collectKontramarka, cardToSchema } = await import('../scripts/kontramarka.ts');
-const { Store } = await import('../src/db.ts');
+const { Store, DIGEST_PAGE_TTL_SECONDS, SEARCH_PAGE_TTL_SECONDS, pageKey, lastPageKey } = await import('../src/db.ts');
 const { splitForTelegram, parseUpdates } = await import('../src/telegram-api.ts');
 const { googleCalendarUrl } = await import('../src/calendar.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs, newUserPrefs } = await import('../src/users.ts');
@@ -1488,6 +1488,48 @@ async function withTestStore<T>(fn: (store: StoreType) => Promise<T>): Promise<T
   }
 }
 
+/**
+ * A stubbed Bot API, for the tests whose point is what the *send* does — a
+ * card's message id, a stash parked next to it — rather than what it says. A
+ * dry run never calls Telegram at all, so it hands back no message ids and
+ * nothing that keys off one can be checked under it.
+ */
+interface FakeCall {
+  method: string;
+  body: Record<string, unknown>;
+}
+
+async function withFakeTelegram<T>(
+  reply: (call: FakeCall) => { ok: boolean; description?: string; status?: number },
+  body: (calls: FakeCall[]) => Promise<T>,
+): Promise<T> {
+  const calls: FakeCall[] = [];
+  const realFetch = globalThis.fetch;
+  const realToken = process.env['TELEGRAM_BOT_TOKEN'];
+  process.env['TELEGRAM_BOT_TOKEN'] = 'test:token';
+  let nextId = 500;
+  globalThis.fetch = (async (url: string, init: { body: string }) => {
+    const method = String(url).split('/').pop()!;
+    const call = { method, body: JSON.parse(init.body) as Record<string, unknown> };
+    calls.push(call);
+    const verdict = reply(call);
+    return {
+      json: async () =>
+        verdict.ok
+          ? { ok: true, result: { message_id: nextId++, date: 0, chat: { id: call.body['chat_id'] } } }
+          : { ok: false, description: verdict.description ?? 'Bad Request' },
+      status: verdict.ok ? 200 : verdict.status ?? 400,
+    };
+  }) as unknown as typeof globalThis.fetch;
+  try {
+    return await body(calls);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (realToken === undefined) delete process.env['TELEGRAM_BOT_TOKEN'];
+    else process.env['TELEGRAM_BOT_TOKEN'] = realToken;
+  }
+}
+
 describe('store', () => {
   const item = makeItem({ city: 'kharkiv', title: 'Store test gig', url: 'https://x/store', source: 'concert.ua', startsAt: '2026-11-01T19:00:00+02:00', priceMin: 300, status: 'scheduled' })!;
 
@@ -2266,6 +2308,340 @@ describe('fanout', () => {
       });
       assert.equal(result.recipients, 1);
       assert.equal(result.quiet, 0);
+    });
+  });
+});
+
+/* ------------------------------------------------- a digest you walk through --- */
+
+/**
+ * A scheduled digest is one card with a cursor, exactly like an on-demand
+ * answer: fifteen events used to be fifteen notifications in a chat nobody
+ * scrolls back through.
+ *
+ * These go through the stubbed Bot API rather than a dry run, because the whole
+ * point is the message id the header landed on and the stash parked against
+ * it — a dry run hands back neither.
+ */
+describe('a digest is one card you walk through', () => {
+  const window = { from: '2026-10-19', to: '2026-10-25', label: 'this week' };
+  /** Monday 09:00 — the default weekly slot. */
+  const mondayNine = { hour: 9, weekday: 1 };
+  /** The header is the first message the fake API hands an id to, then the card. */
+  const HEADER_ID = 500;
+  const CARD_ID = 501;
+
+  /**
+   * Distinct titles, not "Подія 1..10": an item's id is a hash of its title's
+   * *words* and its day, and digits are not words — ten numbered events in one
+   * week would share one id and nothing about "already sent" could be checked.
+   */
+  const TITLES = [
+    'Стендап-концерт', 'Джазовий вечір', 'Театральна премʼєра', 'Лекція про космос', 'Вечірка на даху',
+    'Виставка кераміки', 'Кінопоказ просто неба', 'Воркшоп з гончарства', 'Фестиваль вуличної їжі', 'Оперна вистава',
+  ];
+
+  const gigs = (n: number) =>
+    TITLES.slice(0, n).map(
+      (title, i) =>
+        makeItem({
+          city: 'kharkiv',
+          title,
+          url: `https://fan/${i + 1}`,
+          source: 'concert.ua',
+          category: 'standup',
+          startsAt: `2026-10-20T${String(10 + i).padStart(2, '0')}:00:00+03:00`,
+        })!,
+    );
+
+  /** Pre-seed the city cache and a user whose digest hour is now. */
+  async function ready(store: StoreType, chatId: string, items: Item[]): Promise<void> {
+    const key = cacheKey({ city: 'kharkiv', from: window.from, to: window.to, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().http.max_pages);
+    await store.putCache(key, items, 600);
+    await registerUser(store, { chatId, city: 'kharkiv' });
+    await store.setSchedule(chatId, { hour: 9, days: [1] });
+  }
+
+  /** Run the weekly digest for one user against a stubbed Bot API. */
+  async function sendDigest(store: StoreType, chatId: string): Promise<FakeCall[]> {
+    return withFakeTelegram(
+      () => ({ ok: true }),
+      async (calls) => {
+        await fanout({
+          store,
+          log,
+          optIn: 'weekly_digest',
+          digest: 'weekly',
+          window,
+          now: mondayNine,
+          onlyChats: [chatId],
+          title: () => '🗓 Цього тижня',
+          footer: `${REMINDER_HINT} /settings — щоб змінити, що тобі приходить.`,
+        });
+        return calls;
+      },
+    );
+  }
+
+  /** The stash the digest left behind, found the way "Далі →" finds it. */
+  async function stashOf(store: StoreType, chatId: string) {
+    const pointer = await store.getState(lastPageKey(chatId));
+    return pointer ? store.getPage(pageKey(chatId, Number(pointer))) : null;
+  }
+
+  /** The one event the card that went out is showing. */
+  async function cardEvent(store: StoreType, chatId: string): Promise<Item> {
+    const items = await store.itemsForMessage(chatId, CARD_ID);
+    assert.equal(items.length, 1, 'a card carries exactly one event, or a ❤️ on it is ambiguous');
+    return items[0]!;
+  }
+
+  /**
+   * Tap a button under the card sitting on `messageId`, for real rather than as
+   * a dry run — `stepCard` only records what it walked into when it is
+   * actually sending.
+   */
+  async function tapCardAt(store: StoreType, chatId: string, verb: string, itemId: string, messageId: number): Promise<FakeCall[]> {
+    return withFakeTelegram(
+      () => ({ ok: true }),
+      async (calls) => {
+        await handleCallback({ store, log }, {
+          id: 'cb',
+          data: `ev:${verb}:${itemId}`,
+          message: { message_id: messageId, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'private' }, text: 'card' },
+          from: { id: Number(chatId) },
+        } as never);
+        return calls;
+      },
+    );
+  }
+
+  it('sends a header and one card, not one message per event', async () => {
+    await withTestStore(async (store) => {
+      await ready(store, '2801', gigs(10));
+      const calls = await sendDigest(store, '2801');
+      assert.deepEqual(calls.map((c) => c.method), ['sendMessage', 'sendMessage'], JSON.stringify(calls.map((c) => c.method)));
+      const card = await cardEvent(store, '2801');
+      assert.ok(String(calls[1]!.body['text']).includes(card.title), String(calls[1]!.body['text']));
+    });
+  });
+
+  it('counts the whole week in the header, not the card in front of it', async () => {
+    await withTestStore(async (store) => {
+      await ready(store, '2802', gigs(10));
+      const header = String((await sendDigest(store, '2802'))[0]!.body['text']);
+      assert.ok(header.includes('10 подій'), header);
+      assert.ok(header.includes(WALK_HINT), 'the header has to say the rest is behind the card, not missing');
+      assert.ok(header.includes(REMINDER_HINT), 'and keep what the job itself wanted to say');
+    });
+  });
+
+  it('offers the batch button for the nine it is holding back', async () => {
+    await withTestStore(async (store) => {
+      await ready(store, '2812', gigs(10));
+      const markup = JSON.stringify((await sendDigest(store, '2812'))[0]!.body['reply_markup']);
+      assert.ok(markup.includes('Показати списком (ще 9)'), markup);
+    });
+  });
+
+  it('parks the tail in the same stash a search uses, pointed at by the header', async () => {
+    await withTestStore(async (store) => {
+      await ready(store, '2803', gigs(10));
+      const calls = await sendDigest(store, '2803');
+      assert.equal(Number(await store.getState(lastPageKey('2803'))), HEADER_ID, 'the pointer names the header message');
+      const page = (await stashOf(store, '2803'))!;
+      assert.equal(page.rest.length, 9, 'nine events waiting');
+      assert.deepEqual(page.seen, [], 'nothing walked past yet');
+      assert.equal(page.header, String(calls[0]!.body['text']), 'the stash carries the header it redraws');
+      assert.equal(page.size, loadConfig().bot.max_results, '"показати списком" hands out a page of max_results');
+      const card = await cardEvent(store, '2803');
+      assert.ok(!page.rest.some((i) => i.id === card.id), 'the card is not also in the stash');
+    });
+  });
+
+  it('walks a digest with "Далі →" the same way it walks a search', async () => {
+    await withTestStore(async (store) => {
+      await ready(store, '2804', gigs(4));
+      await sendDigest(store, '2804');
+      const card = await cardEvent(store, '2804');
+      const next = (await stashOf(store, '2804'))!.rest[0]!;
+
+      const calls = await tapCardAt(store, '2804', 'n', card.id, CARD_ID);
+      const swap = calls.find((c) => c.body['message_id'] === CARD_ID);
+      assert.equal(swap?.method, 'editMessageText', 'the card is redrawn in place, not re-sent');
+      assert.ok(String(swap!.body['text']).includes(next.title), String(swap!.body['text']));
+      assert.ok(!calls.some((c) => c.method === 'sendMessage'), 'walking a digest adds no message to the chat');
+
+      const after = (await stashOf(store, '2804'))!;
+      assert.equal(after.rest.length, 2, 'the cursor moved forward one');
+      assert.deepEqual(after.seen.map((i) => i.id), [card.id], 'the card it left is what "← Назад" steps into');
+      assert.equal((await cardEvent(store, '2804')).id, next.id, 'and the message now resolves to the event it shows');
+    });
+  });
+
+  it('steps back into a digest it already walked past', async () => {
+    await withTestStore(async (store) => {
+      await ready(store, '2815', gigs(4));
+      await sendDigest(store, '2815');
+      const first = await cardEvent(store, '2815');
+      await tapCardAt(store, '2815', 'n', first.id, CARD_ID);
+
+      const second = await cardEvent(store, '2815');
+      const calls = await tapCardAt(store, '2815', 'p', second.id, CARD_ID);
+      const swap = calls.find((c) => c.body['message_id'] === CARD_ID);
+      assert.ok(String(swap!.body['text']).includes(first.title), String(swap!.body['text']));
+
+      const page = (await stashOf(store, '2815'))!;
+      assert.deepEqual(page.seen, [], 'back at the start, with nothing behind it');
+      assert.deepEqual(page.rest.map((i) => i.id)[0], second.id, 'and the one it stepped off is next again');
+    });
+  });
+
+  /** 📋 on the header is the batch half of the pair, for whoever wants a list. */
+  it('hands out a digest as a list when the header button is tapped', async () => {
+    await withTestStore(async (store) => {
+      await ready(store, '2816', gigs(10));
+      await sendDigest(store, '2816');
+      const out = await captureOutput(() =>
+        handleCallback({ store, log, dryRun: true }, {
+          id: 'cb',
+          data: 'more',
+          message: { message_id: HEADER_ID, date: Math.floor(Date.now() / 1000), chat: { id: '2816', type: 'private' }, text: 'header' },
+          from: { id: 2816 },
+        } as never),
+      );
+      assert.equal(out.split('──────── to chat 2816').length - 1, 9, 'the whole tail, one message each');
+      assert.equal((await stashOf(store, '2816'))!.rest.length, 0, 'and nothing left waiting');
+    });
+  });
+
+  it('records the card it sent and nothing that is still in the stash', async () => {
+    await withTestStore(async (store) => {
+      await ready(store, '2805', gigs(10));
+      await sendDigest(store, '2805');
+      const card = await cardEvent(store, '2805');
+      assert.equal((await store.decideSend('2805', card)).send, false, 'the card that went out is recorded');
+      for (const item of (await stashOf(store, '2805'))!.rest) {
+        assert.equal(
+          (await store.decideSend('2805', item)).reason,
+          'new',
+          `${item.title} is still in the stash, so it has not been seen — next week may offer it again`,
+        );
+      }
+    });
+  });
+
+  it('records an event in the stash once the cursor reaches it', async () => {
+    await withTestStore(async (store) => {
+      await ready(store, '2806', gigs(3));
+      await sendDigest(store, '2806');
+      const card = await cardEvent(store, '2806');
+      const next = (await stashOf(store, '2806'))!.rest[0]!;
+      assert.equal((await store.decideSend('2806', next)).reason, 'new', 'not reached yet');
+      await tapCardAt(store, '2806', 'n', card.id, CARD_ID);
+      assert.equal((await store.decideSend('2806', next)).send, false, 'walked into, so it counts as sent');
+    });
+  });
+
+  /**
+   * A digest arrives at 09:00 and gets read at 13:00. A one-hour stash would
+   * answer the reader's own digest with "той список уже застарів", so the
+   * fan-out asks for a day — and that life has to survive the rewrite the
+   * cursor does on every step.
+   */
+  it('gives a digest stash a day rather than a search stash hour', async () => {
+    await withTestStore(async (store) => {
+      await ready(store, '2807', gigs(5));
+      await sendDigest(store, '2807');
+      const page = (await stashOf(store, '2807'))!;
+      assert.equal(page.ttlSeconds, DIGEST_PAGE_TTL_SECONDS);
+      assert.ok(page.ttlSeconds >= 24 * 3600, `${page.ttlSeconds}s is not long enough to read after lunch`);
+    });
+  });
+
+  it('keeps that day when the cursor steps', async () => {
+    await withTestStore(async (store) => {
+      await ready(store, '2809', gigs(4));
+      await sendDigest(store, '2809');
+      await tapCardAt(store, '2809', 'n', (await cardEvent(store, '2809')).id, CARD_ID);
+      assert.equal((await stashOf(store, '2809'))!.ttlSeconds, DIGEST_PAGE_TTL_SECONDS, 'a step must not shorten it to an hour');
+    });
+  });
+
+  it('leaves a search stash at its hour', async () => {
+    await withTestStore(async (store) => {
+      const query = parseRequest('', { prefs, base: '2026-10-19', from: window.from, to: window.to });
+      await store.putPage(pageKey('2808', 7), { header: 'H', title: 'T', query, rest: gigs(2), size: 10 });
+      assert.equal((await store.getPage(pageKey('2808', 7)))?.ttlSeconds, SEARCH_PAGE_TTL_SECONDS);
+      assert.equal(SEARCH_PAGE_TTL_SECONDS, 3600, 'an answer you asked for a minute ago is still fresh for an hour');
+    });
+  });
+
+  /** The stash's own ttl is what the row expires on, not just a number in it. */
+  it('expires a stash on the life it was written with', async () => {
+    await withTestStore(async (store) => {
+      const query = parseRequest('', { prefs, base: '2026-10-19', from: window.from, to: window.to });
+      await store.putPage(pageKey('2811', 7), { header: 'H', title: 'T', query, rest: gigs(2), size: 10, ttlSeconds: 1 });
+      await new Promise((r) => setTimeout(r, 1100));
+      assert.equal(await store.getPage(pageKey('2811', 7)), null, 'a one-second stash is stale a second later');
+    });
+  });
+
+  it('pages the weekend digest too, not just the weekly one', async () => {
+    await withTestStore(async (store) => {
+      const weekend = { from: '2026-10-23', to: '2026-10-25', label: 'this weekend' };
+      const items = gigs(6).map((i) => ({ ...i, startsAt: i.startsAt!.replace('2026-10-20', '2026-10-24') }));
+      const key = cacheKey({ city: 'kharkiv', from: weekend.from, to: weekend.to, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().http.max_pages);
+      await store.putCache(key, items, 600);
+      await registerUser(store, { chatId: '2813', city: 'kharkiv' });
+      await store.setSchedule('2813', { hour: 9, days: [WEEKEND_DAY] });
+      const calls = await withFakeTelegram(
+        () => ({ ok: true }),
+        async (calls) => {
+          await fanout({
+            store, log, optIn: 'weekend_digest', digest: 'weekend', window: weekend,
+            now: { hour: 9, weekday: WEEKEND_DAY }, onlyChats: ['2813'], top: 5, title: () => '🎉 На вихідних',
+          });
+          return calls;
+        },
+      );
+      assert.deepEqual(calls.map((c) => c.method), ['sendMessage', 'sendMessage']);
+      assert.equal((await stashOf(store, '2813'))!.rest.length, 4, 'top 5, one on the card, four behind it');
+    });
+  });
+
+  /**
+   * The jobs that are not a digest keep sending as they always did. A follow
+   * alert is one event and a place tip is three; neither is a list you page
+   * through, and a cursor on them would only add a tap.
+   */
+  it('leaves follow alerts as plain messages, with no stash behind them', async () => {
+    await withTestStore(async (store) => {
+      await ready(store, '2814', gigs(3));
+      const calls = await withFakeTelegram(
+        () => ({ ok: true }),
+        async (calls) => {
+          await fanout({
+            store, log, optIn: 'follow_alerts', window, now: { hour: 12, weekday: 1 },
+            onlyChats: ['2814'], title: () => '🔔 Стежу за', footer: REMINDER_HINT,
+          });
+          return calls;
+        },
+      );
+      assert.deepEqual(calls.map((c) => c.method), ['sendMessage', 'sendMessage', 'sendMessage', 'sendMessage'], 'header plus one message per alert');
+      assert.equal(await store.getState(lastPageKey('2814')), null, 'nothing to walk, so no cursor');
+      assert.ok(!String(calls[0]!.body['text']).includes(WALK_HINT), 'and no promise of a "Далі →" that is not there');
+    });
+  });
+
+  it('sends nothing and parks nothing when the week is empty', async () => {
+    await withTestStore(async (store) => {
+      await ready(store, '2810', gigs(1));
+      // the one event there is has already been sent, so there is nothing new
+      const key = cacheKey({ city: 'kharkiv', from: window.from, to: window.to, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().http.max_pages);
+      await store.recordSent('2810', (await store.getCache(key))!);
+      assert.deepEqual(await sendDigest(store, '2810'), [], 'an empty digest is silence, not a header');
+      assert.equal(await store.getState(lastPageKey('2810')), null, 'and no stash pointer either');
     });
   });
 });
@@ -3180,7 +3556,7 @@ describe('показати ще', () => {
 
   const seed = async (store: StoreType, chatId: string, n: number, size: number) => {
     await registerUser(store, { chatId, city: 'kharkiv' });
-    await store.putPage(`more:${chatId}:42`, { header: '🗓 Харків', title: '🗓 Харків', query, rest: tail(n), size }, 3600);
+    await store.putPage(`more:${chatId}:42`, { header: '🗓 Харків', title: '🗓 Харків', query, rest: tail(n), size });
   };
 
   it('offers the button on the header only when something was left over', () => {
@@ -3272,46 +3648,6 @@ describe('deliver', () => {
     });
   });
 
-  /**
-   * Both poster tests below go through a stubbed Bot API rather than a dry run:
-   * the point of each is what the *send* does, and a dry run never calls it.
-   */
-  interface FakeCall {
-    method: string;
-    body: Record<string, unknown>;
-  }
-
-  async function withFakeTelegram<T>(
-    reply: (call: FakeCall) => { ok: boolean; description?: string; status?: number },
-    body: (calls: FakeCall[]) => Promise<T>,
-  ): Promise<T> {
-    const calls: FakeCall[] = [];
-    const realFetch = globalThis.fetch;
-    const realToken = process.env['TELEGRAM_BOT_TOKEN'];
-    process.env['TELEGRAM_BOT_TOKEN'] = 'test:token';
-    let nextId = 500;
-    globalThis.fetch = (async (url: string, init: { body: string }) => {
-      const method = String(url).split('/').pop()!;
-      const call = { method, body: JSON.parse(init.body) as Record<string, unknown> };
-      calls.push(call);
-      const verdict = reply(call);
-      return {
-        json: async () =>
-          verdict.ok
-            ? { ok: true, result: { message_id: nextId++, date: 0, chat: { id: call.body['chat_id'] } } }
-            : { ok: false, description: verdict.description ?? 'Bad Request' },
-        status: verdict.ok ? 200 : verdict.status ?? 400,
-      };
-    }) as unknown as typeof globalThis.fetch;
-    try {
-      return await body(calls);
-    } finally {
-      globalThis.fetch = realFetch;
-      if (realToken === undefined) delete process.env['TELEGRAM_BOT_TOKEN'];
-      else process.env['TELEGRAM_BOT_TOKEN'] = realToken;
-    }
-  }
-
   const withPoster = (n: number) =>
     makeItem({
       city: 'kharkiv',
@@ -3369,6 +3705,35 @@ describe('deliver', () => {
         const remembered = await store.itemsForMessage('7702', result.messageIds[n + 1]!);
         assert.deepEqual(remembered.map((i) => i.id), [item.id], `event ${n + 1} was not recorded`);
       }
+    });
+  });
+
+  /**
+   * A per-day cap can keep an event out of the messages. It used to be
+   * recorded as sent anyway, which was defensible when every event got its own
+   * message and the cap only trimmed a long day. It is not defensible now:
+   * an event nobody was shown has not been seen, and marking it sent is how it
+   * never appears in any future digest.
+   */
+  it('does not record an event the per-day cap kept out of the messages', async () => {
+    await withTestStore(async (store) => {
+      // distinct words, not numbers: an item's id hashes its title's *words*
+      // and its day, so ten numbered events on one day would share one id
+      const items = [
+        'Стендап-концерт', 'Джазовий вечір', 'Театральна премʼєра', 'Лекція про космос', 'Вечірка на даху',
+        'Виставка кераміки', 'Кінопоказ просто неба', 'Воркшоп з гончарства', 'Фестиваль вуличної їжі', 'Оперна вистава',
+      ].map(
+        (title, i) =>
+          makeItem({ city: 'kharkiv', title, url: `https://cap/${i + 1}`, source: 's', startsAt: `2026-10-23T${String(8 + i).padStart(2, '0')}:00:00+03:00` })!,
+      );
+      await withFakeTelegram(
+        () => ({ ok: true }),
+        async () => deliver({ title: 'T', query, items, log, store, chatId: '7704', maxPerDay: 8 }),
+      );
+      const recorded: string[] = [];
+      for (const item of items) if (!(await store.decideSend('7704', item)).send) recorded.push(item.title);
+      assert.equal(recorded.length, 8, `only the eight that went out, got: ${recorded.join(', ')}`);
+      assert.deepEqual(recorded, items.slice(0, 8).map((i) => i.title), 'and they are the first eight of the day');
     });
   });
 
@@ -3568,7 +3933,7 @@ describe('welcome, saved events and the guided search', () => {
 
       // a stash that is simply exhausted knows exactly where it stands
       const query = parseRequest('', { prefs, base: '2026-10-20', from: '2026-11-01', to: '2026-11-30' });
-      await store.putPage('more:3606:7', { header: '🗓 Харків', title: '🗓 Харків', query, rest: [], seen: [gig(3)], size: 5 }, 3600);
+      await store.putPage('more:3606:7', { header: '🗓 Харків', title: '🗓 Харків', query, rest: [], seen: [gig(3)], size: 5 });
       await store.setState('lastpage:3606', '7');
       const last = await press(store, '3606', `ev:n:${item.id}`);
       assert.ok(last.includes('останній'), last.slice(0, 300));
@@ -3585,7 +3950,7 @@ describe('welcome, saved events and the guided search', () => {
       const rest = [gig(6), gig(7)];
       await store.recordMessage('3607', 42, [shown]);
       const query = parseRequest('', { prefs, base: '2026-10-20', from: '2026-11-01', to: '2026-11-30' });
-      await store.putPage('more:3607:7', { header: '🗓 Харків', title: '🗓 Харків', query, rest, size: 5 }, 3600);
+      await store.putPage('more:3607:7', { header: '🗓 Харків', title: '🗓 Харків', query, rest, size: 5 });
       await store.setState('lastpage:3607', '7');
 
       const out = await press(store, '3607', `ev:n:${shown.id}`);
@@ -3601,11 +3966,9 @@ describe('welcome, saved events and the guided search', () => {
     page: { rest: Item[]; seen?: Item[] },
   ): Promise<void> => {
     const query = parseRequest('', { prefs, base: '2026-10-20', from: '2026-11-01', to: '2026-11-30' });
-    await store.putPage(
-      `more:${chatId}:7`,
-      { header: '🗓 Харків', title: '🗓 Харків', query, rest: page.rest, seen: page.seen ?? [], size: 10 },
-      3600,
-    );
+    await store.putPage(`more:${chatId}:7`, {
+      header: '🗓 Харків', title: '🗓 Харків', query, rest: page.rest, seen: page.seen ?? [], size: 10,
+    });
     await store.setState(`lastpage:${chatId}`, '7');
   };
 

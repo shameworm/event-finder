@@ -22,10 +22,14 @@ Recognition stays multilingual — `src/categories.ts` matches Ukrainian, Russia
 and English — so "stand-up" and "стендап" are both understood, but the reply is
 always Ukrainian.
 
-**Every event is its own Telegram message.** A digest is a short header plus one
-message per event, each recorded against that single event, which is what makes
-a ❤️ reaction unambiguous. Console output (`scripts/search.ts`) still uses the
-one-block digest.
+**An answer is one card you walk through.** A digest — scheduled or asked for —
+is a short header plus **one card**, with the rest of the ranked list in a stash
+behind it; «Далі →» and «← Назад» under the card swap the event on that same
+message. Every message that does go out is recorded against the single event it
+showed, which is what makes a ❤️ reaction unambiguous. Only what was shown
+counts as sent, so an event still in the stash can turn up in a later digest.
+Follow alerts and place tips are still one message per item. Console output
+(`scripts/search.ts`) still uses the one-block digest.
 
 ## Before anything else
 

@@ -10,7 +10,7 @@ personalised digests, alerts and reminders.
 - **Cities**: Kharkiv (default), Kyiv, Lviv, Dnipro, Odesa, Ivano-Frankivsk — add any
 - **Multi-user**: every person gets their own city, taste, delivery hour, quiet hours and reminders
 - **Ukrainian**: the bot speaks Ukrainian only; it still understands requests typed in Russian or English
-- **One message per event**, so a ❤️ on it means exactly that event
+- **One card you walk through**, digests included — one message per event shown, so a ❤️ on it means exactly that event
 
 TypeScript on Node 20+, run directly with `tsx` — no build step.
 
@@ -28,8 +28,8 @@ web search ─┘                                            rank per user (thei
                                                  ▼                   ▼                   ▼
                                            user A digest       user B digest       user C digest
                                                  │                   │                   │
-                                        header + one message per event, each one ❤️-able
-                                        (with its poster, when the source published one)
+                                     header + ONE card, the rest in a stash behind it
+                                     («Далі →» walks it; ❤️ on the card means that event)
 ```
 
 The cache is the point: 200 people in Kharkiv asking about the same weekend cost
@@ -91,25 +91,47 @@ cache:
   ttl_seconds: 1800        # one scrape per city serves everyone for this long
 ```
 
-**An answer is one card you walk through.** A busy weekend can rank forty
-events, and forty messages is forty notifications in a chat nobody can scroll
-back through. So the first card goes out with the header — which counts the
-whole answer, not the card — and everything else waits in the stash behind it.
-**Далі → (37)** and **← Назад (3)** under the card swap the event *on that same
-message*, so the chat holds one card however far you walk. **📋 Показати
-списком** on the header is the opt-in for a batch of `max_results` at a time.
-Nothing is re-scraped or re-ranked by any of it: they all read the tail
-`answerSearch` parked, which lives for an hour.
+**An answer is one card you walk through — and so is a digest.** A busy weekend
+can rank forty events, and forty messages is forty notifications in a chat
+nobody can scroll back through. So the first card goes out with the header —
+which counts the whole answer, not the card — and everything else waits in the
+stash behind it. **Далі → (37)** and **← Назад (3)** under the card swap the
+event *on that same message*, so the chat holds one card however far you walk.
+**📋 Показати списком** on the header is the opt-in for a batch of `max_results`
+at a time. Nothing is re-scraped or re-ranked by any of it: they all read the
+tail that was parked when the answer went out.
 
-`message_delay_ms` exists because every event is its own message: a ten-event
-week is eleven sends to the same chat, and Telegram throttles a sustained burst
-at roughly one message per second. Lower it and you will start seeing 429s
-(both `sendMessage` and `sendPhoto` retry once, then give up on that message).
+A scheduled digest writes exactly the same stash, so the buttons behave
+identically whether you asked for the list or it arrived on a Monday morning.
+Two differences, both deliberate:
+
+- **A digest's stash lives 24 hours, a search's lives one.** You asked for the
+  search a minute ago; the digest turned up at 09:00 and you are reading it at
+  13:00, and a one-hour stash would answer your own digest with "той список уже
+  застарів".
+- **Only what was actually shown counts as sent.** The card is recorded when it
+  goes out and each event as the cursor reaches it; the untouched tail is left
+  unrecorded. Next week's digest may therefore re-offer something you never
+  paged to, which is the point — fourteen events sitting in a stash have not
+  been seen.
+
+Both stashes live in `scrape_cache` with an `expires_at` that `pruneCache`
+sweeps at the end of every fan-out, so there is one row per reader at a time
+(about 15 KiB for a fifteen-event week — a few hundred users is single-digit
+megabytes, held for a day).
+
+`message_delay_ms` is the pause between the messages of one send. A digest is
+now a header plus one card, so it barely applies there; what still needs it is
+**📋 Показати списком**, which hands out `max_results` events in one go, and the
+follow-alert and place-tip jobs, which are still one message per item. Telegram
+throttles a sustained burst at roughly one message per second — lower this and
+you will start seeing 429s (both `sendMessage` and `sendPhoto` retry once, then
+give up on that message).
 
 An event with a poster goes out as a photo, and Telegram fetches that file from
 the source's CDN itself — so a photo card takes it several hundred milliseconds
-longer to accept than a text one, which spaces a digest out further than this
-setting alone would. 400ms has held for text; if a photo-heavy digest starts
+longer to accept than a text one, which spaces a batch out further than this
+setting alone would. 400ms has held for text; if a photo-heavy batch starts
 logging 429s, `1000` is the value to move to, matching Telegram's own advice of
 one message per second per chat.
 
@@ -299,7 +321,7 @@ npx tsx scripts/telegram.ts --channel @some_channel --dump   # see raw posts
 ```bash
 npx tsx scripts/doctor.ts            # config, secrets, db, users, bot policy
 npx tsx scripts/doctor.ts --network  # also probe every source site
-npm test                             # 269 offline checks (~4s, no network)
+npm test                             # 300 offline checks (~15s, no network)
 npm run check                        # typecheck + tests, same as CI
 ```
 
@@ -310,16 +332,21 @@ them with `hermes cron add` (both forms are there, plus a crontab fallback):
 
 | When (Europe/Kyiv) | Job | Covers |
 |---|---|---|
-| **every hour** | `digest.ts --week` | whoever set that hour and today's weekday |
-| **every hour, Thursday** | `digest.ts --weekend --top 5` | whoever set that hour |
-| every 6 hours | `follows.ts` | each user's follow list, outside their quiet hours |
-| Sunday 11:00 | `places.ts` | each user's interests, outside their quiet hours |
+| **every hour** | `digest.ts --week` | whoever set that hour and today's weekday — header + one card |
+| **every hour, Thursday** | `digest.ts --weekend --top 5` | whoever set that hour — header + one card |
+| every 6 hours | `follows.ts` | each user's follow list, outside their quiet hours — one message per alert |
+| Sunday 11:00 | `places.ts` | each user's interests, outside their quiet hours — one message per place |
 | every 15 minutes | `reminders.ts` | everyone's ❤️ reminders |
 
 The two digest jobs tick **hourly** and the schedule lives on the user, not in
 the cron: each person picks their hour and the days they want a digest from
 `/settings → 🕘 Коли писати`. A tick that matches nobody logs one line and
 exits without scraping anything, so 23 of every 24 runs are free.
+
+Both digests arrive as **a header plus one card**, with the rest of the ranked
+week in a stash you walk with the buttons under it (§Bot policy). The follow
+alerts and place tips are left as they were — a single-event alert and three
+place suggestions are not lists you page through.
 
 Rehearse each one with `--dry-run`, and against yourself with
 `--chat <your-chat-id>`, before letting it loose on real users:

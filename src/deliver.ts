@@ -1,10 +1,16 @@
 /**
  * "Render it, send it, remember it" for one person.
  *
- * A digest goes out as a short header followed by **one message per event**,
- * and each of those messages is recorded against the single event it showed.
- * That is what lets a ❤️ reaction resolve to one event with no ambiguity —
- * and it is why `buildMessages`, not `buildDigest`, is used here.
+ * What goes out is a short header followed by one message per event it was
+ * *given*, and each of those messages is recorded against the single event it
+ * showed. That is what lets a ❤️ reaction resolve to one event with no
+ * ambiguity — and it is why `buildMessages`, not `buildDigest`, is used here.
+ *
+ * Both callers now hand it one card and keep the rest in a stash: an answer
+ * from `answerSearch`, a scheduled digest from `src/fanout.ts`. So "remember
+ * it" means exactly what went out and nothing else — an event nobody has
+ * walked to yet has not been seen, and recording it would mean it never shows
+ * up in a future digest. `stepCard` records each one as the cursor reaches it.
  */
 import type { Item, Query } from './types.ts';
 import type { Logger } from './log.ts';
@@ -157,14 +163,6 @@ export async function deliver(opts: DeliverOptions): Promise<DeliverResult> {
       // message rows without ever recording a delivery
       if (shouldRecord) await opts.store.recordSent(opts.chatId, message.items);
     }
-  }
-
-  // items a per-day cap kept out of the messages were still offered to this
-  // person, and are recorded as before — just once, not twice
-  if (opts.store && opts.chatId && shouldRecord) {
-    const shown = new Set(messages.flatMap((m) => m.items.map((i) => i.id)));
-    const unshown = opts.items.filter((i) => !shown.has(i.id));
-    if (unshown.length > 0) await opts.store.recordSent(opts.chatId, unshown);
   }
 
   opts.log.info(`${opts.dryRun ? 'dry-run' : `sent to ${opts.chatId}`}: ${opts.title} — ${summarize(opts.items)}`);

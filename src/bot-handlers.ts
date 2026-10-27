@@ -7,7 +7,7 @@
  */
 import { z } from 'zod';
 import type { Item, Kind } from './types.ts';
-import type { OptIn, Store } from './db.ts';
+import { SEARCH_PAGE_TTL_SECONDS, lastPageKey, pageKey, type OptIn, type Store } from './db.ts';
 import type { Logger } from './log.ts';
 import type { TgCallbackQuery, TgMessage, TgReactionUpdate } from './schemas.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
@@ -39,6 +39,7 @@ import {
   renderDetailsCaption,
   renderItem,
   renderReminders,
+  WALK_HINT,
   type CardState,
 } from './render.ts';
 import { getUser, isOwner, registerUser, saveUserPrefs, type BotUser } from './users.ts';
@@ -774,26 +775,6 @@ function makeReply(ctx: HandlerContext, chatId: string, replyTo?: number): Reply
 }
 
 /**
- * How long an answer's unshown tail stays pageable. Long enough to scroll back
- * up and keep tapping, short enough that prices and sold-out flags in it have
- * not gone stale — and short enough that `pruneCache` keeps the table small.
- */
-const MORE_TTL_SECONDS = 3600;
-
-/** Where one answer's leftovers live: next to the header that paginates them. */
-const pageKey = (chatId: string, messageId: number): string => `more:${chatId}:${messageId}`;
-
-/**
- * The header of the newest answer in this chat, so "Далі →" under a *card* can
- * find the stash its own message id knows nothing about.
- *
- * It is only a pointer: the page it names still expires on its own, and a
- * pointer at a page that is gone is answered the same way a stale "показати
- * ще" is.
- */
-const lastPageKey = (chatId: string): string => `lastpage:${chatId}`;
-
-/**
  * The line under the header: what this answer is doing and why it looks the
  * way it does.
  *
@@ -806,15 +787,7 @@ function footerFor(n: { shown: number; waiting: number; toppedUp: number; offTas
     return 'Нічого не знайшлося. Спробуй ширший період («наступного тижня»), інше місто, або глянь /prefs — можливо, я щось відфільтровую.';
   }
   const notes: string[] = [];
-  if (n.waiting > 0) {
-    // no count here on purpose: the header is written once and then only has
-    // its button redrawn, so a number in it would still say 36 when four are
-    // left. The buttons under the card carry the counts, and they are read
-    // fresh on every step.
-    notes.push(
-      'Показую по одній, щоб не завалити тебе повідомленнями — гортай «Далі →» і «← Назад» під карткою.',
-    );
-  }
+  if (n.waiting > 0) notes.push(WALK_HINT);
   if (n.toppedUp > 0) {
     notes.push(
       `Твого на цей період знайшлося небагато, тож додав ще ${n.toppedUp} — просто щоб ти знав(ла), що є. ` +
@@ -951,11 +924,14 @@ export async function answerSearch(
   // park the tail next to the header it belongs to, so paging through it later
   // costs a database read rather than another crawl of somebody's site
   if (rest.length > 0 && outcome.headerMessageId !== undefined && !outcome.chatGone) {
-    await ctx.store.putPage(
-      pageKey(user.chatId, outcome.headerMessageId),
-      { header: outcome.headerText, title, query, rest, size: cfg.bot.max_results },
-      MORE_TTL_SECONDS,
-    );
+    await ctx.store.putPage(pageKey(user.chatId, outcome.headerMessageId), {
+      header: outcome.headerText,
+      title,
+      query,
+      rest,
+      size: cfg.bot.max_results,
+      ttlSeconds: SEARCH_PAGE_TTL_SECONDS,
+    });
     await ctx.store.setState(lastPageKey(user.chatId), String(outcome.headerMessageId));
   }
 
@@ -1040,7 +1016,7 @@ async function showMore(
   // everything handed out but the last card is history now; the last one is
   // the card the cursor sits on, and stepCard is what moves it into `seen`
   const seen = [...page.seen, ...batch.slice(0, -1)];
-  if (rest.length > 0 || seen.length > 0) await ctx.store.putPage(key, { ...page, rest, seen }, MORE_TTL_SECONDS);
+  if (rest.length > 0 || seen.length > 0) await ctx.store.putPage(key, { ...page, rest, seen });
   else await ctx.store.dropPage(key);
 
   await editMessageText(page.header, {
@@ -1634,7 +1610,12 @@ const SOON: Record<string, string> = {
  *
  * The history lives in the stash next to the tail (`seen`), so "← Назад" costs
  * a database read rather than another crawl of somebody's site, and the whole
- * thing expires in an hour like the tail it walks.
+ * thing expires with the tail it walks — an hour for an answer somebody asked
+ * for, a day for a digest that turned up on its own.
+ *
+ * Who wrote the stash is not this function's business. A scheduled digest
+ * parks the same shape from `src/fanout.ts`, which is why a Monday 09:00
+ * digest walks exactly like a search.
  */
 async function stepCard(
   ctx: HandlerContext,
@@ -1671,7 +1652,7 @@ async function stepCard(
   // the card you tapped becomes the cursor, wherever in the chat it sits
   const seen = direction === 'next' ? [...page.seen, current] : page.seen.slice(0, -1);
   const rest = direction === 'next' ? page.rest.slice(1) : [current, ...page.rest];
-  await ctx.store.putPage(key, { ...page, seen, rest, cardMessageId: messageId }, MORE_TTL_SECONDS);
+  await ctx.store.putPage(key, { ...page, seen, rest, cardMessageId: messageId });
 
   const state: CardState = {
     saved: await ctx.store.isSaved(chatId, target.id),
@@ -1707,7 +1688,7 @@ async function stepCard(
       await deleteMessage(messageId, { chatId, dryRun: ctx.dryRun, log: ctx.log });
     }
     const landed = outcome.messageIds[0];
-    if (landed !== undefined) await ctx.store.putPage(key, { ...page, seen, rest, cardMessageId: landed }, MORE_TTL_SECONDS);
+    if (landed !== undefined) await ctx.store.putPage(key, { ...page, seen, rest, cardMessageId: landed });
   };
 
   if (messageId === undefined || wantsPhoto !== isPhoto) {

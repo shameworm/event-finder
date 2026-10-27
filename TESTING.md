@@ -14,7 +14,7 @@ cd ~/.hermes/skills/events-finder
 ## 0. Automated suite (start here)
 
 ```bash
-npm test          # 269 offline checks: parsing, classification, dedupe, ranking,
+npm test          # 300 offline checks: parsing, classification, dedupe, ranking,
                   # rendering, per-user store, users, fan-out, bot handlers,
                   # politeness/retries, page walking and the scrapers themselves
 npm run typecheck # tsc --noEmit
@@ -28,7 +28,8 @@ and ranked per user; a muted user is skipped; an already-delivered item is not
 repeated; a new user inherits no taste at all; the walkthrough turns taps into
 a stored profile and clears the stage at the end; abandoning it after the city
 still leaves someone in the digest list; a digest goes out as a header plus one
-message per event; a ❤️ on an event message sets a reminder and teaches the
+card and the rest in a stash, which «Далі →» walks and which only counts an
+event as sent once the cursor reaches it; a ❤️ on an event card sets a reminder and teaches the
 taste model, and taking it off cancels the reminder; the Ukrainian preference
 phrasings ("люблю джаз", "не люблю класичну музику") are understood, in
 whatever word order ("додай до міст Київ" as well as "додай місто Київ"); `🔔 2`
