@@ -383,10 +383,7 @@ export function eventKeyboard(item: Item, opts: CardState = {}): InlineButton[][
       { text: opts.reminded ? '⏰ Не нагадувати' : '⏰ Нагадати', callback_data: ev('r') },
       { text: '👎 Не моє', callback_data: ev('no') },
     ],
-    [
-      ...(google ? [{ text: '📅 В календар', url: google }] : []),
-      { text: '↗️ Поділитись', callback_data: ev('share') },
-    ],
+    ...(google ? [[{ text: '📅 В календар', url: google }]] : []),
   ];
 }
 

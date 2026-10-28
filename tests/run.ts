@@ -1084,7 +1084,7 @@ describe('messages', () => {
     assert.deepEqual(msgs[0]!.inlineKeyboard, undefined, 'the header is not an event');
     const rows = msgs[1]!.inlineKeyboard!;
     const labels = rows.flat().map((b) => b.text);
-    assert.deepEqual(labels, ['ℹ️ Деталі', '🔖 Зберегти', '⏰ Нагадати', '👎 Не моє', '📅 В календар', '↗️ Поділитись']);
+    assert.deepEqual(labels, ['ℹ️ Деталі', '🔖 Зберегти', '⏰ Нагадати', '👎 Не моє', '📅 В календар']);
     for (const b of rows.flat()) {
       // 📅 is a link, every other button calls back
       if ('url' in b) {
@@ -1100,7 +1100,7 @@ describe('messages', () => {
   it('leaves 📅 off an event whose date is still unknown', () => {
     const undated = makeItem({ city: 'kharkiv', title: 'Колись', url: 'https://m/c', source: 's' })!;
     const labels = eventKeyboard(undated).flat().map((b) => b.text);
-    assert.deepEqual(labels, ['ℹ️ Деталі', '🔖 Зберегти', '⏰ Нагадати', '👎 Не моє', '↗️ Поділитись']);
+    assert.deepEqual(labels, ['ℹ️ Деталі', '🔖 Зберегти', '⏰ Нагадати', '👎 Не моє']);
     assert.equal(googleCalendarUrl(undated), undefined);
   });
 
@@ -3529,16 +3529,16 @@ describe('card buttons', () => {
     });
   });
 
-  it('answers the buttons that are not built yet without breaking', async () => {
+  it('ignores a verb no card carries any more, rather than breaking on it', async () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3404', city: 'kharkiv' });
       const item = gig();
       await store.recordMessage('3404', 42, [item]);
-      for (const verb of ['share']) {
-        const out = await tapCard(store, '3404', verb, item.id);
-        assert.ok(out.includes('Скоро'), `${verb}: ${out.slice(0, 200)}`);
-      }
+      // a message already on screen keeps the keyboard it was sent with, so
+      // old cards still carry buttons this build never emits
+      for (const verb of ['share']) await tapCard(store, '3404', verb, item.id);
       assert.equal((await store.listReminders('3404')).length, 0);
+      assert.equal((await store.listSaved('3404')).length, 0);
     });
   });
 

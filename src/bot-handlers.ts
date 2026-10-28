@@ -1574,7 +1574,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
  *                 details and ev:b comes back, ev:s bookmarks it and teaches
  *                 the taste model, ev:n hands out one more from the stash,
  *                 ev:r toggles the reminder and teaches the same way,
- *                 ev:no teaches it downwards, ev:share is not built yet
+ *                 ev:no teaches it downwards
  *                 (📅 is a plain link and never calls back)
  *
  * Everything that changes a setting rewrites the panel it was tapped from, so
@@ -1828,11 +1828,6 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
       return drawPanel();
   }
 }
-
-/** The buttons other tasks will fill in; they answer rather than fail. */
-const SOON: Record<string, string> = {
-  share: 'Скоро зроблю «поділитись» одним тапом. Поки що перешли саме це повідомлення — у ньому вже є посилання.',
-};
 
 /**
  * Walk the answer by one, in either direction, **on the card that was tapped**.
@@ -2165,11 +2160,6 @@ async function handleCardButton(
         );
       }
       return showCard();
-    }
-
-    default: {
-      const said = SOON[verb];
-      return said ? reply(said) : undefined;
     }
   }
 }
