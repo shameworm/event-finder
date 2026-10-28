@@ -2745,10 +2745,16 @@ describe('bot handlers', () => {
       assert.ok(likes.includes('▫️ 🎭 театр'), 'an unchosen one is not');
 
       await tap(store, '3020', 'onb:next');
+      assert.equal((await store.getUser('3020'))?.stage, 'genres');
+      const genres = await tap(store, '3020', 'onb:genre:jazz');
+      assert.ok(genres.includes('✅ джаз'), 'a chosen genre is ticked');
+
+      await tap(store, '3020', 'onb:next');
       assert.equal((await store.getUser('3020'))?.stage, 'dislikes');
       await tap(store, '3020', 'onb:dis:classical');
 
       await tap(store, '3020', 'onb:next');
+      assert.equal((await store.getUser('3020'))?.stage, 'budget');
       const budget = await tap(store, '3020', 'onb:budget:1000');
       // a budget tap advances on its own — there is nothing else to say
       assert.equal((await store.getUser('3020'))?.stage, 'follow');
@@ -2762,6 +2768,7 @@ describe('bot handlers', () => {
       assert.equal(row?.stage, null);
       const user = (await getUser(store, '3020'))!;
       assert.deepEqual(user.prefs.favourite_categories, ['standup', 'exhibition']);
+      assert.deepEqual(user.prefs.genres, ['jazz']);
       assert.deepEqual(user.prefs.disliked_categories, ['classical']);
       assert.equal(user.prefs.max_ticket_price, 1000);
       assert.deepEqual(user.prefs.follow, ['Антон Тимошенко', 'Latexfauna']);
@@ -2827,6 +2834,7 @@ describe('bot handlers', () => {
     await withTestStore(async (store) => {
       await say(store, '3026', '/start');
       await say(store, '3026', 'Харків');
+      await tap(store, '3026', 'onb:skip');
       await tap(store, '3026', 'onb:skip');
       await tap(store, '3026', 'onb:skip');
       await tap(store, '3026', 'onb:skip');
@@ -3186,6 +3194,24 @@ describe('onboarding', () => {
     });
   });
 
+  it('turns a typed list at the genres screen into genres, and turns the rest away', async () => {
+    await withTestStore(async (store) => {
+      await say(store, '3107', '/start');
+      await say(store, '3107', 'Львів');
+      await say(store, '3107', 'Пропустити');
+      assert.equal((await store.getUser('3107'))?.stage, 'genres');
+
+      const noted = await say(store, '3107', 'рок, джаз, speciality coffee');
+      const user = await getUser(store, '3107');
+      assert.deepEqual(user?.prefs.genres, ['rock', 'jazz'], 'a known genre is added');
+      assert.deepEqual(user?.prefs.place_likes, [], 'the genres screen is not a place screen');
+      assert.ok(noted.includes('✅ Жанри'), noted.slice(0, 300));
+      assert.ok(noted.includes('не жанр'), 'an unknown word is turned away, not stored');
+      // typing answers the screen, it does not leave it
+      assert.equal((await store.getUser('3107'))?.stage, 'genres');
+    });
+  });
+
   it('still understands a full sentence mid-walkthrough', async () => {
     await withTestStore(async (store) => {
       await say(store, '3103', '/start');
@@ -3203,7 +3229,7 @@ describe('onboarding', () => {
       await say(store, '3104', '/start');
       await say(store, '3104', 'Львів');
       await say(store, '3104', 'Пропустити');
-      assert.equal((await store.getUser('3104'))?.stage, 'dislikes');
+      assert.equal((await store.getUser('3104'))?.stage, 'genres');
       const user = await getUser(store, '3104');
       assert.deepEqual(user?.prefs.favourite_categories, []);
     });
