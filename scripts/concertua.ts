@@ -26,7 +26,7 @@ export async function collect(ctx: SourceContext): Promise<SourceResult> {
   const sourceCfg = city?.concertua;
   if (!sourceCfg?.slug) {
     ctx.log.warn(`${SOURCE}: no concertua.slug for city "${ctx.city}" in config.yaml — skipping`);
-    return { source: SOURCE, ok: true, items: [] };
+    return { source: SOURCE, ok: true, items: [], skipped: true };
   }
 
   const categories = sourceCfg.categories?.length ? sourceCfg.categories : ['all-categories'];

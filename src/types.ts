@@ -81,6 +81,12 @@ export const SourceResultSchema = z.object({
   items: z.array(ItemSchema),
   /** Pages/channels/queries actually fetched — for logging. */
   fetched: z.number().int().optional(),
+  /**
+   * Nothing to scrape: no section for this city in config.yaml. Empty and ok,
+   * but it was never asked a question, so src/health.ts must not read it as a
+   * parser that stopped matching.
+   */
+  skipped: z.boolean().optional(),
 });
 export type SourceResult = z.infer<typeof SourceResultSchema>;
 

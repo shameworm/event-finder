@@ -214,13 +214,13 @@ export async function collect(ctx: SourceContext): Promise<SourceResult> {
 
   if (channels.length === 0) {
     ctx.log.info(`${SOURCE}: no channels configured for "${ctx.city}" (config.yaml → cities.${ctx.city}.telegram_channels)`);
-    return { source: SOURCE, ok: true, items: [] };
+    return { source: SOURCE, ok: true, items: [], skipped: true };
   }
 
   const creds = credentials();
   if ('missing' in creds) {
     ctx.log.warn(`${SOURCE}: skipping — missing ${creds.missing.join(', ')}`);
-    return { source: SOURCE, ok: true, items: [] };
+    return { source: SOURCE, ok: true, items: [], skipped: true };
   }
 
   const daysBack = args.num('days') ?? 21;

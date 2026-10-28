@@ -319,9 +319,9 @@ npx tsx scripts/telegram.ts --channel @some_channel --dump   # see raw posts
 ## 7. Check it works
 
 ```bash
-npx tsx scripts/doctor.ts            # config, secrets, db, users, bot policy
-npx tsx scripts/doctor.ts --network  # also probe every source site
-npm test                             # 300 offline checks (~15s, no network)
+npx tsx scripts/doctor.ts            # config, secrets, db, users, source health
+npx tsx scripts/doctor.ts --network  # also check every source site is reachable
+npm test                             # 330 offline checks (~15s, no network)
 npm run check                        # typecheck + tests, same as CI
 ```
 
@@ -445,7 +445,49 @@ npx tsx scripts/search.ts "stand-up in Lviv this weekend"    # answer by hand
   says what changed ("більше не показуватиму стендап"), and `/prefs` lists both
   what the bot likes and what it has stopped showing. `люблю <категорія>` or
   `слідкуй за <ім'я>` undoes either half.
-- **`/stats`** in the chat (owner only) shows user counts and table sizes.
+- **`/stats`** in the chat (owner only) shows user counts, table sizes, and one
+  line per source: how many items it last brought back and when.
+
+### When a source dies quietly
+
+A scraper that stops matching its site does not fail. `politeFetch` gets its
+200, cheerio matches nothing, the collector returns `{ ok: true, items: [] }`,
+and `failedSources` never hears about it — the digests just get thinner.
+
+So the fan-out counts instead. Every tick, each source's per-city answer goes to
+`src/health.ts`, which keeps one counter per source in the `state` table. A
+source is reported **dead** once it has returned nothing on **3 consecutive
+ticks while other sources did find events in the same cities**. That last clause
+is the whole thing: without it, a quiet Tuesday in Dnipro looks exactly like a
+broken parser.
+
+- The owner gets **one** message per outage, in English, with the command that
+  reproduces it — and one more when the source starts working again.
+- Counters live in the database, so a restart does not lose them. A source
+  that returns anything at all resets to zero.
+- **Nothing extra is fetched.** The detector only reads scrapes that were
+  already going to happen; a cache hit asked nobody anything and is counted as
+  no evidence either way.
+- A source with no section for a city in `config.yaml` is "never asked", not
+  empty. A source that *threw* is left alone too — that one is already loud, in
+  `failedSources` and the log.
+- **websearch** and **telegram** get their own wording: an empty websearch means
+  nobody has run the `places.ts --queries` → `websearch.ts --ingest` hand-off
+  lately, and an empty telegram usually means the GramJS session expired. Both
+  are different problems with different fixes from "the markup moved".
+
+`npx tsx scripts/doctor.ts` prints the same counters, so the doctor and the bot
+never disagree about which source is healthy. `--network` only answers whether
+the sites are *reachable*, which a site that changed its markup also is.
+
+**What it does not catch**: a tick where *every* source came back empty counts
+as no evidence, so a break on our side — a normalizer or a date filter that
+rejects everything — is invisible to the counters. That half is the fixture
+contract tests' job: `tests/fixtures/` holds pages captured from the real sites,
+and `npm test` asserts each parser still gets a title, a date and a price out of
+them. Those fail when we break a parser; they stay green when a live site moves,
+because the committed fixture does not move with it. The two halves together,
+not either alone.
 
 ### Being a good citizen
 
@@ -474,6 +516,7 @@ src/
   users.ts                chat id ↔ taste model
   cache.ts                one scrape per city
   fanout.ts               scheduled jobs across all users
+  health.ts               counts the ok-but-empty runs, and says so once
   schedule.ts             each person's hour and days, and when to keep quiet
   pipeline.ts request.ts rank.ts dedupe.ts normalize.ts render.ts
   db.ts config.ts schemas.ts types.ts http.ts jsonld.ts log.ts …

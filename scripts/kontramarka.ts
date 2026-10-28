@@ -91,7 +91,7 @@ export async function collect(ctx: SourceContext): Promise<SourceResult> {
   const sourceCfg = cfg.cities[ctx.city]?.kontramarka;
   if (!sourceCfg) {
     ctx.log.warn(`${SOURCE}: no kontramarka section for city "${ctx.city}" in config.yaml — skipping`);
-    return { source: SOURCE, ok: true, items: [] };
+    return { source: SOURCE, ok: true, items: [], skipped: true };
   }
 
   const categories = sourceCfg.categories?.length ? sourceCfg.categories : DEFAULT_CATEGORIES;

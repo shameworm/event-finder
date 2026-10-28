@@ -85,6 +85,13 @@ await withStore(async (store) => {
   if (result.failedSources.length) {
     process.stderr.write(`⚠️  sources that failed: ${result.failedSources.join(', ')}\n`);
   }
+  // ok, but empty three ticks running while the others delivered — see src/health.ts
+  if (result.deadSources.length) {
+    process.stderr.write(`⚠️  sources that look dead: ${result.deadSources.join(', ')} (the owner has been told)\n`);
+  }
+  if (result.recoveredSources.length) {
+    process.stderr.write(`✅ back from the dead: ${result.recoveredSources.join(', ')}\n`);
+  }
 });
 
 process.exit(process.exitCode ?? 0);

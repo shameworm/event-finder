@@ -92,6 +92,12 @@ await withStore(async (store) => {
       : `${result.items} alert(s) to ${result.recipients} user(s)${args.has('dry-run') ? ' (dry run)' : ''}\n`,
   );
   if (result.failedSources.length) process.stderr.write(`⚠️  sources that failed: ${result.failedSources.join(', ')}\n`);
+  if (result.deadSources.length) {
+    process.stderr.write(`⚠️  sources that look dead: ${result.deadSources.join(', ')} (the owner has been told)\n`);
+  }
+  if (result.recoveredSources.length) {
+    process.stderr.write(`✅ back from the dead: ${result.recoveredSources.join(', ')}\n`);
+  }
 });
 
 process.exit(process.exitCode ?? 0);

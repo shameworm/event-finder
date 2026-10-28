@@ -3,7 +3,12 @@
  * Health check: run this first, and whenever something stops working.
  *
  *   npx tsx scripts/doctor.ts            # config, env, database, preferences
- *   npx tsx scripts/doctor.ts --network  # also probe every source site
+ *   npx tsx scripts/doctor.ts --network  # also check every source site is reachable
+ *
+ * Whether a source still *works* is not something a probe can answer — a site
+ * that changed its markup answers 200 all day. That verdict comes out of the
+ * counters the fan-out keeps in the `state` table (src/health.ts), which is why
+ * the "source health" section below needs no network at all.
  *
  * Exit code is 1 if anything required is broken, 0 otherwise (warnings are fine).
  */
@@ -14,6 +19,8 @@ import { DATA_DIR, DB_FILE, LOG_FILE, SKILL_DIR, TG_SESSION_FILE, WEBSEARCH_INBO
 import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore } from '../src/db.ts';
+import { DEAD_AFTER_TICKS, WEBSEARCH_SOURCE, describeHealth, nextStep, readAllHealth } from '../src/health.ts';
+import { ALL_SOURCE_NAMES } from '../src/pipeline.ts';
 import { botToken, defaultChatId, getMe, getMyCommands } from '../src/telegram-api.ts';
 import { politeFetch } from '../src/http.ts';
 import { credentials } from './telegram.ts';
@@ -117,6 +124,36 @@ try {
 } catch (err) {
   bad(`database: ${err instanceof Error ? err.message : String(err)}`);
 }
+
+/* --- is every source still bringing anything back? --------------------- */
+section('source health (the counters the fan-out keeps — no network)');
+try {
+  const home = loadPrefs().home_city;
+  await withStore(async (store) => {
+    const rows = await readAllHealth(store, ALL_SOURCE_NAMES);
+    const lines = describeHealth(rows);
+    for (const [i, row] of rows.entries()) {
+      const line = lines[i] ?? row.source;
+      // a source nobody was warned about and that delivered last run is fine;
+      // one the owner has already been told about is not
+      if (row.alerted) {
+        // an empty websearch is a stale hand-off, not a broken scraper
+        if (row.source === WEBSEARCH_SOURCE) warn(line);
+        else bad(line);
+        process.stdout.write(`       → ${nextStep(row.source, home)}\n`);
+      } else if (row.emptyTicks > 0) {
+        warn(`${line} (${DEAD_AFTER_TICKS - row.emptyTicks} more empty tick(s) and the owner hears about it)`);
+      } else if (!row.lastItemsAt) {
+        warn(`${line} — no fan-out has asked it yet`);
+      } else {
+        ok(line);
+      }
+    }
+  });
+} catch (err) {
+  bad(`source health: ${err instanceof Error ? err.message : String(err)}`);
+}
+
 ok(`data dir ${DATA_DIR}`);
 if (existsSync(LOG_FILE)) {
   const lines = readFileSync(LOG_FILE, 'utf8').trimEnd().split('\n');
@@ -170,7 +207,10 @@ else ok(`api id ${creds.apiId}, session ${existsSync(TG_SESSION_FILE) ? TG_SESSI
 
 /* --- network ----------------------------------------------------------- */
 if (args.has('network')) {
-  section('source sites (--network)');
+  // reachability only. A site that quietly changed its markup answers 200
+  // here and still returns nothing — that is what "source health" above is
+  // for, and why this does not keep a second opinion about it.
+  section('source sites are reachable (--network)');
   const cfg = loadConfig();
   const home = loadPrefs().home_city;
   const city = cfg.cities[args.get('city') ?? home] ?? Object.values(cfg.cities)[0];
@@ -184,11 +224,12 @@ if (args.has('network')) {
   for (const [name, url] of probes) {
     try {
       const html = await politeFetch(url, { log, retries: 0 });
-      ok(`${name}: ${url} (${Math.round(html.length / 1024)} KB)`);
+      ok(`${name}: reachable, ${Math.round(html.length / 1024)} KB — ${url}`);
     } catch (err) {
       bad(`${name}: ${url} — ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  process.stdout.write('     (reachable is not the same as working — see "source health" above)\n');
 }
 
 /* --- verdict ----------------------------------------------------------- */

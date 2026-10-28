@@ -85,6 +85,10 @@ const { politeFetch, HttpError } = await import('../src/http.ts');
 const { pager, safeCollect } = await import('../src/source.ts');
 const { eventsFromJsonLd } = await import('../src/jsonld.ts');
 const { collect: collectKarabas } = await import('../scripts/karabas.ts');
+const { collect: collectConcertUa } = await import('../scripts/concertua.ts');
+const {
+  DEAD_AFTER_TICKS, SourceHealthSchema, evaluateTick, readHealth, readAllHealth, recordTick, describeHealth,
+} = await import('../src/health.ts');
 
 const TZ = 'Europe/Kyiv';
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
@@ -1881,6 +1885,53 @@ describe('the shared city scrape', () => {
       const later = await ask();
       assert.equal(fetches, 1);
       assert.equal(later.cached, true);
+    });
+  });
+
+  it('says what each source came back with, so one tick can be judged', async () => {
+    await withTestStore(async (store) => {
+      // only Karabas' pages carry anything; the other two answer 200 with
+      // nothing in them, which is exactly the silent failure we are after
+      const fetchText = async (url: string) => (url.includes('karabas') && !url.includes('page=') ? page() : '<html></html>');
+      const res = await collectCity({
+        store, log, city: 'kharkiv', from: '2026-12-08', to: '2026-12-09', kinds: ['event'],
+        sources: ['karabas', 'kontramarka', 'telegram'], maxPages: 1, ttlSeconds: 0, fetchText,
+      });
+      const per = res.perSource ?? [];
+      assert.equal(per.find((p) => p.source === 'karabas')?.items, 1);
+      const kontramarka = per.find((p) => p.source === 'kontramarka');
+      assert.equal(kontramarka?.items, 0);
+      assert.equal(kontramarka?.skipped, false, 'Kharkiv has a kontramarka section, so it really was asked');
+    });
+  });
+
+  it('marks a source with no section for the city as never asked', async () => {
+    await withTestStore(async (store) => {
+      // config.example.yaml configures no telegram_channels anywhere, so the
+      // collector returns ok with nothing to show — not a broken parser
+      const res = await collectCity({
+        store, log, city: 'kharkiv', from: '2026-12-08', to: '2026-12-09', kinds: ['event'],
+        sources: ['telegram'], maxPages: 1, ttlSeconds: 0, fetchText: async () => '<html></html>',
+      });
+      assert.equal(res.perSource?.find((p) => p.source === 'telegram')?.skipped, true);
+    });
+  });
+
+  it('does not pretend a cache hit is evidence about a source', async () => {
+    await withTestStore(async (store) => {
+      const opts = {
+        // its own window: the test above warms the cache for 12-08..12-09, and
+        // the whole point of this case is to watch a cold key go warm
+        store, log, city: 'kharkiv' as const, from: '2026-12-08', to: '2026-12-11', kinds: ['event' as const],
+        sources: ['karabas'], maxPages: 1, fetchText: async (url: string) => (url.includes('page=') ? '<html></html>' : page()),
+      };
+      const scraped = await collectCity(opts);
+      assert.equal(scraped.cached, false);
+      assert.ok(scraped.perSource, 'a real scrape says what each source found');
+
+      const hit = await collectCity(opts);
+      assert.equal(hit.cached, true);
+      assert.equal(hit.perSource, undefined, 'a cache hit says nothing about whether the site still works');
     });
   });
 });
@@ -4175,6 +4226,361 @@ describe('the bookmark as a taste signal', () => {
 
       await bookmark(store, '3706', item.id);
       assert.equal((await getUser(store, '3706'))?.prefs.taste['standup'], -1, 'a tally below zero still counts up');
+    });
+  });
+});
+
+/* --------------------------------------------------- a source gone quietly dead --- */
+
+describe('dead source detection', () => {
+  /** What one source came back with for one city in one fan-out tick. */
+  const saw = (source: string, city: string, items: number) => ({ source, city, items, ok: true });
+  /** Midday on the weekend-digest day: outside everyone's quiet hours. */
+  const noonThursday = { hour: 12, weekday: WEEKEND_DAY };
+
+  /** recordTick with the owner's inbox replaced by an array we can read. */
+  async function tick(
+    store: StoreType,
+    obs: { source: string; city: string; items: number; ok: boolean; skipped?: boolean }[],
+  ): Promise<{ dead: string[]; recovered: string[]; sent: string[] }> {
+    const sent: string[] = [];
+    const report = await recordTick(store, obs, {
+      log,
+      notify: async (text: string) => {
+        sent.push(text);
+      },
+    });
+    return { ...report, sent };
+  }
+
+  it('reads a counter that was never written as a fresh one', async () => {
+    await withTestStore(async (store) => {
+      const fresh = await readHealth(store, 'never-seen');
+      assert.equal(fresh.emptyTicks, 0);
+      assert.equal(fresh.alerted, false);
+      assert.equal(fresh.lastItemsAt, undefined);
+    });
+  });
+
+  it('counts a tick where one source came back empty and another did not', async () => {
+    await withTestStore(async (store) => {
+      await tick(store, [saw('d1-quiet', 'kharkiv', 0), saw('d1-busy', 'kharkiv', 7)]);
+      assert.equal((await readHealth(store, 'd1-quiet')).emptyTicks, 1);
+      const busy = await readHealth(store, 'd1-busy');
+      assert.equal(busy.emptyTicks, 0);
+      assert.equal(busy.lastItemsCount, 7);
+      assert.ok(busy.lastItemsAt, 'a source that returned items records when');
+    });
+  });
+
+  it('calls a night when nothing was on anywhere a quiet night, not a dead source', () => {
+    const quiet = evaluateTick([saw('a', 'dnipro', 0), saw('b', 'dnipro', 0)]);
+    assert.equal(quiet.get('a')?.verdict, 'quiet', 'nobody found anything — that is Dnipro on a Tuesday');
+    const broken = evaluateTick([saw('a', 'dnipro', 0), saw('b', 'dnipro', 3)]);
+    assert.equal(broken.get('a')?.verdict, 'empty', 'b found events in the same city, so a is the odd one out');
+    assert.equal(broken.get('b')?.verdict, 'items');
+  });
+
+  it('resets the count the moment the source returns anything', async () => {
+    await withTestStore(async (store) => {
+      await tick(store, [saw('d2', 'kharkiv', 0), saw('d2-mate', 'kharkiv', 4)]);
+      await tick(store, [saw('d2', 'kharkiv', 0), saw('d2-mate', 'kharkiv', 4)]);
+      assert.equal((await readHealth(store, 'd2')).emptyTicks, 2);
+      await tick(store, [saw('d2', 'kharkiv', 1), saw('d2-mate', 'kharkiv', 4)]);
+      assert.equal((await readHealth(store, 'd2')).emptyTicks, 0, 'one item is enough to clear it');
+    });
+  });
+
+  it('does not call a source dead for one quiet city when it filled another', () => {
+    const verdicts = evaluateTick([
+      saw('a', 'kharkiv', 0),
+      saw('a', 'kyiv', 5),
+      saw('b', 'kharkiv', 3),
+      saw('b', 'kyiv', 3),
+    ]);
+    assert.equal(verdicts.get('a')?.verdict, 'items', 'zero in Kharkiv is not dead when Kyiv worked');
+  });
+
+  it('leaves out a source that was never asked about the city', () => {
+    // a city with no `karabas` section in config.yaml: the collector returns
+    // ok with nothing, and that must not look like a broken parser
+    const verdicts = evaluateTick([
+      { source: 'a', city: 'uzhhorod', items: 0, ok: true, skipped: true },
+      saw('b', 'uzhhorod', 6),
+    ]);
+    assert.equal(verdicts.has('a'), false, 'a source with no config for the city was not asked');
+  });
+
+  it('leaves a source that threw alone — a loud failure is already reported', async () => {
+    await withTestStore(async (store) => {
+      await tick(store, [{ source: 'd3', city: 'kharkiv', items: 0, ok: false }, saw('d3-mate', 'kharkiv', 2)]);
+      assert.equal((await readHealth(store, 'd3')).emptyTicks, 0, 'failedSources already covers this one');
+    });
+  });
+
+  it('messages the owner once on the third tick, and not again on the fourth', async () => {
+    await withTestStore(async (store) => {
+      assert.equal(DEAD_AFTER_TICKS, 3);
+      const sent: string[] = [];
+      for (let i = 0; i < DEAD_AFTER_TICKS - 1; i++) {
+        const r = await tick(store, [saw('d4', 'kharkiv', 0), saw('d4-mate', 'kharkiv', 9)]);
+        sent.push(...r.sent);
+      }
+      assert.deepEqual(sent, [], 'two empty ticks are not yet an outage');
+
+      const third = await tick(store, [saw('d4', 'kharkiv', 0), saw('d4-mate', 'kharkiv', 9)]);
+      assert.deepEqual(third.dead, ['d4']);
+      assert.equal(third.sent.length, 1, third.sent.join('\n'));
+      assert.ok(third.sent[0]?.includes('d4'), third.sent[0]);
+      assert.ok(/3 consecutive/.test(third.sent[0] ?? ''), third.sent[0]);
+      assert.ok(third.sent[0]?.includes('kharkiv'), 'it names where the other sources did find things');
+
+      const fourth = await tick(store, [saw('d4', 'kharkiv', 0), saw('d4-mate', 'kharkiv', 9)]);
+      assert.deepEqual(fourth.sent, [], 'once per outage, not once an hour');
+      assert.deepEqual(fourth.dead, []);
+      assert.equal((await readHealth(store, 'd4')).emptyTicks, 4, 'the counter keeps climbing all the same');
+    });
+  });
+
+  it('says so when a dead source starts returning items again', async () => {
+    await withTestStore(async (store) => {
+      for (let i = 0; i < DEAD_AFTER_TICKS; i++) {
+        await tick(store, [saw('d5', 'kharkiv', 0), saw('d5-mate', 'kharkiv', 9)]);
+      }
+      assert.equal((await readHealth(store, 'd5')).alerted, true);
+
+      const back = await tick(store, [saw('d5', 'kharkiv', 11), saw('d5-mate', 'kharkiv', 9)]);
+      assert.deepEqual(back.recovered, ['d5']);
+      assert.equal(back.sent.length, 1, back.sent.join('\n'));
+      assert.ok(/again/i.test(back.sent[0] ?? ''), back.sent[0]);
+      assert.ok(back.sent[0]?.includes('11'), 'it says how many came back');
+      assert.equal((await readHealth(store, 'd5')).alerted, false, 'the outage is over');
+
+      const after = await tick(store, [saw('d5', 'kharkiv', 11), saw('d5-mate', 'kharkiv', 9)]);
+      assert.deepEqual(after.sent, [], 'one recovery message, not one per tick');
+    });
+  });
+
+  it('never sends a recovery message for a source nobody was warned about', async () => {
+    await withTestStore(async (store) => {
+      const first = await tick(store, [saw('d6', 'kharkiv', 3), saw('d6-mate', 'kharkiv', 1)]);
+      assert.deepEqual(first.sent, [], 'a healthy source is not news');
+    });
+  });
+
+  it('keeps the count across a process restart', async () => {
+    await withTestStore(async (store) => {
+      await tick(store, [saw('d7', 'kharkiv', 0), saw('d7-mate', 'kharkiv', 5)]);
+      await tick(store, [saw('d7', 'kharkiv', 0), saw('d7-mate', 'kharkiv', 5)]);
+    });
+    // a fresh Store over the same file, as the next cron tick would open it
+    await withTestStore(async (store) => {
+      assert.equal((await readHealth(store, 'd7')).emptyTicks, 2, 'the counter is in the state table, not in memory');
+      const third = await tick(store, [saw('d7', 'kharkiv', 0), saw('d7-mate', 'kharkiv', 5)]);
+      assert.deepEqual(third.dead, ['d7'], 'the third tick after a restart still closes the case');
+    });
+  });
+
+  it('tells the operator websearch needs an ingest, not a repair', async () => {
+    await withTestStore(async (store) => {
+      let sent: string[] = [];
+      for (let i = 0; i < DEAD_AFTER_TICKS; i++) {
+        sent = (await tick(store, [saw('websearch', 'kharkiv', 0), saw('karabas', 'kharkiv', 8)])).sent;
+      }
+      const msg = sent[0] ?? '';
+      assert.ok(msg.includes('websearch'), msg);
+      assert.ok(/ingest/i.test(msg), `websearch is a hand-off, so the fix is an ingest: ${msg}`);
+      assert.ok(!/broken|markup/i.test(msg), `nothing is broken — it is just stale: ${msg}`);
+    });
+  });
+
+  it('blames the GramJS session when telegram goes quiet', async () => {
+    await withTestStore(async (store) => {
+      let sent: string[] = [];
+      for (let i = 0; i < DEAD_AFTER_TICKS; i++) {
+        sent = (await tick(store, [saw('telegram', 'kharkiv', 0), saw('concert.ua', 'kharkiv', 8)])).sent;
+      }
+      const msg = sent[0] ?? '';
+      assert.ok(/session/i.test(msg), `an expired session is a different fix: ${msg}`);
+      assert.ok(/tg-login/.test(msg), `point at the script that fixes it: ${msg}`);
+    });
+  });
+
+  it('shows a line per source, including one that has never returned anything', async () => {
+    await withTestStore(async (store) => {
+      await tick(store, [saw('d8', 'kharkiv', 12), saw('d8-dead', 'kharkiv', 0)]);
+      const rows = await readAllHealth(store, ['d8', 'd8-dead', 'd8-unseen']);
+      const lines = describeHealth(rows);
+      assert.equal(lines.length, 3);
+      assert.ok(lines[0]?.includes('d8') && lines[0]?.includes('12'), lines.join('\n'));
+      assert.ok(/never/.test(lines[1] ?? ''), `a source that has never delivered says so: ${lines[1]}`);
+      assert.ok(/1 empty tick/.test(lines[1] ?? ''), lines[1]);
+      assert.ok(/never/.test(lines[2] ?? ''), `a source with no row at all still gets a line: ${lines[2]}`);
+    });
+  });
+
+  it('counts real fan-out ticks and tells the owner on the third', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '4100', city: 'kharkiv' });
+      // only Karabas serves anything, so the other sources are the odd ones out
+      const fetchText = async (url: string) =>
+        url.includes('karabas') && !url.includes('page=')
+          ? `<html><script type="application/ld+json">${fixture('karabas-event.json')}</script></html>`
+          : '<html></html>';
+      // a fresh window each tick: the scrape cache is keyed on it, and a cache
+      // hit would tell us nothing about the sources
+      const windows = [
+        { from: '2026-12-07', to: '2026-12-09', label: 'a' },
+        { from: '2026-12-08', to: '2026-12-10', label: 'b' },
+        { from: '2026-12-06', to: '2026-12-09', label: 'c' },
+      ];
+      // an earlier case in this block already moved telegram's counter and the
+      // suite shares one database file, so watch the delta, not the value
+      const telegramBefore = (await readHealth(store, 'telegram')).emptyTicks;
+      const ticks = [];
+      for (const window of windows) {
+        ticks.push(
+          await fanout({
+            store, log, optIn: 'weekend_digest', window, now: noonThursday, onlyChats: ['4100'],
+            dryRun: true, maxPages: 1, fetchText, title: () => 'W',
+          }),
+        );
+      }
+
+      assert.equal((await readHealth(store, 'karabas')).emptyTicks, 0, 'Karabas kept delivering');
+      assert.ok((await readHealth(store, 'karabas')).lastItemsAt, 'and when it last did is written down');
+      assert.equal((await readHealth(store, 'concert.ua')).emptyTicks, 3);
+      assert.equal(
+        (await readHealth(store, 'telegram')).emptyTicks,
+        telegramBefore,
+        'no channels configured for any city — telegram was never asked, so it is not counted',
+      );
+
+      assert.deepEqual(ticks[0]?.deadSources, [], 'one empty tick is not an outage');
+      assert.ok(ticks[2]?.deadSources.includes('concert.ua'), JSON.stringify(ticks[2]?.deadSources));
+      assert.ok(ticks[2]?.deadSources.includes('kontramarka'), JSON.stringify(ticks[2]?.deadSources));
+      assert.ok(!ticks[2]?.deadSources.includes('karabas'), 'the one that works is not reported');
+      assert.ok(!ticks[2]?.deadSources.includes('telegram'), 'a source with no config is not reported');
+    });
+  });
+
+  it('stores the counter as something that still parses next release', async () => {
+    const parsed = SourceHealthSchema.parse({ source: 'x' });
+    assert.equal(parsed.emptyTicks, 0);
+    assert.equal(parsed.lastItemsCount, 0);
+    assert.equal(parsed.alerted, false);
+  });
+});
+
+/* ----------------------------------------------- the fixtures still parse --- */
+
+/**
+ * These pin our *parsers*, not the live sites: the fixtures are pages captured
+ * once and committed. Break a selector or a normalizer and these fail; change
+ * the markup on concert.ua and they stay green, which is exactly the hole the
+ * dead-source detector above is there to cover.
+ */
+describe('fixture contracts', () => {
+  const wide = parseRequest('', { prefs, base: '2026-10-20', from: '2026-01-01', to: '2027-12-31' });
+  const once = (body: string) => {
+    const served = new Set<string>();
+    return async (url: string) => {
+      if (served.has(url)) return '<html></html>';
+      served.add(url);
+      return body;
+    };
+  };
+
+  it('pulls a title, a date and a price out of the Concert.ua page', async () => {
+    const page = `<html><head><script type="application/ld+json">${fixture('concertua-soldout.json')}</script></head></html>`;
+    const res = await collectConcertUa({ query: wide, city: 'kharkiv', log, maxPages: 1, fetchText: once(page) });
+    assert.equal(res.ok, true);
+    const item = res.items[0];
+    assert.ok(item, 'the Concert.ua JSON-LD no longer yields an item');
+    assert.equal(item.title, 'Batya 2 Solo Stand-Up');
+    assert.equal(item.startsAt, '2026-10-24T19:00:00+03:00');
+    assert.equal(item.priceMin, 450);
+    assert.equal(priceText(item), 'від 450 ₴');
+  });
+
+  it('pulls a title, a date and a price range out of the Karabas page', async () => {
+    const page = `<html><head><script type="application/ld+json">${fixture('karabas-event.json')}</script></head></html>`;
+    const res = await collectKarabas({ query: wide, city: 'kharkiv', log, maxPages: 1, fetchText: once(page) });
+    assert.equal(res.ok, true);
+    const item = res.items[0];
+    assert.ok(item, 'the Karabas JSON-LD no longer yields an item');
+    assert.equal(item.title, 'IVAN LIULENOV');
+    assert.equal(item.startsAt, '2026-12-08T21:00:00+02:00');
+    assert.equal(item.priceMin, 790);
+    assert.equal(item.priceMax, 1590);
+    assert.equal(priceText(item), '790–1590 ₴');
+  });
+
+  it('pulls a title, a date and a price range out of the Kontramarka card', async () => {
+    const res = await collectKontramarka({
+      query: wide,
+      city: 'kharkiv',
+      log,
+      maxPages: 1,
+      fetchText: once(fixture('kontramarka-card.html')),
+    });
+    assert.equal(res.ok, true);
+    const item = res.items[0];
+    assert.ok(item, 'the Kontramarka microdata no longer yields an item');
+    assert.equal(item.title, 'Василь Байдак');
+    assert.equal(item.startsAt, '2026-10-21T18:30:00+03:00');
+    assert.equal(item.priceMin, 390);
+    assert.equal(item.priceMax, 890);
+    assert.equal(priceText(item), '390–890 ₴');
+  });
+});
+
+/* ------------------------------------------------------- /stats, for the owner --- */
+
+describe('/stats', () => {
+  it('shows when each source last returned items, and how many', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '4200', city: 'kharkiv' });
+      await recordTick(
+        store,
+        [
+          { source: 'concert.ua', city: 'kharkiv', items: 18, ok: true },
+          { source: 'kontramarka', city: 'kharkiv', items: 0, ok: true },
+        ],
+        { log, notify: async () => {} },
+      );
+
+      const owner = process.env['TELEGRAM_CHAT_ID'];
+      process.env['TELEGRAM_CHAT_ID'] = '4200';
+      try {
+        const out = await say(store, '4200', '/stats');
+        assert.ok(out.includes('users:'), out.slice(0, 400));
+        assert.ok(/concert\.ua: 18 item\(s\)/.test(out), `no concert.ua line in:\n${out}`);
+        assert.ok(/kontramarka: 0 item\(s\), last never/.test(out), `no kontramarka line in:\n${out}`);
+        // the exact count depends on what earlier cases did to the shared file;
+        // that it is shown at all is what /stats owes the operator
+        assert.ok(/empty tick\(s\)/.test(out), `the empty runs are not shown in:\n${out}`);
+        for (const source of ALL_SOURCE_NAMES) assert.ok(out.includes(source), `${source} is missing from /stats`);
+      } finally {
+        if (owner === undefined) delete process.env['TELEGRAM_CHAT_ID'];
+        else process.env['TELEGRAM_CHAT_ID'] = owner;
+      }
+    });
+  });
+
+  it('is still only for the owner', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '4201', city: 'kharkiv' });
+      const owner = process.env['TELEGRAM_CHAT_ID'];
+      process.env['TELEGRAM_CHAT_ID'] = '4200';
+      try {
+        const out = await say(store, '4201', '/stats');
+        assert.ok(out.includes('для власника'), out.slice(0, 300));
+        assert.ok(!out.includes('users:'), 'a stranger does not get the numbers');
+      } finally {
+        if (owner === undefined) delete process.env['TELEGRAM_CHAT_ID'];
+        else process.env['TELEGRAM_CHAT_ID'] = owner;
+      }
     });
   });
 });
