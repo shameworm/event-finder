@@ -159,6 +159,18 @@ Any page that publishes schema.org Events — a theatre's afisha, a club, a
 festival programme — is a source with no new code. Paste its url into the probe
 first; if it finds events, put the same url under the city's `venues:`.
 
+**Probe before you believe it.** Publishing Event markup is much rarer than it
+sounds: the ticket aggregators do it because SEO for ticket sales pays for it,
+while a theatre's own site usually publishes nothing machine-readable at all.
+Of ten Ukrainian venue sites checked when this was written — the Kharkiv
+philharmonic, Kharkiv and Kyiv opera, the Shevchenko and Franko theatres, Atlas,
+Lviv opera, Dovzhenko Centre among them — **none** published a single
+schema.org `Event`, on the landing page or the afisha, as JSON-LD or as
+microdata. Two published JSON-LD, but only `WebSite`/`Organization` site
+metadata. That is exactly what the probe is for: thirty seconds and one request
+tells you, instead of a config entry that quietly returns nothing for weeks.
+`venues:` ships empty for the same reason.
+
 ```bash
 npx tsx scripts/venues.ts --probe https://teatr.example.ua/afisha   # what does it publish?
 ```

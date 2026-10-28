@@ -85,7 +85,10 @@ cities:
     kontramarka:
       subdomain: kharkiv
       categories: [concert, standUp, theatre, exhibition, festival, clubs, museum]
-    venues: []                # ← fill in; a venue needs no code, only its url:
+    venues: []                # ← empty on purpose: most venue sites publish no
+                              #   schema.org Events at all, so probe a url before
+                              #   adding it (npx tsx scripts/venues.ts --probe <url>).
+                              #   A venue needs no code, only its url:
                               #   - url: "https://teatr.example.ua/afisha"
                               #     label: "Театр «Прапор»"   # optional: logs, /stats, and
                               #                                 the venue name when the

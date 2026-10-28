@@ -177,7 +177,12 @@ npx tsx scripts/websearch.ts    --city kharkiv
   afisha, a club, a festival programme. One request per url as written, no
   crawling and no pagination. Items are filed per site (`venue:<hostname>`), so
   /stats has a row each. Adding one is a config edit — `--probe <url>` prints
-  what a page publishes, which is the check to run before suggesting it.
+  what a page publishes.
+  **Never suggest a venue url you have not probed.** Ukrainian venue sites
+  mostly publish no Event markup: ten were checked when this shipped
+  (philharmonic, operas, drama theatres, Atlas, Dovzhenko Centre) and none
+  published one, so the list ships empty. Probe, read the output, and only then
+  tell the operator it is worth adding.
 
 All three publish a poster on the very pages above — a URL on Concert.ua, an
 `ImageObject` on Karabas, a `<meta itemprop="image">` on Kontramarka — so an
