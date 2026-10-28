@@ -104,6 +104,10 @@ export async function collect(ctx: SourceContext, cfg: Config = loadConfig()): P
           city: ctx.city,
           source: key,
           fallbackCategory: venue.category,
+          // a page about its own shows rarely names itself in the markup, and an
+          // item with no venue cannot be matched against a ticket site's listing
+          // of the same gig (src/dedupe.ts → sameSlot)
+          fallbackVenue: label,
           // a venue's own markup about its own show, not somebody's prose about it
           confidence: 'high',
           onReject: () => unreadable++,

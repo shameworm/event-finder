@@ -90,6 +90,13 @@ export interface NormalizeOpts {
   source: string;
   /** Fallback category when the object and its text give nothing away. */
   fallbackCategory?: Category;
+  /**
+   * Fallback venue name when the markup carries no `location`. A site's own
+   * page rarely repeats its own name inside its own events, and an item with
+   * no venue is invisible to the deduper's sameSlot check — which is the only
+   * thing that collapses "Один в каное" and "Один в каное — акустичний сет".
+   */
+  fallbackVenue?: string;
   confidence?: 'high' | 'low';
   /** Called with a reason when an object is rejected. */
   onReject?: (reason: string) => void;
@@ -134,7 +141,7 @@ function buildFromSchemaEvent(ev: SchemaEvent, opts: NormalizeOpts): Item | null
       title: truncate(ev.name, 160),
       category,
       city: opts.city,
-      venue: ev.location?.name?.trim() || undefined,
+      venue: ev.location?.name?.trim() || opts.fallbackVenue?.trim() || undefined,
       address: address?.trim() || undefined,
       startsAt: ev.startDate,
       endsAt: ev.endDate,

@@ -1180,7 +1180,38 @@ describe('venues', () => {
     assert.match(res.error ?? '', /503/);
   });
 
-  it('collapses the same show into the ticket site listing, and lists both sources', async () => {
+  it('names the venue from the configured label when the markup leaves it out', async () => {
+    // Without this the deduper's sameSlot check — which needs a venue on both
+    // sides — can never fire for a venue page, because a theatre's markup
+    // almost never repeats its own name inside its own events.
+    const noLocation = `<html><head><script type="application/ld+json">{
+      "@type": "MusicEvent",
+      "name": "Один в каное",
+      "url": "https://teatr.example.ua/afisha/one-in-canoe",
+      "startDate": "2026-12-12T20:00:00+02:00"
+    }</script></head></html>`;
+    const res = await collectVenues(
+      { query: wide, city: 'kharkiv', log, fetchText: serveSame(noLocation) },
+      configWith(theatreYaml),
+    );
+    assert.equal(res.items[0]?.venue, 'Театр «Прапор»', 'the label is the venue when the markup has none');
+  });
+
+  it('falls back to the hostname when the venue has no label either', async () => {
+    const noLocation = `<html><head><script type="application/ld+json">{
+      "@type": "MusicEvent",
+      "name": "Один в каное",
+      "url": "https://teatr.example.ua/afisha/one-in-canoe",
+      "startDate": "2026-12-12T20:00:00+02:00"
+    }</script></head></html>`;
+    const res = await collectVenues(
+      { query: wide, city: 'kharkiv', log, fetchText: serveSame(noLocation) },
+      configWith('      - url: "https://teatr.example.ua/afisha"'),
+    );
+    assert.equal(res.items[0]?.venue, 'teatr.example.ua', 'never empty, or the deduper is blind to it');
+  });
+
+  it('collapses the same show into the ticket site listing, and lists both sources (the exact-id pass)', async () => {
     const alsoOnConcertUa = `<html><head><script type="application/ld+json">{
       "@type": "ComedyEvent",
       "name": "Batya 2 Solo Stand-Up",
@@ -1227,6 +1258,101 @@ describe('venues', () => {
     assert.match(lines, /250–600 ₴/, lines);
     assert.match(lines, /https:\/\/teatr\.example\.ua\/afisha\/tartuffe/, lines);
     assert.match(lines, /3 schema\.org Event/, 'the count is the headline');
+  });
+
+  /**
+   * The case that actually bites. Karabas calls it "Один в каное", the venue
+   * calls it "Один в каное — акустичний сет": jaccard is 0.500, under the 0.6
+   * title threshold, so the only thing that can collapse them is sameSlot —
+   * same start time *and* a similar venue on both sides. Identical titles
+   * would merge on pass 1 and prove none of this.
+   */
+  describe('against the ticket sites', () => {
+    const evening = parseRequest('', { prefs, base: '2026-12-01', from: '2026-12-12', to: '2026-12-12' });
+    const karabasPage = `<html><script type="application/ld+json">{
+      "@type": "MusicEvent",
+      "name": "Один в каное",
+      "url": "https://kharkiv.karabas.com/one-in-canoe/",
+      "startDate": "2026-12-12T20:00:00+02:00",
+      "location": { "@type": "Place", "name": "Театр «Прапор»", "address": { "@type": "PostalAddress", "streetAddress": "вул. Сумська, 25" } },
+      "offers": { "@type": "AggregateOffer", "lowPrice": "400", "highPrice": "900", "priceCurrency": "UAH", "availability": "https://schema.org/InStock" },
+      "image": "https://cdn.karabas.com/posters/one-in-canoe.jpg"
+    }</script></html>`;
+    /** The same gig on the venue's own page: longer title, no location, own poster. */
+    const venuePage = `<html><script type="application/ld+json">{
+      "@type": "MusicEvent",
+      "name": "Один в каное — акустичний сет",
+      "url": "https://teatr.example.ua/afisha/one-in-canoe",
+      "startDate": "2026-12-12T20:00:00+02:00",
+      "description": "Акустика у великій залі.",
+      "image": "https://teatr.example.ua/upload/posters/canoe.jpg"
+    }</script></html>`;
+
+    const fromVenue = async () =>
+      (await collectVenues({ query: evening, city: 'kharkiv', log, fetchText: serveSame(venuePage) }, configWith(theatreYaml))).items;
+    const fromKarabas = async () =>
+      (await collectKarabas({ query: evening, city: 'kharkiv', log, maxPages: 1, fetchText: serveSame(karabasPage) })).items;
+
+    it('is one card, not two, when the titles differ', async () => {
+      const venue = await fromVenue();
+      const karabas = await fromKarabas();
+      assert.equal(venue.length, 1);
+      assert.equal(karabas.length, 1);
+      assert.notEqual(venue[0]?.id, karabas[0]?.id, 'the ids differ — this is not the easy case');
+
+      const merged = dedupe([...karabas, ...venue], TZ);
+      assert.equal(merged.length, 1, `two cards for one gig: ${JSON.stringify(merged.map((i) => i.title))}`);
+      assert.deepEqual([...(merged[0]?.sources ?? [])].sort(), ['karabas', 'venue:teatr.example.ua']);
+    });
+
+    it('keeps the ticket link, because that is the one people want to tap', async () => {
+      const merged = dedupe([...(await fromKarabas()), ...(await fromVenue())], TZ);
+      assert.equal(merged[0]?.url, 'https://kharkiv.karabas.com/one-in-canoe/');
+      assert.equal(merged[0]?.priceMin, 400, 'and the price only the ticket site knows');
+      assert.equal(merged[0]?.description, 'Акустика у великій залі.', 'while the venue still fills what the ticket site left out');
+    });
+
+    it('is still one card with three sources on it', async () => {
+      const kontramarka = fromSchemaEvent(
+        {
+          '@type': 'MusicEvent',
+          name: 'Один в каное: зимовий тур 2026',
+          url: 'https://kharkiv.kontramarka.ua/uk/one-in-canoe.html',
+          startDate: '2026-12-12T20:00:00+02:00',
+          location: { '@type': 'Place', name: 'Театр «Прапор»' },
+          offers: { '@type': 'AggregateOffer', lowPrice: '450', priceCurrency: 'UAH' },
+        },
+        { city: 'kharkiv', source: 'kontramarka' },
+      );
+      assert.ok(kontramarka, 'the kontramarka-shaped object must normalize');
+      const merged = dedupe([...(await fromKarabas()), kontramarka, ...(await fromVenue())], TZ);
+      assert.equal(merged.length, 1, JSON.stringify(merged.map((i) => i.title)));
+      assert.deepEqual(
+        [...(merged[0]?.sources ?? [])].sort(),
+        ['karabas', 'kontramarka', 'venue:teatr.example.ua'],
+        'which is what the "on N sources" ranking bonus reads',
+      );
+      assert.equal(merged[0]?.url, 'https://kharkiv.karabas.com/one-in-canoe/');
+    });
+
+    it("prefers the venue's own poster and link to a Telegram channel's", async () => {
+      const venue = await fromVenue();
+      const post = makeItem({
+        title: 'Один в каное',
+        url: 'https://t.me/kharkiv_afisha/4210',
+        city: 'kharkiv',
+        source: 'telegram:@kharkiv_afisha',
+        startsAt: '2026-12-12T20:00:00+02:00',
+        venue: 'Театр «Прапор»',
+        image: 'https://cdn.telegram.example/pasted.jpg',
+        confidence: 'low',
+      });
+      assert.ok(post);
+      const merged = dedupe([post, ...venue], TZ);
+      assert.equal(merged.length, 1, JSON.stringify(merged.map((i) => i.title)));
+      assert.equal(merged[0]?.image, 'https://teatr.example.ua/upload/posters/canoe.jpg', 'the poster the venue published');
+      assert.equal(merged[0]?.url, 'https://teatr.example.ua/afisha/one-in-canoe', 'and its own page over a channel post');
+    });
   });
 
   it('is registered as a source, and keeps one health key per hostname', () => {
