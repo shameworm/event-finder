@@ -233,8 +233,8 @@ looping on the error.
 ### Taste
 
 A new user starts from nothing and builds their profile in the `/start`
-walkthrough: city, liked categories, dislikes, budget, who they follow. `/setup`
-and `/settings → 🎛 Мої смаки` reopen the same screens.
+walkthrough: city, liked categories, genres, dislikes, budget, who they follow.
+`/setup` and `/settings → 🎛 Мої смаки` reopen the same screens.
 
 From then on **an answer holds only what they like.** Anything matching nothing
 in their profile is dropped, and the message says how many events that was. If

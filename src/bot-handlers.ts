@@ -23,7 +23,18 @@ import {
   type InlineButton,
 } from './telegram-api.ts';
 import { applyPrefsCommand, applyThumbsDown, describePrefs, favouritesFromList } from './prefs-engine.ts';
-import { CATEGORY_LABEL, DISLIKE_SUGGESTIONS, EMOJI, EVENT_CATEGORIES, canonicalTag, tagLabel } from './categories.ts';
+import {
+  CATEGORY_LABEL,
+  DISLIKE_SUGGESTIONS,
+  EMOJI,
+  EVENT_CATEGORIES,
+  LIKE_SUGGESTIONS,
+  asGenre,
+  canonicalTag,
+  closestGenre,
+  isGenreKey,
+  tagLabel,
+} from './categories.ts';
 import { nextWeekRange, parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
 import { ALL_SOURCE_NAMES } from './pipeline.ts';
@@ -255,7 +266,7 @@ function emptyStateButtons(): InlineButton[][] {
  * is what lets /settings reopen the very same screens later to change one
  * thing, and what makes an interrupted walkthrough pick up where it stopped.
  */
-const STEPS = ['city', 'likes', 'dislikes', 'budget', 'follow'] as const;
+const STEPS = ['city', 'likes', 'genres', 'dislikes', 'budget', 'follow'] as const;
 type Step = (typeof STEPS)[number];
 /** Every step but the city, which is a reply keyboard rather than a screen. */
 type TasteStep = Exclude<Step, 'city'>;
@@ -340,6 +351,25 @@ function tasteScreen(user: BotUser, step: TasteStep, mode = modeOf(user)): Scree
         ],
       };
 
+    case 'genres':
+      return {
+        text:
+          `<b>🎸 Які жанри?</b>${head}\n\n` +
+          'Не категорії, а саме звук — підніматиму концерти цього жанру вище у списках. ' +
+          'Напиши слово, якого немає серед кнопок.' +
+          `${now(p.genres)}`,
+        inlineKeyboard: [
+          ...rows(
+            LIKE_SUGGESTIONS.map((t) => ({
+              text: tick(hasTag(p.genres, t), tagLabel(t)),
+              callback_data: `onb:genre:${t}`,
+            })),
+            2,
+          ),
+          footRow(step, mode),
+        ],
+      };
+
     case 'dislikes':
       return {
         text: `<b>🚫 Чого не показувати?</b>${head}\n\nЦе я викидатиму зі списків — крім тих, за ким ти стежиш.${now(p.disliked_categories)}`,
@@ -402,12 +432,13 @@ function tasteMenu(user: BotUser): Screen {
     inlineKeyboard: [
       [
         { text: '🎛 Улюблене', callback_data: 'onb:step:likes' },
-        { text: '🚫 Небажане', callback_data: 'onb:step:dislikes' },
+        { text: '🎸 Жанри', callback_data: 'onb:step:genres' },
       ],
       [
+        { text: '🚫 Небажане', callback_data: 'onb:step:dislikes' },
         { text: '💸 Бюджет', callback_data: 'onb:step:budget' },
-        { text: '⭐️ Стежу за', callback_data: 'onb:step:follow' },
       ],
+      [{ text: '⭐️ Стежу за', callback_data: 'onb:step:follow' }],
       [{ text: '⬅️ Назад', callback_data: 'set:back' }],
     ],
   };
@@ -493,6 +524,26 @@ async function toggleTaste(ctx: HandlerContext, user: BotUser, kind: 'like' | 'd
     ...user.prefs,
     favourite_categories: liking ? next : drop(other),
     disliked_categories: liking ? drop(other) : next,
+    // the dislikes screen offers genre buttons, so ticking one off there has to
+    // untick it on the genre screen too — a genre on both lists is a 👎 the
+    // ranker will honour over the tick, and the button would look broken
+    genres: liking ? user.prefs.genres : drop(user.prefs.genres),
+  });
+}
+
+/**
+ * Tap a genre on or off. The only write into a closed vocabulary, so it checks
+ * the key instead of trusting the button: callback data is forgeable and one
+ * junk entry would make `prefs.genres` un-enumerable.
+ */
+async function toggleGenre(ctx: HandlerContext, user: BotUser, tag: string): Promise<void> {
+  if (!isGenreKey(tag)) return;
+  const drop = (list: string[]) => list.filter((v) => v.toLowerCase() !== tag.toLowerCase());
+  const has = hasTag(user.prefs.genres, tag);
+  await saveUserPrefs(ctx.store, user, {
+    ...user.prefs,
+    genres: has ? drop(user.prefs.genres) : [...user.prefs.genres, tag],
+    disliked_categories: has ? user.prefs.disliked_categories : drop(user.prefs.disliked_categories),
   });
 }
 
@@ -555,6 +606,48 @@ async function handleStepText(
       await reply(`✅ Записав: ${escapeHtml(merged.map(tagLabel).join(', '))}`);
       return show(tasteScreen(next, step, 'wizard'));
     }
+  }
+
+  // a bare list at the genres screen is an answer too — "рок, інді" — but the
+  // vocabulary is closed: anything that is not a known genre is turned away
+  // with a suggestion instead of being stored, or the list becomes a junk
+  // drawer and stops being renderable as buttons
+  if (step === 'genres') {
+    // a sentence the engine recognised but could not act on ("додай джаз до
+    // жанрів" when jazz is already there) deserves its own answer, rather than
+    // the list below reading the whole sentence as a genre to add
+    if (edit.understood) {
+      if (edit.note) await reply(edit.note);
+      return show(tasteScreen(user, step, 'wizard'));
+    }
+
+    const parts = text
+      .split(/[,;/\n·•]+|\s+(?:та|і|й|and)\s+/iu)
+      .map((s) => s.trim())
+      .filter((s) => s.length >= 2);
+    if (parts.length === 0) return show(tasteScreen(user, step, 'wizard'));
+
+    const known: string[] = [];
+    const rejected: string[] = [];
+    for (const part of parts) {
+      const genre = asGenre(part);
+      if (!genre) rejected.push(part);
+      else if (!hasTag(user.prefs.genres, genre)) known.push(genre);
+    }
+
+    const lines: string[] = [];
+    let next = user;
+    if (known.length) {
+      next = await saveUserPrefs(ctx.store, user, { ...user.prefs, genres: [...user.prefs.genres, ...known] });
+      lines.push(`✅ Жанри: ${escapeHtml(next.prefs.genres.map(tagLabel).join(', '))}`);
+    }
+    for (const raw of rejected) {
+      const near = closestGenre(raw);
+      lines.push(`❓ «${escapeHtml(raw)}» — не жанр із цього списку.${near ? ` Може, «${escapeHtml(tagLabel(near))}»?` : ''}`);
+    }
+
+    await reply(lines.length ? lines.join('\n') : 'Це вже в жанрах.');
+    return show(tasteScreen(next, step, 'wizard'));
   }
 
   if (step === 'follow') {
@@ -1558,7 +1651,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
  *   set:city · set:prefs · set:back · set:stop · set:stop!
  *   city:<key>    pick a city from the panel
  *   onb:…         the taste screens, shared by the walkthrough and /settings:
- *                 onb:like:<cat> · onb:dis:<tag> · onb:budget:<n|none>
+ *                 onb:like:<cat> · onb:dis:<tag> · onb:genre:<key> · onb:budget:<n|none>
  *                 onb:unfollow:<index> · onb:next · onb:skip
  *                 onb:step:<step> · onb:taste · onb:start · onb:later
  *                 when:hour:<0-23> · when:day:<0-6> (tap to flip a day on/off)
@@ -1742,6 +1835,12 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
         if (!payload) return;
         await toggleTaste(ctx, user, verb === 'like' ? 'like' : 'dislike', payload);
         return drawStep(verb === 'like' ? 'likes' : 'dislikes');
+      }
+
+      case 'genre': {
+        if (!payload) return;
+        await toggleGenre(ctx, user, payload);
+        return drawStep('genres');
       }
 
       case 'budget': {

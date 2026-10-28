@@ -69,15 +69,15 @@ as a search.
 Requests may be written in Ukrainian, Russian or English — that was always true
 of the parser and is unchanged.
 
-**Nobody inherits anybody's taste.** `/start` runs a five-step walkthrough —
-city, liked categories, dislikes, budget, follow list — and a new user's profile
-is whatever they tapped, starting from empty. The step lives in `users.stage`
-(`city → likes → dislikes → budget → follow → NULL`); every screen renders its
-ticks from the stored preferences, so `/setup` and `/settings → 🎛 Мої смаки`
-reopen the same screens later to change one thing. Only `stage = 'city'` holds
-someone back from the scheduled jobs: walking away at "what's your budget?"
-costs them nothing. `preferences.yaml` is the operator's own profile and the
-CLI's defaults — never a template for strangers.
+**Nobody inherits anybody's taste.** `/start` runs a six-step walkthrough —
+city, liked categories, genres, dislikes, budget, follow list — and a new user's
+profile is whatever they tapped, starting from empty. The step lives in
+`users.stage` (`city → likes → genres → dislikes → budget → follow → NULL`);
+every screen renders its ticks from the stored preferences, so `/setup` and
+`/settings → 🎛 Мої смаки` reopen the same screens later to change one thing.
+Only `stage = 'city'` holds someone back from the scheduled jobs: walking away
+at "what's your budget?" costs them nothing. `preferences.yaml` is the
+operator's own profile and the CLI's defaults — never a template for strangers.
 
 Users who registered before the walkthrough existed are offered it once, with a
 button; declining is remembered in the `state` table under
