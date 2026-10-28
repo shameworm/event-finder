@@ -1,16 +1,29 @@
 import type { Item, Status } from './types.ts';
 import { jaccard, localDate, localTime, tokens } from './util.ts';
 import { loadConfig } from './config.ts';
+import { VENUE_PREFIX } from '../scripts/venues.ts';
 
 const STATUS_RANK: Record<Status, number> = {
   cancelled: 5, soldout: 4, postponed: 3, limited: 2, scheduled: 1, unknown: 0,
 };
 
-/** Trust order when two sources disagree about the canonical link. */
+/**
+ * Trust order when two sources disagree about the canonical link.
+ *
+ * A venue is the most *authoritative* about its own show and the least
+ * *actionable*: people tap a card to buy a ticket, not to read a programme, and
+ * the price and availability come from the ticket sites anyway. So it sits
+ * above a Telegram post — whose link is a channel message and whose poster is
+ * whatever somebody pasted — and below every box office. Nothing is lost by
+ * that: `merge` still takes each missing field from the venue's own listing,
+ * `completeness` already pays its `confidence: 'high'`, and `sources` lists
+ * both either way.
+ */
 const SOURCE_RANK = (source: string): number => {
-  if (source.startsWith('concert.ua')) return 4;
-  if (source.startsWith('karabas')) return 3;
-  if (source.startsWith('kontramarka')) return 2;
+  if (source.startsWith('concert.ua')) return 5;
+  if (source.startsWith('karabas')) return 4;
+  if (source.startsWith('kontramarka')) return 3;
+  if (source.startsWith(VENUE_PREFIX)) return 2;
   if (source.startsWith('telegram')) return 1;
   return 0;
 };

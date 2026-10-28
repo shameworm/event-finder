@@ -87,7 +87,11 @@ cities:
       categories: [concert, standUp, theatre, exhibition, festival, clubs, museum]
     venues: []                # ← fill in; a venue needs no code, only its url:
                               #   - url: "https://teatr.example.ua/afisha"
-                              #     label: "Театр «Прапор»"   # optional: logs and /stats
+                              #     label: "Театр «Прапор»"   # optional: logs, /stats, and
+                              #                                 the venue name when the
+                              #                                 markup has none — write it
+                              #                                 the way the ticket sites do,
+                              #                                 so one gig is one card
                               #     category: theatre         # optional: used when
                               #                                 the markup says nothing
     telegram_channels: []     # ← fill in, e.g. ["@kharkiv_afisha", "@standup_kharkiv"]

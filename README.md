@@ -170,6 +170,16 @@ npx tsx scripts/venues.ts --probe https://teatr.example.ua/afisha   # what does 
         category: theatre         # optional, used when the markup says nothing
 ```
 
+`label` earns its keep beyond the logs: when a page's markup carries no
+`location` — most of them don't, since a theatre rarely names itself inside its
+own events — the label becomes the item's venue, and that is what lets the
+deduper recognise the gig as the one Karabas is also selling (`src/dedupe.ts`
+matches a same-evening pair on venue similarity when the titles only half
+agree). So **write the label the way the ticket sites write the venue name**:
+"Театр «Прапор»" and "Театр «Прапор», велика сцена" are only half-similar, which
+is just under the bar. With no label at all the hostname is used, which is
+stable but matches nothing.
+
 The collector fetches exactly the urls you list, once each — it does not follow
 links and does not guess at `?page=N`. Items are filed under
 `venue:<hostname>`, so each site gets its own row in `/stats` and its own health
