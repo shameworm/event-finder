@@ -64,9 +64,17 @@ currency: UAH
 #   to: 2026-11-01
 trip: null
 
-# Free-text interests used for ranking and for weekly place suggestions.
-interests:
+# Genre likes — the event-side taste, as a CLOSED list: every entry must be a
+# key of TAG_SYNONYMS in src/categories.ts (джаз, рок, інді, реп, електроніка,
+# класика, фолк, поп, метал, при свічках, поезія, імпровізація …). Ranked above
+# categories and matched anywhere in an event's text on purpose: "інді" must not
+# borrow the concert keyword list and match every gig in town.
+genres:
   - indie
+
+# What a ❤️ or 🔖 on a *place* writes: free text, so a taste in cafés does not
+# have to be a word we know. This is what the weekly place suggestions read.
+place_likes:
   - speciality coffee
   - vinyl
   - contemporary art

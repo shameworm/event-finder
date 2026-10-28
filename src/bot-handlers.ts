@@ -2327,7 +2327,7 @@ function thumbsDownSaid(u: Unlearned): string {
 
 /** What one ❤️, ⏰ or 🔖 taught us that is worth saying out loud. */
 interface Learned {
-  /** The tag added to their favourites/interests, if it was not there already. */
+  /** The tag added to their favourites or place taste, if it was not there already. */
   tag: string | null;
   /** The performer added to their follow list. */
   follow: string | null;
@@ -2337,7 +2337,8 @@ interface Learned {
  * Every way of saying "yes, this one" — ❤️, ⏰, 🔖 — is a free sample of
  * someone's taste, so take all of it:
  *
- *  · the event's category joins their favourites (a place joins their interests)
+ *  · the event's category joins their favourites (a place joins their place
+ *    taste — the two are separate fields now, see PreferencesSchema)
  *  · the tally for that tag goes up, every time — that is what makes twenty
  *    concerts kept mean more to the ranker than one
  *  · whoever is on stage joins the follow list, where the real weight lives:
@@ -2362,7 +2363,7 @@ async function learnFromYes(ctx: HandlerContext, user: BotUser, item: Item): Pro
   if (!(await ctx.store.claimTaste(user.chatId, item.id))) return nothing;
 
   const place = item.kind === 'place';
-  const list = place ? user.prefs.interests : user.prefs.favourite_categories;
+  const list = place ? user.prefs.place_likes : user.prefs.favourite_categories;
   const fresh = !has(list, tag);
 
   // schema.org gives us a performer only when the ticket site bothered to fill
@@ -2374,7 +2375,7 @@ async function learnFromYes(ctx: HandlerContext, user: BotUser, item: Item): Pro
     ...user.prefs,
     taste: { ...user.prefs.taste, [tag]: (user.prefs.taste[tag] ?? 0) + 1 },
     favourite_categories: !place && fresh ? [...list, tag] : user.prefs.favourite_categories,
-    interests: place && fresh ? [...list, tag] : user.prefs.interests,
+    place_likes: place && fresh ? [...list, tag] : user.prefs.place_likes,
     follow: follow ? [...user.prefs.follow, follow] : user.prefs.follow,
   });
   return { tag: fresh ? tag : null, follow };

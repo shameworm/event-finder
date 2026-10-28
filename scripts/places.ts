@@ -1,7 +1,7 @@
 #!/usr/bin/env -S npx tsx
 /**
  * Weekly place suggestions for every subscribed user: 2–3 new cafés, bars with
- * live music, galleries or otherwise unusual spots that fit their interests.
+ * live music, galleries or otherwise unusual spots that fit their place taste.
  *
  *   npx tsx scripts/places.ts --queries            # 1) what to search for, per city
  *   npx tsx scripts/websearch.ts --ingest results.json --kind place --city kharkiv
@@ -37,18 +37,18 @@ if (!canSend(log, args.has('dry-run') || args.has('queries'))) process.exit(1);
 await withStore(async (store) => {
   if (args.has('queries')) {
     const users = await allUsers(store, 'place_tips', log);
-    const cities = new Map<string, string[]>(); // city -> interests of its users
+    const cities = new Map<string, string[]>(); // city -> place taste of its users
     for (const u of users) {
       for (const city of citiesFor(u, base)) {
-        cities.set(city, [...new Set([...(cities.get(city) ?? []), ...u.prefs.interests])]);
+        cities.set(city, [...new Set([...(cities.get(city) ?? []), ...u.prefs.place_likes])]);
       }
     }
     if (cities.size === 0 && args.get('city')) cities.set(args.get('city') as string, []);
 
-    const out = [...cities.entries()].map(([city, interests]) => ({
+    const out = [...cities.entries()].map(([city, placeLikes]) => ({
       city,
       kind: 'place' as const,
-      queries: buildQueries(city, 'place', { from: window.from, to: window.to, like: [], interests }),
+      queries: buildQueries(city, 'place', { from: window.from, to: window.to, like: [], genres: [], placeLikes }),
     }));
     process.stdout.write(JSON.stringify(out, null, 2) + '\n');
     return;

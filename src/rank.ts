@@ -112,7 +112,7 @@ export function rank(items: Item[], opts: RankOptions): Ranked {
     return !cat || PLACE_CATEGORIES.includes(cat) === placesOnly;
   };
   const asked = (
-    query.like.length > 0 ? query.like : [...prefs.favourite_categories, ...(prefs.interests ?? [])]
+    query.like.length > 0 ? query.like : [...prefs.favourite_categories, ...(prefs.genres ?? [])]
   ).filter(forThisKind);
   const filtering = !opts.keepOffTaste && asked.length > 0;
 
@@ -131,10 +131,10 @@ export function rank(items: Item[], opts: RankOptions): Ranked {
       score += FAVOURITE + hearts(tag);
       reasons.push(hearts(tag) ? `favourite "${tag}" (❤️ ${prefs.taste?.[tag]})` : `favourite "${tag}"`);
     }
-    for (const tag of prefs.interests ?? []) {
+    for (const tag of prefs.genres ?? []) {
       if (!matchesTag(item, tag)) continue;
       score += INTEREST + hearts(tag) / 2;
-      reasons.push(`interest "${tag}"`);
+      reasons.push(`genre "${tag}"`);
     }
 
     // an explicit 👎 on an act is checked first and short-circuits everything

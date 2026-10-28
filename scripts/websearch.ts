@@ -82,7 +82,7 @@ export function followQuery(name: string, city: string): string {
 export function buildQueries(
   city: string,
   kind: Kind,
-  opts: { from: string; to: string; like: string[]; interests: string[]; follow?: string[] },
+  opts: { from: string; to: string; like: string[]; genres: string[]; placeLikes: string[]; follow?: string[] },
 ): string[] {
   const cfg = loadConfig();
   // Ukrainian listings are in Ukrainian, so search in Ukrainian
@@ -95,12 +95,12 @@ export function buildQueries(
 
   if (kind === 'place') {
     const configured = cityCfg?.place_queries ?? [];
-    const fromInterests = opts.interests.slice(0, 3).map((i) => `${i} ${name} ${year}`);
-    return [...new Set([...configured, ...fromInterests, `нові заклади ${name} ${year} відкриття`])].slice(0, 8);
+    const fromPlaceLikes = opts.placeLikes.slice(0, 3).map((i) => `${i} ${name} ${year}`);
+    return [...new Set([...configured, ...fromPlaceLikes, `нові заклади ${name} ${year} відкриття`])].slice(0, 8);
   }
 
   const followed = (opts.follow ?? []).slice(0, 4).map((who) => followQuery(who, city));
-  const tastes = [...new Set([...opts.like, ...opts.interests])].slice(0, 4);
+  const tastes = [...new Set([...opts.like, ...opts.genres])].slice(0, 4);
   const base = [
     `афіша ${name} ${when} події`,
     `${name} куди піти ${when}`,
@@ -228,7 +228,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         from: query.from,
         to: query.to,
         like: query.like,
-        interests: prefs.interests,
+        genres: prefs.genres,
+        placeLikes: prefs.place_likes,
         follow: prefs.follow,
       }),
     }));

@@ -74,6 +74,16 @@ const GENRE_LABEL: Record<string, string> = {
  */
 export const DISLIKE_SUGGESTIONS: string[] = ['classical', 'opera', 'ballet', 'chanson', 'karaoke', 'tribute'];
 
+/**
+ * The genre buttons on the "which genres are yours?" screen. A curated dozen
+ * rather than all twenty of TAG_SYNONYMS, because twenty buttons is ten rows —
+ * the same reason DISLIKE_SUGGESTIONS is not the whole list either.
+ */
+export const LIKE_SUGGESTIONS: string[] = [
+  'jazz', 'rock', 'indie', 'metal', 'rap', 'electronic',
+  'folk', 'pop', 'classical', 'candlelight', 'poetry', 'improv',
+];
+
 /** A tag as a person should read it: a known key in Ukrainian, else as typed. */
 export function tagLabel(tag: string): string {
   return CATEGORY_LABEL[tag as Category] ?? GENRE_LABEL[tag] ?? tag;
@@ -340,4 +350,59 @@ export function canonicalTag(word: string): string {
     if (STEMMED[cat].some((term) => containsTerm(stemmed, term))) return cat;
   }
   return word.trim();
+}
+
+/**
+ * Is this a key of the closed genre vocabulary?
+ *
+ * `canonicalTag` returns category keys too ("stand-up" → `standup`), and the
+ * two are different namespaces: a genre that reported a category would take
+ * `categoryKeyOf`'s branch in `matchesTag` and match every gig in town. The
+ * genre list has to be checkable as a set, or it cannot be drawn as buttons.
+ */
+export function isGenreKey(tag: string): boolean {
+  return Object.hasOwn(TAG_SYNONYMS, tag);
+}
+
+/**
+ * A word as a genre, or null when it is not one. This is the gate that keeps
+ * `prefs.genres` closed: "класична музика" is classical, "speciality coffee"
+ * is not a genre and does not get stored as one.
+ */
+export function asGenre(word: string): string | null {
+  const tag = canonicalTag(word);
+  return isGenreKey(tag) ? tag : null;
+}
+
+const commonPrefix = (a: string, b: string): number => {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return i;
+};
+
+/**
+ * The genre a rejected word was probably reaching for, or null when nothing is
+ * close enough to be worth offering.
+ *
+ * Prefix and substring rather than edit distance: the job is to catch a typo of
+ * a word we already know ("рокк" → rock, "джазик" → jazz), not to score every
+ * genre against every phrase nobody meant as one.
+ */
+export function closestGenre(word: string): string | null {
+  const n = normText(word);
+  if (n.length < 3) return null;
+  let best: string | null = null;
+  let bestScore = 0;
+  for (const [key, syns] of Object.entries(TAG_SYNONYMS)) {
+    for (const spelling of [key, ...syns, tagLabel(key)]) {
+      const s = normText(spelling);
+      if (s.length < 3) continue;
+      const score = Math.max(commonPrefix(n, s), n.includes(s) || s.includes(n) ? Math.min(n.length, s.length) : 0);
+      if (score > bestScore) {
+        bestScore = score;
+        best = key;
+      }
+    }
+  }
+  return bestScore >= 3 ? best : null;
 }

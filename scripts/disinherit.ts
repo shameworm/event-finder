@@ -7,7 +7,7 @@
  *   npx tsx scripts/disinherit.ts --chat 123456789 --yes
  *
  * Until the /start walkthrough existed, a new user was handed a copy of
- * `preferences.yaml` — the operator's own favourites, dislikes and interests.
+ * `preferences.yaml` — the operator's own favourites, dislikes and taste.
  * Those entries then quietly ranked every search that person ever ran, and
  * showed up in their /prefs as things they had supposedly chosen.
  *
@@ -37,8 +37,8 @@ const write = args.has('yes');
 const onlyChats = args.list('chat');
 
 const seed = loadPrefs((m) => log.warn(m));
-/** The three lists that used to be copied wholesale. */
-const SEEDED = ['favourite_categories', 'disliked_categories', 'interests'] as const;
+/** The lists that used to be copied wholesale. */
+const SEEDED = ['favourite_categories', 'disliked_categories', 'genres', 'place_likes'] as const;
 
 await withStore(async (store) => {
   let users = await allUsers(store, undefined, log);

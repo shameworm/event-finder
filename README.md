@@ -337,7 +337,7 @@ them with `hermes cron add` (both forms are there, plus a crontab fallback):
 | **every hour** | `digest.ts --week` | whoever set that hour and today's weekday — header + one card |
 | **every hour, Thursday** | `digest.ts --weekend --top 5` | whoever set that hour — header + one card |
 | every 6 hours | `follows.ts` | each user's follow list — one message per alert |
-| Sunday 11:00 | `places.ts` | each user's interests — one message per place |
+| Sunday 11:00 | `places.ts` | each user's place taste — one message per place |
 | every 15 minutes | `reminders.ts` | everyone's ❤️ reminders |
 
 The two digest jobs tick **hourly** and the schedule lives on the user, not in

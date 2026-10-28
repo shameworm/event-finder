@@ -6,6 +6,8 @@
  * results, YAML config, the SQLite/Postgres round-trip) is parsed through them.
  */
 import { z } from 'zod';
+import { asGenre } from './categories.ts';
+import { normText } from './util.ts';
 
 export const CategorySchema = z.enum([
   // events
@@ -117,8 +119,41 @@ export const TripSchema = z.object({
 });
 export type Trip = z.infer<typeof TripSchema>;
 
+/**
+ * Carry the old single `interests` list over to the two fields that replaced
+ * it, once, on the read path.
+ *
+ * There are no migrations in this project and `prefs` is JSON re-parsed by zod
+ * on every read, so this is where an old row turns into a new one: an entry
+ * that resolves to a known genre goes to `genres`, everything else goes to
+ * `place_likes`, and `interests` is dropped. Parsing the same value again
+ * changes nothing (there is no `interests` left to distribute), and the next
+ * write persists the shape below. `ItemSchema.startsAt` sanitises on the read
+ * path for the same reason.
+ */
+function splitInterests(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
+  const raw = input as Record<string, unknown>;
+  if (!Array.isArray(raw['interests'])) return input;
+
+  const rest = { ...raw };
+  delete rest['interests'];
+  const genres = Array.isArray(rest['genres']) ? [...(rest['genres'] as string[])] : [];
+  const places = Array.isArray(rest['place_likes']) ? [...(rest['place_likes'] as string[])] : [];
+  const has = (list: string[], value: string) => list.some((v) => normText(v) === normText(value));
+
+  for (const entry of raw['interests'] as unknown[]) {
+    if (typeof entry !== 'string') continue;
+    const genre = asGenre(entry);
+    if (genre) {
+      if (!has(genres, genre)) genres.push(genre);
+    } else if (!has(places, entry)) places.push(entry);
+  }
+  return { ...rest, genres, place_likes: places };
+}
+
 /** preferences.yaml, after validation. */
-export const PreferencesSchema = z.object({
+export const PreferencesSchema = z.preprocess(splitInterests, z.object({
   home_city: z.string().min(1).default('kharkiv'),
   watch_cities: z.array(z.string()).default([]),
   favourite_categories: z.array(z.string()).default([]),
@@ -128,13 +163,27 @@ export const PreferencesSchema = z.object({
   currency: z.string().default('UAH'),
   /** Temporary location, set by "I'm in Lviv next week". */
   trip: TripSchema.nullable().default(null),
-  /** Free-text interests used for ranking and place suggestions. */
-  interests: z.array(z.string()).default([]),
+  /**
+   * Event-side genre likes, as a CLOSED vocabulary: every entry is a key of
+   * TAG_SYNONYMS, so the set can be enumerated and drawn as buttons. Ranked
+   * like the old `interests` was — worth INTEREST and matched anywhere in the
+   * item, which is deliberate: "інді" must not borrow the concert keyword list.
+   */
+  genres: z.array(z.string()).default([]),
+  /**
+   * What a ❤️ or 🔖 on a *place* writes, and what the weekly place suggestions
+   * are built from. Free text on purpose — a taste in cafés is not a genre and
+   * does not have to be a word we know.
+   */
+  place_likes: z.array(z.string()).default([]),
   /**
    * The running tally for each tag: ❤️ adds a point, 👎 takes one away, so a
    * category someone keeps hearting outranks one they hearted once and a
    * category they keep waving off sinks towards the dislikes. Goes negative —
    * that is the whole point of the 👎 side. Written by the bot, not by hand.
+   *
+   * Keyed by tag, not by which list the tag sits in, so a genre that moved from
+   * `interests` to `genres` keeps every tally it had collected.
    */
   taste: z.record(z.string(), z.number()).default({}),
   /**
@@ -144,7 +193,7 @@ export const PreferencesSchema = z.object({
    */
   blocked_acts: z.array(z.string()).default([]),
   notes: z.array(z.string()).default([]),
-});
+}));
 export type Preferences = z.infer<typeof PreferencesSchema>;
 
 /** Render a zod failure as a short, human list of problems. */
