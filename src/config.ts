@@ -115,7 +115,8 @@ export function savePrefs(prefs: Preferences): void {
       max_ticket_price: validated.max_ticket_price,
       currency: validated.currency,
       trip: validated.trip,
-      interests: validated.interests,
+      genres: validated.genres,
+      place_likes: validated.place_likes,
       // the ❤️ tallies: learned slowly, and lost silently if left out here
       taste: validated.taste,
       notes: validated.notes,

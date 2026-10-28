@@ -11,7 +11,7 @@
 import type { Preferences } from './types.ts';
 import { PreferencesSchema } from './types.ts';
 import { cityLabel, loadConfig, resolveCity } from './config.ts';
-import { canonicalTag, tagLabel } from './categories.ts';
+import { asGenre, canonicalTag, closestGenre, tagLabel } from './categories.ts';
 import { WORD_END, WORD_START, normText, parseBudget, today } from './util.ts';
 import { nextWeekRange, parseDateRange, thisWeekRange } from './request.ts';
 
@@ -184,14 +184,22 @@ export function applyPrefsCommand(text: string, current: Preferences): PrefsEdit
     return ok(changes, changes.length ? undefined : `за «${who}» уже стежу`);
   }
 
-  /* --- interests -------------------------------------------------------- */
-  const interest = t.match(
-    new RegExp(String.raw`${B}(?:add|додай|додати)\s+(.+?)\s+(?:to|в|до)\s+(?:interests?|інтерес\p{L}*|цікавого)${E}`, 'iu'),
+  /* --- genres ------------------------------------------------------------ */
+  const genre = t.match(
+    new RegExp(String.raw`${B}(?:add|додай|додати)\s+(.+?)\s+(?:to|в|до)\s+(?:genres?|жанр\p{L}*)${E}`, 'iu'),
   );
-  if (interest) {
-    const tag = asTag(interest[1] as string);
-    const changed = add(prefs.interests, tag);
-    return ok(changed ? [`інтереси + ${tagLabel(tag)}`] : [], changed ? undefined : 'це вже в інтересах');
+  if (genre) {
+    const raw = cleanTag(genre[1] as string);
+    const tag = asGenre(raw);
+    // the vocabulary is closed, so this is the one place a typed word is turned
+    // away — otherwise `genres` becomes a junk drawer again and stops being
+    // renderable as buttons
+    if (!tag) {
+      const near = closestGenre(raw);
+      return ok([], near ? `«${raw}» — не жанр із цього списку. Може, «${tagLabel(near)}»?` : `«${raw}» — не жанр із цього списку.`);
+    }
+    const changed = add(prefs.genres, tag);
+    return ok(changed ? [`жанири + ${tagLabel(tag)}`] : [], changed ? undefined : 'це вже в жанрах');
   }
 
   /* --- dislikes --------------------------------------------------------- */
@@ -271,8 +279,9 @@ export interface ThumbsDown {
  *
  * A single 👎 is not a verdict — it only takes a point off the tally that
  * hearts raise, so a category someone liked twenty times survives one bad
- * evening. Once that tally reaches DISLIKE_THRESHOLD the category leaves the
- * favourites (or interests, for a place) and joins the dislikes for good.
+ * evening. Once that tally reaches DISLIKE_THRESHOLD the tag leaves the
+ * favourites and the genres (or the place taste) and joins the dislikes for
+ * good.
  *
  * The performer is different: naming an act is explicit, so it goes straight
  * to the stop list — and leaves `follow`, which a stray ❤️ may have put it on.
@@ -299,9 +308,11 @@ export function applyThumbsDown(current: Preferences, opts: { tag: string; act?:
   const demoted = score <= DISLIKE_THRESHOLD;
   if (demoted) {
     const fromFav = drop(prefs.favourite_categories, tag);
-    const fromInterests = drop(prefs.interests, tag);
+    const fromGenres = drop(prefs.genres, tag);
+    const fromPlaces = drop(prefs.place_likes, tag);
     if (fromFav) changes.push(`улюблене − ${tagLabel(tag)}`);
-    if (fromInterests) changes.push(`інтереси − ${tagLabel(tag)}`);
+    if (fromGenres) changes.push(`жанири − ${tagLabel(tag)}`);
+    if (fromPlaces) changes.push(`місця − ${tagLabel(tag)}`);
     if (add(prefs.disliked_categories, tag)) changes.push(`небажане + ${tagLabel(tag)}`);
   } else {
     changes.push(`${tagLabel(tag)} важить менше (${score})`);
@@ -315,15 +326,18 @@ const money = (currency: string): string => (currency === 'UAH' ? '₴' : curren
 
 /** One-screen summary of the current preferences, for the bot and the CLI. */
 export function describePrefs(prefs: Preferences): string {
+  // four lists, four lines: "what does the bot think I like" should be answerable
+  // without knowing which schema field holds which half of the answer
   const lines = [
     `домашнє місто: ${cityLabel(prefs.home_city)}`,
     `міста на оці: ${prefs.watch_cities.map((c) => cityLabel(c)).join(', ') || '—'}`,
-    `улюблене: ${prefs.favourite_categories.map(tagLabel).join(', ') || '—'}`,
+    `улюблені категорії: ${prefs.favourite_categories.map(tagLabel).join(', ') || '—'}`,
+    `жанири: ${prefs.genres.map(tagLabel).join(', ') || '—'}`,
     `небажане: ${prefs.disliked_categories.map(tagLabel).join(', ') || '—'}`,
+    `місця: ${prefs.place_likes.map(tagLabel).join(', ') || '—'}`,
     `стежу за: ${prefs.follow.join(', ') || '—'}`,
     `не показую: ${(prefs.blocked_acts ?? []).join(', ') || '—'}`,
     `максимум за квиток: ${prefs.max_ticket_price ? `${prefs.max_ticket_price} ${money(prefs.currency)}` : 'без обмежень'}`,
-    `інтереси: ${(prefs.interests ?? []).map(tagLabel).join(', ') || '—'}`,
   ];
   if (prefs.trip) lines.push(`поїздка: ${cityLabel(prefs.trip.city)} ${prefs.trip.from} → ${prefs.trip.to}`);
   return lines.join('\n');

@@ -251,9 +251,9 @@ npx tsx scripts/prefs.ts --defaults "add jazz to favourites"  # defaults for NEW
 
 One-off cleanup for a bot that ran before the walkthrough existed:
 `npx tsx scripts/disinherit.ts` (dry run; `--yes` to write) removes from every
-user the favourites, dislikes and interests that are identical to the seed file
-— the ones they were handed rather than chose. It leaves the ❤️ tally and the
-price cap alone.
+user the favourites, dislikes, genres and place taste that are identical to the
+seed file — the ones they were handed rather than chose. It leaves the ❤️ tally
+and the price cap alone.
 
 `preferences.yaml` is the operator's own profile and what the CLI falls back to;
 it is not handed to new users, who build their own through the walkthrough. Live
@@ -289,7 +289,7 @@ model was invisible and looked broken.
 
 What counts as "their thing": the tags of the request if they asked for
 something specific (`стендап на вихідних` means stand-up, not everything they
-have ever liked), otherwise their favourites and interests. A followed performer
+have ever liked), otherwise their favourites and genres. A followed performer
 always counts.
 
 When fewer than `bot.taste_floor` (default 5) of their things are on, the next
@@ -299,7 +299,7 @@ neither does the shared city cache (`keepOffTaste`), which is written once for
 everybody and ranked per person afterwards.
 
 Inside what survives: request-level likes count most, then favourites, then
-interests. Each ❤️ on a tag adds one more point to it (`prefs.taste`, capped at
+genres. Each ❤️ on a tag adds one more point to it (`prefs.taste`, capped at
 five), so a category someone keeps hearting beats one they hearted once. A
 followed performer adds a large boost **and** bypasses both the dislike filter
 and the budget cap. Disliked tags and over-budget items are dropped
@@ -308,7 +308,7 @@ and postponed events are kept but marked and pushed down.
 
 **A genre is not its category.** `matchesTag`/`expandTag` only treat a tag as a
 category when it *names* one. "indie" lives in the concert keyword list, so
-borrowing that category made one indie interest match every gig in town — and
+borrowing that category made one indie genre match every gig in town — and
 report "indie" as the reason for a classical symphony.
 
 ## Already-sent memory
@@ -328,7 +328,7 @@ Taking the ❤️ off cancels the reminder; the taste it taught is kept. A heart
 does three things at once, in one save, which is why the model improves without
 anyone typing anything:
 
-- the event's category joins their favourites (a place joins their interests)
+- the event's category joins their favourites (a place joins their place taste)
 - `prefs.taste[tag]` goes up — **every** heart, not just the first
 - whoever is on stage joins their follow list, when the ticket site filled in a
   performer. A show title is never used as a name: «Вечір імпровізації» is

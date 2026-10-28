@@ -40,7 +40,7 @@ writeFileSync(
     'max_ticket_price: 1200',
     'currency: UAH',
     'trip: null',
-    'interests: [indie]',
+    'genres: [indie]',
     'notes: []',
   ].join('\n'),
 );
@@ -48,7 +48,7 @@ writeFileSync(
 // everything else is imported after the sandbox env vars are set above
 const { describe, it, run } = await import('./harness.ts');
 const { normText, stemText, isoInZone, localDate, localTime, addDays, today, weekdayOf, titleKey, dayLabel } = await import('../src/util.ts');
-const { classify, canonicalTag, expandTag } = await import('../src/categories.ts');
+const { classify, canonicalTag, expandTag, isGenreKey, LIKE_SUGGESTIONS } = await import('../src/categories.ts');
 const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange, splitNegations } = await import('../src/request.ts');
 const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom, pickImage } = await import('../src/normalize.ts');
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
@@ -235,7 +235,7 @@ describe('request parsing', () => {
 
   it('uses the Ukrainian city name for web search queries', () => {
     assert.equal(cityLocalName('kharkiv'), 'Харків');
-    const queries = buildQueries('kharkiv', 'event', { from: base, to: base, like: ['standup'], interests: [] });
+    const queries = buildQueries('kharkiv', 'event', { from: base, to: base, like: ['standup'], genres: [], placeLikes: [] });
     assert.ok(queries.every((q) => !q.includes('Kharkiv')), 'Ukrainian queries should not use the English name');
   });
 
@@ -244,7 +244,8 @@ describe('request parsing', () => {
       from: base,
       to: base,
       like: ['standup'],
-      interests: [],
+      genres: [],
+      placeLikes: [],
       follow: ['Антон Тимошенко'],
     });
     assert.ok(queries[0]?.startsWith('Антон Тимошенко'), queries.join(' | '));
@@ -550,7 +551,7 @@ describe('ranking', () => {
   });
 
   it('does not let a genre stand in for its whole category', () => {
-    const indie = PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['concert'], interests: ['indie'] });
+    const indie = PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['concert'], genres: ['indie'] });
     const symphony = makeItem({ ...common, title: 'Симфонія №5', url: 'https://x/g1', source: 'karabas', category: 'concert', priceMin: 300, description: 'класична музика' })!;
     const party = makeItem({ ...common, title: 'Інді-вечірка', url: 'https://x/g2', source: 'karabas', category: 'concert', priceMin: 200 })!;
     const ranked = rank([symphony, party], { query: parseRequest('', { prefs: indie, base: '2026-10-20' }), prefs: indie });
@@ -1260,8 +1261,50 @@ describe('taste words, as people read them', () => {
     const described = describePrefs(
       PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['standup', 'jazz'], max_ticket_price: 700 }),
     );
-    assert.ok(described.includes('улюблене: стендап, джаз'), described);
+    assert.ok(described.includes('улюблені категорії: стендап, джаз'), described);
     assert.ok(described.includes('максимум за квиток: 700 ₴'), described);
+  });
+});
+
+/**
+ * `prefs.interests` used to do two unrelated jobs — feed event ranking and
+ * build the weekly place queries — and filled itself whenever someone hearted
+ * a place. It is now two fields with two owners, and this is the seam between
+ * the old rows and the new ones.
+ */
+describe('the taste split', () => {
+  it('carries an old interests list over, exactly once', () => {
+    const legacy = PreferencesSchema.parse({
+      home_city: 'kharkiv',
+      interests: ['indie', 'speciality coffee', 'vinyl', 'концерти'],
+    });
+    assert.deepEqual(legacy.genres, ['indie'], 'a word we know as a genre becomes one');
+    assert.deepEqual(legacy.place_likes, ['speciality coffee', 'vinyl', 'концерти'], 'the rest is place taste');
+    assert.ok(!('interests' in legacy), 'the field is gone from the value, not merely unread');
+
+    // the same value parsed again must not drift: there is nothing left to move
+    assert.deepEqual(PreferencesSchema.parse(legacy), legacy);
+    assert.deepEqual(PreferencesSchema.parse({ ...legacy, genres: ['indie'] }), legacy);
+  });
+
+  it('does not duplicate an entry that is already in its new home', () => {
+    const both = PreferencesSchema.parse({
+      home_city: 'kharkiv',
+      genres: ['jazz'],
+      place_likes: ['vinyl'],
+      interests: ['jazz', 'indie', 'vinyl'],
+    });
+    assert.deepEqual(both.genres, ['jazz', 'indie'], 'the one already there stays put');
+    assert.deepEqual(both.place_likes, ['vinyl'], 'and neither list gains a second copy');
+  });
+
+  it('offers only genres that exist as genres, and labels them', () => {
+    assert.ok(LIKE_SUGGESTIONS.length >= 10, 'a screen with no buttons is not a screen');
+    assert.equal(new Set(LIKE_SUGGESTIONS).size, LIKE_SUGGESTIONS.length, 'no button twice');
+    for (const key of LIKE_SUGGESTIONS) {
+      assert.ok(isGenreKey(key), `${key} is not a TAG_SYNONYMS key`);
+      assert.notEqual(tagLabel(key), key, `${key} has no Ukrainian label`);
+    }
   });
 });
 
@@ -1360,7 +1403,7 @@ describe('preference commands', () => {
     check('слідкуй за Latexfauna', { understood: true, changed: true, contains: 'стежу за «Latexfauna»' });
     check('максимум 800 грн', { understood: true, changed: true, contains: '800' });
     check('прибери стендап з улюблених', { understood: true, changed: true, contains: 'улюблене − стендап' });
-    check('додай фолк до інтересів', { understood: true, changed: true, contains: 'інтереси + фолк' });
+    check('додай фолк до жанрів', { understood: true, changed: true, contains: 'жанири + фолк' });
   });
 
   it('reads Ukrainian cities and trips', () => {
@@ -1786,7 +1829,7 @@ describe('users', () => {
     assert.equal(blank.home_city, 'lviv');
     assert.deepEqual(blank.favourite_categories, []);
     assert.deepEqual(blank.disliked_categories, []);
-    assert.deepEqual(blank.interests, []);
+    assert.deepEqual(blank.genres, []);
     assert.deepEqual(blank.follow, []);
     assert.equal(blank.max_ticket_price, null);
     // ...and that is what registration stores
@@ -3239,6 +3282,27 @@ describe('the heart', () => {
       await react(store, '3202', 778);
       const user = await getUser(store, '3202');
       assert.ok(user?.prefs.favourite_categories.includes('standup'), JSON.stringify(user?.prefs.favourite_categories));
+    });
+  });
+
+  /**
+   * The two lists have two owners: an event heart is a category somebody likes,
+   * a place heart is a taste in places. Sharing one field meant /prefs showed a
+   * person a list they had never built.
+   */
+  it('learns a place taste from a heart on a place, not a category', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3260', city: 'kharkiv' });
+      const cafe = makeItem({
+        city: 'kharkiv', kind: 'place', title: 'Kofein Lab', url: 'https://h/p9',
+        source: 'websearch', category: 'cafe', address: 'вул. Сумська, 11',
+        startsAt: '2026-11-01T19:00:00+02:00',
+      })!;
+      await store.recordMessage('3260', 790, [cafe]);
+      await react(store, '3260', 790);
+      const user = await getUser(store, '3260');
+      assert.deepEqual(user?.prefs.place_likes, ['cafe'], JSON.stringify(user?.prefs.place_likes));
+      assert.deepEqual(user?.prefs.favourite_categories, [], 'a café is not an event category');
     });
   });
 

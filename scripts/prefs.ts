@@ -35,7 +35,7 @@ const text = args.text();
 const HINTS =
   `Try things like:\n` +
   `  add stand-up to favourites\n  remove theatre from favourites\n  I don't like classical music\n` +
-  `  follow Latexfauna\n  unfollow Latexfauna\n  max price 800\n  watch Odesa\n  I'm in Lviv next week\n`;
+  `  add jazz to genres\n  follow Latexfauna\n  unfollow Latexfauna\n  max price 800\n  watch Odesa\n  I'm in Lviv next week\n`;
 
 /* --- editing the operator's own profile (preferences.yaml) -------------- */
 if (args.has('defaults')) {
