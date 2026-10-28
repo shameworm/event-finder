@@ -21,7 +21,7 @@ export interface Args {
 const KNOWN_VALUE_FLAGS = new Set([
   'city', 'cities', 'from', 'to', 'like', 'dislike', 'max-price', 'top', 'pages', 'days',
   'chat', 'hour', 'day', 'source', 'limit', 'ingest', 'out', 'format', 'base', 'per-day', 'label', 'title', 'channel',
-  'only', 'skip', 'timeout', 'ttl', 'cancel',
+  'only', 'skip', 'timeout', 'ttl', 'cancel', 'probe',
 ]);
 
 export function parseArgs(argv = process.argv.slice(2)): Args {

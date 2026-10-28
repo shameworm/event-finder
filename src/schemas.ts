@@ -34,12 +34,42 @@ export const KontramarkaCitySchema = z.strictObject({
   categories: z.array(z.string()).optional(),
 });
 
+/**
+ * One page that publishes schema.org Event markup about its own shows: a
+ * theatre's afisha, a club's events page, a festival programme. Everything
+ * site-specific about it is the URL, which is why adding one is a config edit
+ * and not a new scraper (scripts/venues.ts).
+ *
+ * `label` is for logs and /stats; `category` is the fallback for shows whose
+ * markup gives nothing away. Check a page before adding it:
+ *   npx tsx scripts/venues.ts --probe <url>
+ */
+export const VenuePageSchema = z.strictObject({
+  url: z.string().refine(
+    (u) => {
+      try {
+        const parsed = new URL(u);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+      } catch {
+        return false;
+      }
+    },
+    { message: 'must be an absolute http(s) url, e.g. https://teatr.example.ua/afisha' },
+  ),
+  label: z.string().optional(),
+  category: CategorySchema.optional(),
+});
+
+export type VenuePage = z.infer<typeof VenuePageSchema>;
+
 export const CityConfigSchema = z.strictObject({
   label: z.string().optional(),
   aliases: z.array(z.string()).default([]),
   concertua: ConcertUaCitySchema.optional(),
   karabas: KarabasCitySchema.optional(),
   kontramarka: KontramarkaCitySchema.optional(),
+  /** Any site that publishes schema.org Events — one request per url, no crawling. */
+  venues: z.array(VenuePageSchema).default([]),
   telegram_channels: z.array(z.string()).default([]),
 });
 

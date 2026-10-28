@@ -64,6 +64,11 @@ cache:
 #   karabas.subdomain     -> https://<subdomain>.karabas.com/<path>?page=N
 #   kontramarka.subdomain -> https://<subdomain>.kontramarka.ua/uk/<category>
 #                            (Kyiv has no subdomain — leave it as "")
+#   venues                -> any page that publishes schema.org Events: a
+#                            theatre's afisha, a club, a festival programme.
+#                            One request per url, exactly as written: no
+#                            crawling and no pagination. Check a page first
+#                            with: npx tsx scripts/venues.ts --probe <url>
 #   telegram_channels     -> @usernames or t.me links, read via GramJS
 # ─────────────────────────────────────────────────────────────────────────────
 cities:
@@ -80,6 +85,11 @@ cities:
     kontramarka:
       subdomain: kharkiv
       categories: [concert, standUp, theatre, exhibition, festival, clubs, museum]
+    venues: []                # ← fill in; a venue needs no code, only its url:
+                              #   - url: "https://teatr.example.ua/afisha"
+                              #     label: "Театр «Прапор»"   # optional: logs and /stats
+                              #     category: theatre         # optional: used when
+                              #                                 the markup says nothing
     telegram_channels: []     # ← fill in, e.g. ["@kharkiv_afisha", "@standup_kharkiv"]
 
   kyiv:
