@@ -11,6 +11,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 // type-only imports are erased, so they cannot run before the sandbox env is set
 import type { Store as StoreType } from '../src/db.ts';
+import type { Logger as LoggerType } from '../src/log.ts';
 import type { Item } from '../src/types.ts';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -68,7 +69,7 @@ const { Store, DIGEST_PAGE_TTL_SECONDS, SEARCH_PAGE_TTL_SECONDS, pageKey, lastPa
 const { splitForTelegram, parseUpdates } = await import('../src/telegram-api.ts');
 const { googleCalendarUrl } = await import('../src/calendar.ts');
 const { registerUser, getUser, saveUserPrefs, allUsers, citiesFor, defaultPrefs, newUserPrefs } = await import('../src/users.ts');
-const { cacheKey, collectCity } = await import('../src/cache.ts');
+const { cacheKey, collectCity, healthRows } = await import('../src/cache.ts');
 const { parseArgs } = await import('../src/cli.ts');
 const { fanout } = await import('../src/fanout.ts');
 const {
@@ -80,14 +81,17 @@ const { handleMessage, handleCallback, handleReaction, parseBell, isHeart, isAll
 );
 const { deliver } = await import('../src/deliver.ts');
 const { makeLogger } = await import('../src/log.ts');
-const { ALL_SOURCE_NAMES, runPipeline } = await import('../src/pipeline.ts');
+const { ALL_SOURCE_NAMES, healthSourceNames, runPipeline } = await import('../src/pipeline.ts');
 const { politeFetch, HttpError } = await import('../src/http.ts');
 const { pager, safeCollect } = await import('../src/source.ts');
 const { eventsFromJsonLd } = await import('../src/jsonld.ts');
 const { collect: collectKarabas } = await import('../scripts/karabas.ts');
 const { collect: collectConcertUa } = await import('../scripts/concertua.ts');
+const { collect: collectVenues, probeLines, venueSourceKey, venueSourceKeys } = await import('../scripts/venues.ts');
+const { ConfigSchema } = await import('../src/schemas.ts');
+const { parse: parseYaml } = await import('yaml');
 const {
-  DEAD_AFTER_TICKS, SourceHealthSchema, evaluateTick, readHealth, readAllHealth, recordTick, describeHealth,
+  DEAD_AFTER_TICKS, SourceHealthSchema, evaluateTick, readHealth, readAllHealth, recordTick, describeHealth, nextStep,
 } = await import('../src/health.ts');
 
 const TZ = 'Europe/Kyiv';
@@ -971,6 +975,299 @@ describe('scrapers, offline', () => {
     });
     assert.equal(result.failedSources.length, 0, JSON.stringify(result.results.map((r) => [r.source, r.error])));
     assert.ok(result.all.some((i) => i.title === 'IVAN LIULENOV'));
+  });
+});
+
+/* ------------------------------------------- any site with schema.org markup --- */
+
+/**
+ * A venue is a url in config.yaml and nothing else — no new scraper, no code.
+ * These cases drive `collect` with configs built from YAML text for that
+ * reason: if a venue needed anything but a url, the YAML here would have to
+ * grow a field and the test would say so.
+ */
+describe('venues', () => {
+  const wide = parseRequest('', { prefs, base: '2026-10-20', from: '2026-01-01', to: '2027-12-31' });
+  const theatreYaml = [
+    '      - url: "https://teatr.example.ua/afisha"',
+    '        label: "Театр «Прапор»"',
+    '        category: theatre',
+  ].join('\n');
+
+  /** A config exactly as somebody would write it into config.yaml. */
+  const configWith = (venuesYaml: string) =>
+    ConfigSchema.parse(parseYaml(`cities:\n  kharkiv:\n    aliases: [kharkiv]\n    venues:\n${venuesYaml}`));
+
+  /** A logger that keeps what it was told, so "it was logged" can be asserted. */
+  const spyLog = () => {
+    const lines: string[] = [];
+    const logger: LoggerType = {
+      info: (m: string) => void lines.push(m),
+      warn: (m: string) => void lines.push(m),
+      error: (m: string) => void lines.push(m),
+      debug: () => {},
+      child: () => logger,
+    };
+    return { logger, lines, text: () => lines.join('\n') };
+  };
+
+  const page = fixture('venue-afisha.html');
+  const serveSame = (body: string) => async () => body;
+
+  it('reads a venue page into items filed under its own hostname', async () => {
+    const res = await collectVenues(
+      { query: wide, city: 'kharkiv', log, fetchText: serveSame(page) },
+      configWith(theatreYaml),
+    );
+    assert.equal(res.ok, true, res.error);
+    assert.equal(res.items.length, 3, JSON.stringify(res.items.map((i) => i.title)));
+    const tartuffe = res.items.find((i) => i.title === 'Тартюф');
+    assert.ok(tartuffe, `no Тартюф in ${JSON.stringify(res.items.map((i) => i.title))}`);
+    assert.equal(tartuffe.source, 'venue:teatr.example.ua', 'the key names the site, not the collector');
+    assert.equal(tartuffe.confidence, 'high', "a venue's own markup about its own show is authoritative");
+    assert.equal(tartuffe.startsAt, '2026-12-08T19:00:00+02:00');
+    assert.equal(tartuffe.venue, 'Театр «Прапор», велика сцена');
+    assert.equal(tartuffe.address, 'вул. Сумська, 25');
+    assert.equal(priceText(tartuffe), '250–600 ₴');
+    assert.equal(tartuffe.image, 'https://teatr.example.ua/upload/posters/tartuffe.jpg', 'a relative poster is resolved');
+  });
+
+  it('takes the category from the markup, and the configured one only as a fallback', async () => {
+    const res = await collectVenues(
+      { query: wide, city: 'kharkiv', log, fetchText: serveSame(page) },
+      configWith(theatreYaml),
+    );
+    const byTitle = (t: string) => res.items.find((i) => i.title === t);
+    assert.equal(byTitle('Тартюф')?.category, 'theatre', 'TheaterEvent');
+    assert.equal(byTitle('Вечір імпровізації')?.category, 'standup', 'ComedyEvent beats the configured theatre');
+    assert.equal(byTitle('Сон літньої ночі')?.category, 'theatre', 'generic Event falls back to the configured category');
+  });
+
+  it('fetches exactly the configured urls, once each — no crawling, no pagination', async () => {
+    const asked: string[] = [];
+    const res = await collectVenues(
+      {
+        query: wide,
+        city: 'kharkiv',
+        log,
+        maxPages: 6,
+        fetchText: async (url: string) => {
+          asked.push(url);
+          return page;
+        },
+      },
+      configWith(`${theatreYaml}\n      - url: "https://club.example.ua/events"`),
+    );
+    assert.equal(res.ok, true, res.error);
+    assert.deepEqual(asked, ['https://teatr.example.ua/afisha', 'https://club.example.ua/events']);
+  });
+
+  it('keeps a whole season out of a one-weekend window', async () => {
+    const weekend = parseRequest('', { prefs, base: '2026-12-01', from: '2026-12-08', to: '2026-12-09' });
+    const res = await collectVenues(
+      { query: weekend, city: 'kharkiv', log, fetchText: serveSame(page) },
+      configWith(theatreYaml),
+    );
+    assert.deepEqual(
+      res.items.map((i) => i.title).sort(),
+      ['Вечір імпровізації', 'Тартюф'],
+      'the February show is on the page, but not in this window',
+    );
+  });
+
+  it('is skipped, not failed, for a city with no venues', async () => {
+    const res = await collectVenues({ query: wide, city: 'kharkiv', log, fetchText: serveSame(page) }, ConfigSchema.parse({}));
+    assert.equal(res.ok, true);
+    assert.equal(res.skipped, true, 'a city nobody configured a venue for was never asked anything');
+    assert.equal(res.items.length, 0);
+  });
+
+  it('says plainly when a page publishes no schema.org Events', async () => {
+    const spy = spyLog();
+    const res = await collectVenues(
+      { query: wide, city: 'kharkiv', log: spy.logger, fetchText: serveSame('<html><body><h1>Афіша</h1></body></html>') },
+      configWith(theatreYaml),
+    );
+    assert.equal(res.ok, true, 'a page with no markup is not a crash');
+    assert.equal(res.items.length, 0);
+    assert.deepEqual(res.parts, [{ source: 'venue:teatr.example.ua', items: 0, ok: true }]);
+    assert.match(spy.text(), /no schema\.org Event/i, spy.text());
+    assert.match(spy.text(), /--probe/, 'and points at the tool that shows why');
+  });
+
+  it('survives a page whose JSON-LD is broken', async () => {
+    const broken = '<html><head><script type="application/ld+json">{ "@type": "Event", "name": }</script></head></html>';
+    const spy = spyLog();
+    const res = await collectVenues(
+      { query: wide, city: 'kharkiv', log: spy.logger, fetchText: serveSame(broken) },
+      configWith(theatreYaml),
+    );
+    assert.equal(res.ok, true);
+    assert.equal(res.items.length, 0);
+    assert.match(spy.text(), /no schema\.org Event/i, spy.text());
+  });
+
+  it('counts the Event objects it could not read, so a broken venue cannot look healthy', async () => {
+    const half = `<html><head><script type="application/ld+json">[
+      { "@type": "Event", "name": "Без посилання", "startDate": "2026-12-08T19:00:00+02:00" },
+      { "@type": "Event", "name": "З посиланням", "url": "https://teatr.example.ua/afisha/ok", "startDate": "2026-12-08T19:00:00+02:00" }
+    ]</script></head></html>`;
+    const spy = spyLog();
+    const res = await collectVenues(
+      { query: wide, city: 'kharkiv', log: spy.logger, fetchText: serveSame(half) },
+      configWith(theatreYaml),
+    );
+    assert.equal(res.items.length, 1, 'the readable one still arrives');
+    assert.match(spy.text(), /1 unreadable/, spy.text());
+  });
+
+  it('lets one dead venue fail on its own', async () => {
+    const spy = spyLog();
+    const res = await collectVenues(
+      {
+        query: wide,
+        city: 'kharkiv',
+        log: spy.logger,
+        fetchText: async (url: string) => {
+          if (url.includes('club.example.ua')) throw new HttpError(404, url, 'Not Found');
+          return page;
+        },
+      },
+      configWith(`      - url: "https://club.example.ua/events"\n${theatreYaml}`),
+    );
+    assert.equal(res.ok, true, 'the source survives a venue that is gone');
+    assert.equal(res.items.length, 3, 'the live venue still delivered');
+    assert.deepEqual(res.parts, [
+      { source: 'venue:club.example.ua', items: 0, ok: false },
+      { source: 'venue:teatr.example.ua', items: 3, ok: true },
+    ]);
+    assert.match(spy.text(), /404/, spy.text());
+  });
+
+  it('still counts a site as answering when one of its two pages is gone', async () => {
+    const res = await collectVenues(
+      {
+        query: wide,
+        city: 'kharkiv',
+        log,
+        fetchText: async (url: string) => {
+          if (url.endsWith('/koncerty')) throw new HttpError(404, url, 'Not Found');
+          return page;
+        },
+      },
+      configWith('      - url: "https://teatr.example.ua/koncerty"\n      - url: "https://teatr.example.ua/afisha"'),
+    );
+    assert.deepEqual(
+      res.parts,
+      [{ source: 'venue:teatr.example.ua', items: 3, ok: true }],
+      'one row for the site, and it did answer — a dropped row is a venue with no health at all',
+    );
+  });
+
+  it('is a failed source only when every venue failed', async () => {
+    const res = await collectVenues(
+      {
+        query: wide,
+        city: 'kharkiv',
+        log,
+        fetchText: async (url: string) => {
+          throw new HttpError(503, url, 'Service Unavailable');
+        },
+      },
+      configWith(theatreYaml),
+    );
+    assert.equal(res.ok, false);
+    assert.match(res.error ?? '', /503/);
+  });
+
+  it('collapses the same show into the ticket site listing, and lists both sources', async () => {
+    const alsoOnConcertUa = `<html><head><script type="application/ld+json">{
+      "@type": "ComedyEvent",
+      "name": "Batya 2 Solo Stand-Up",
+      "url": "https://teatr.example.ua/afisha/batya",
+      "startDate": "2026-10-24T19:00:00+03:00",
+      "location": { "@type": "Place", "name": "Театр «Прапор», велика сцена" }
+    }</script></head></html>`;
+    /** One listing page in total, so concert.ua yields the show exactly once. */
+    const onlyOnePage = (body: string) => {
+      let served = false;
+      return async () => {
+        if (served) return '<html></html>';
+        served = true;
+        return body;
+      };
+    };
+    const fromVenue = await collectVenues(
+      { query: wide, city: 'kharkiv', log, fetchText: serveSame(alsoOnConcertUa) },
+      configWith(theatreYaml),
+    );
+    const fromTicketSite = await collectConcertUa({
+      query: wide,
+      city: 'kharkiv',
+      log,
+      maxPages: 1,
+      fetchText: onlyOnePage(`<html><head><script type="application/ld+json">${fixture('concertua-soldout.json')}</script></head></html>`),
+    });
+    assert.equal(fromVenue.items.length, 1, 'the venue listed it');
+    assert.equal(fromTicketSite.items.length, 1, 'and so did concert.ua');
+
+    const merged = dedupe([...fromVenue.items, ...fromTicketSite.items], TZ);
+    assert.equal(merged.length, 1, 'the same show on the same day in the same city is one row');
+    assert.deepEqual(
+      [...(merged[0]?.sources ?? [])].sort(),
+      ['concert.ua', 'venue:teatr.example.ua'],
+      'both sources are kept — that is what the "on N sources" bonus reads',
+    );
+  });
+
+  it('probes a page and prints what it publishes', () => {
+    const lines = probeLines('https://teatr.example.ua/afisha', page).join('\n');
+    assert.match(lines, /Тартюф/, lines);
+    assert.match(lines, /2026-12-08/, lines);
+    assert.match(lines, /250–600 ₴/, lines);
+    assert.match(lines, /https:\/\/teatr\.example\.ua\/afisha\/tartuffe/, lines);
+    assert.match(lines, /3 schema\.org Event/, 'the count is the headline');
+  });
+
+  it('is registered as a source, and keeps one health key per hostname', () => {
+    assert.ok(ALL_SOURCE_NAMES.includes('venues'), ALL_SOURCE_NAMES.join(', '));
+    const cfg = configWith(`${theatreYaml}\n      - url: "https://club.example.ua/events"`);
+    assert.deepEqual(venueSourceKeys(cfg), ['venue:teatr.example.ua', 'venue:club.example.ua']);
+    assert.ok(healthSourceNames(cfg).includes('venue:club.example.ua'), healthSourceNames(cfg).join(', '));
+  });
+
+  it('files two pages of one site under one key, www or not', () => {
+    assert.equal(venueSourceKey('https://www.teatr.example.ua/afisha'), 'venue:teatr.example.ua');
+    const cfg = configWith(
+      '      - url: "https://teatr.example.ua/afisha"\n      - url: "https://teatr.example.ua/koncerty"',
+    );
+    assert.deepEqual(venueSourceKeys(cfg), ['venue:teatr.example.ua'], 'one site is one source');
+  });
+
+  it('hands the health counters a row per site, not one row for all of them', async () => {
+    const res = await collectVenues(
+      {
+        query: wide,
+        city: 'kharkiv',
+        log,
+        fetchText: async (url: string) => {
+          if (url.includes('club.example.ua')) throw new HttpError(500, url, 'Server Error');
+          return page;
+        },
+      },
+      configWith(`${theatreYaml}\n      - url: "https://club.example.ua/events"`),
+    );
+    assert.deepEqual(healthRows([res]), [
+      { source: 'venues', items: 3, ok: true, skipped: false },
+      { source: 'venue:teatr.example.ua', items: 3, ok: true, skipped: false },
+      { source: 'venue:club.example.ua', items: 0, ok: false, skipped: false },
+    ]);
+  });
+
+  it('probes a page that publishes nothing and says exactly that', () => {
+    const lines = probeLines('https://teatr.example.ua/contacts', '<html><body>Контакти</body></html>').join('\n');
+    assert.match(lines, /no schema\.org Event/i, lines);
+    assert.match(lines, /teatr\.example\.ua\/contacts/, 'naming the page that was read');
   });
 });
 
@@ -3800,6 +4097,12 @@ describe('flag parsing', () => {
     assert.equal(args.get('city'), 'lviv');
     assert.equal(args.text(), 'що цікавого');
   });
+
+  it('reads --probe as the url it is given', () => {
+    const args = parseArgs(['--probe', 'https://teatr.example.ua/afisha']);
+    assert.equal(args.get('probe'), 'https://teatr.example.ua/afisha');
+    assert.equal(args.text(), '', 'the url is the flag\'s value, not part of a request');
+  });
 });
 
 /* ------------------------------------------------------------------ config --- */
@@ -3817,6 +4120,29 @@ describe('config', () => {
     const { ConfigSchema } = await import('../src/schemas.ts');
     const result = ConfigSchema.safeParse({ http: { retries: 'lots' } });
     assert.equal(result.success, false);
+  });
+
+  it('takes a venue as a url, with an optional label and category', async () => {
+    const { CityConfigSchema } = await import('../src/schemas.ts');
+    const city = CityConfigSchema.parse({
+      venues: [{ url: 'https://teatr.example.ua/afisha', label: 'Театр X', category: 'theatre' }, { url: 'https://club.example.ua/events' }],
+    });
+    assert.equal(city.venues.length, 2);
+    assert.equal(city.venues[0]?.label, 'Театр X');
+    assert.equal(city.venues[0]?.category, 'theatre');
+    assert.equal(city.venues[1]?.label, undefined, 'the label is optional');
+    assert.deepEqual(CityConfigSchema.parse({}).venues, [], 'a city with no venues is not an error');
+  });
+
+  it('refuses a venue that is not an absolute url, and a misspelled key', async () => {
+    const { CityConfigSchema } = await import('../src/schemas.ts');
+    const relative = CityConfigSchema.safeParse({ venues: [{ url: '/afisha' }] });
+    assert.equal(relative.success, false, 'a relative path cannot be fetched');
+    assert.deepEqual(relative.error!.issues[0]?.path, ['venues', 0, 'url'], JSON.stringify(relative.error!.issues));
+    const typo = CityConfigSchema.safeParse({ venues: [{ url: 'https://x.ua', categry: 'theatre' }] });
+    assert.equal(typo.success, false, 'a typo inside a venue is a config error');
+    assert.match(JSON.stringify(typo.error!.issues), /categry/, 'and it says which key');
+    assert.equal(CityConfigSchema.safeParse({ venue: [{ url: 'https://x.ua' }] }).success, false, 'so is the key itself');
   });
 
   /**
@@ -4513,6 +4839,41 @@ describe('dead source detection', () => {
     });
   });
 
+  /**
+   * A small venue with nothing on this fortnight is the normal case, so the
+   * "zero while others found events" rule says nothing about whether its page
+   * still parses. Twenty venues under that rule would be twenty alerts, and
+   * alerting nobody reads is alerting that gets muted — so venues are counted
+   * and shown in /stats, and only the collector itself can page the owner.
+   */
+  it('never pages the owner about one quiet venue page, but keeps counting it', async () => {
+    await withTestStore(async (store) => {
+      let dead: string[] = [];
+      for (let i = 0; i < DEAD_AFTER_TICKS + 1; i++) {
+        dead = (await tick(store, [saw('venue:teatr.example.ua', 'kharkiv', 0), saw('concert.ua', 'kharkiv', 9)])).dead;
+      }
+      assert.deepEqual(dead, [], 'a dark theatre is not a broken parser');
+      const health = await readHealth(store, 'venue:teatr.example.ua');
+      assert.ok(health.emptyTicks > DEAD_AFTER_TICKS - 1, `still counted: ${health.emptyTicks}`);
+      assert.equal(health.alerted, false);
+    });
+  });
+
+  it('does tell the owner when every venue page goes quiet at once', async () => {
+    await withTestStore(async (store) => {
+      let out = { dead: [] as string[], sent: [] as string[] };
+      for (let i = 0; i < DEAD_AFTER_TICKS; i++) {
+        out = await tick(store, [saw('venues', 'kharkiv', 0), saw('concert.ua', 'kharkiv', 9)]);
+      }
+      assert.deepEqual(out.dead, ['venues'], 'one message for the collector, not one per venue');
+      assert.match(out.sent[0] ?? '', /--probe/, `point at the tool that answers it: ${out.sent[0]}`);
+    });
+  });
+
+  it('tells the operator to probe the page behind a venue key', () => {
+    assert.match(nextStep('venue:teatr.example.ua'), /scripts\/venues\.ts --probe/, nextStep('venue:teatr.example.ua'));
+  });
+
   it('stores the counter as something that still parses next release', async () => {
     const parsed = SourceHealthSchema.parse({ source: 'x' });
     assert.equal(parsed.emptyTicks, 0);
@@ -4563,6 +4924,26 @@ describe('fixture contracts', () => {
     assert.equal(item.priceMin, 790);
     assert.equal(item.priceMax, 1590);
     assert.equal(priceText(item), '790–1590 ₴');
+  });
+
+  /**
+   * This one carries more weight than its siblings: venue pages are never
+   * alerted on (one dark theatre is normal), so the counters cannot catch a
+   * venue whose markup we stopped reading. This is what does.
+   */
+  it('pulls a title, a date and a price range out of the venue page', async () => {
+    const res = await collectVenues(
+      { query: wide, city: 'kharkiv', log, fetchText: once(fixture('venue-afisha.html')) },
+      ConfigSchema.parse(parseYaml('cities:\n  kharkiv:\n    venues:\n      - url: "https://teatr.example.ua/afisha"')),
+    );
+    assert.equal(res.ok, true);
+    const item = res.items.find((i) => i.title === 'Тартюф');
+    assert.ok(item, `the venue JSON-LD no longer yields an item: ${JSON.stringify(res.items.map((i) => i.title))}`);
+    assert.equal(item.startsAt, '2026-12-08T19:00:00+02:00');
+    assert.equal(item.priceMin, 250);
+    assert.equal(item.priceMax, 600);
+    assert.equal(priceText(item), '250–600 ₴');
+    assert.equal(item.source, 'venue:teatr.example.ua');
   });
 
   it('pulls a title, a date and a price range out of the Kontramarka card', async () => {

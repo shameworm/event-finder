@@ -5,7 +5,7 @@ Ukrainian cities, ranks them against each user's taste, and sends personalised
 digests, alerts and reminders.
 
 - **Events**: concerts, stand-up, theatre, exhibitions, lectures, parties, festivals, workshops
-- **Sources**: Concert.ua, Karabas, Kontramarka, Telegram channels (GramJS), web search
+- **Sources**: Concert.ua, Karabas, Kontramarka, any venue page with schema.org markup, Telegram channels (GramJS), web search
 - **Cities**: Kharkiv (default), Kyiv, Lviv, Dnipro, Odesa, Ivano-Frankivsk — add any
 - **Multi-user**: every person gets their own city, taste, delivery hour and reminders
 - **Ukrainian**: the bot speaks Ukrainian only; it still understands requests typed in Russian or English
@@ -18,8 +18,9 @@ TypeScript on Node 20+, run directly with `tsx` — no build step.
 ```
                    ┌──────────── one scrape per city, per window ───────────┐
 Concert.ua ─┐      │                                                       │
-Karabas ────┼──► pipeline ──► dedupe ──► scrape cache (30 min, SQLite/PG) ──┤
-Kontramarka ┤                                                              │
+Karabas ────┤                                                              │
+Kontramarka ┼──► pipeline ──► dedupe ──► scrape cache (30 min, SQLite/PG) ──┤
+venues ─────┤                                                              │
 Telegram ───┤                                                              ▼
 web search ─┘                                            rank per user (their taste)
                                                                      │
@@ -66,7 +67,7 @@ cp preferences.example.yaml preferences.yaml
   unknown key is rejected with the file name and the key, rather than falling
   back to a default you did not ask for. One
   section per city with the Concert.ua slug, the Karabas and Kontramarka
-  subdomains and Telegram channels. All commented.
+  subdomains, venue page urls and Telegram channels. All commented.
 - **`preferences.yaml`** — **your own** taste model, used by the CLI. New bot
   users inherit none of it: `/start` walks them through building their own with
   buttons, and their live preferences live in the database per chat id.
@@ -151,6 +152,30 @@ Give the city a Ukrainian `label` — that is the name people see — and put ev
 spelling into `aliases` (including declensions and the English spelling:
 "Харкові", "Kharkiv", "Kharkov"). Aliases are how free text and onboarding match
 a city; only configured cities are offered to new users.
+
+### Adding a venue
+
+Any page that publishes schema.org Events — a theatre's afisha, a club, a
+festival programme — is a source with no new code. Paste its url into the probe
+first; if it finds events, put the same url under the city's `venues:`.
+
+```bash
+npx tsx scripts/venues.ts --probe https://teatr.example.ua/afisha   # what does it publish?
+```
+
+```yaml
+    venues:
+      - url: "https://teatr.example.ua/afisha"
+        label: "Театр «Прапор»"   # optional, for logs and /stats
+        category: theatre         # optional, used when the markup says nothing
+```
+
+The collector fetches exactly the urls you list, once each — it does not follow
+links and does not guess at `?page=N`. Items are filed under
+`venue:<hostname>`, so each site gets its own row in `/stats` and its own health
+counter; two urls on one hostname share the key, and the per-host politeness
+delay already paces them. A page that answers but publishes nothing is logged
+and skipped, so one dead venue costs the digest nothing.
 
 ## 3. Secrets
 
@@ -541,7 +566,7 @@ preferences.example.yaml  the operator's own taste model (CLI defaults)
 .env.example              secrets template
 scripts/
   bot.ts                  the bot service (long-poll, or --once for cron)
-  concertua.ts karabas.ts kontramarka.ts telegram.ts websearch.ts
+  concertua.ts karabas.ts kontramarka.ts venues.ts telegram.ts websearch.ts
   search.ts digest.ts follows.ts reminders.ts
   prefs.ts disinherit.ts unplace.ts tg-login.ts doctor.ts
 src/

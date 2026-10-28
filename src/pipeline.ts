@@ -16,17 +16,31 @@ import { collect as collectConcertUa, SOURCE as CONCERTUA } from '../scripts/con
 import { collect as collectKarabas, SOURCE as KARABAS } from '../scripts/karabas.ts';
 import { collect as collectKontramarka, SOURCE as KONTRAMARKA } from '../scripts/kontramarka.ts';
 import { collect as collectTelegram, SOURCE as TELEGRAM } from '../scripts/telegram.ts';
+import { collect as collectVenues, SOURCE as VENUES, venueSourceKeys } from '../scripts/venues.ts';
 import { collect as collectWebsearch, SOURCE as WEBSEARCH } from '../scripts/websearch.ts';
 
 export const SOURCES: Record<string, Collector> = {
   [CONCERTUA]: collectConcertUa,
   [KARABAS]: collectKarabas,
   [KONTRAMARKA]: collectKontramarka,
+  [VENUES]: collectVenues,
   [TELEGRAM]: collectTelegram,
   [WEBSEARCH]: collectWebsearch,
 };
 
 export const ALL_SOURCE_NAMES = Object.keys(SOURCES);
+
+/**
+ * Source keys as the owner should see them in /stats and in the doctor.
+ *
+ * `venues` is one collector reading many independent sites, so every
+ * configured hostname keeps its own counter and gets its own row — twenty
+ * venue pages collapsed into one line would say nothing about which of them
+ * stopped answering.
+ */
+export function healthSourceNames(cfg = loadConfig()): string[] {
+  return [...ALL_SOURCE_NAMES, ...venueSourceKeys(cfg)];
+}
 
 export interface PipelineOptions {
   query: Query;

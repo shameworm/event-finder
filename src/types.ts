@@ -82,6 +82,15 @@ export const SourceResultSchema = z.object({
    * parser that stopped matching.
    */
   skipped: z.boolean().optional(),
+  /**
+   * One row per site, for a collector that reads many independent sites
+   * (scripts/venues.ts). Without it twenty venue pages would reach /stats and
+   * the health counters as a single row, which tells the owner nothing about
+   * which of them stopped answering.
+   */
+  parts: z
+    .array(z.object({ source: z.string(), items: z.number().int().nonnegative(), ok: z.boolean() }))
+    .optional(),
 });
 export type SourceResult = z.infer<typeof SourceResultSchema>;
 

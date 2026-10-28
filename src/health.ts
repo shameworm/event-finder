@@ -31,13 +31,14 @@ import { ownerChatId } from './users.ts';
 import { sendMessage } from './telegram-api.ts';
 import { SOURCE as TELEGRAM } from '../scripts/telegram.ts';
 import { SOURCE as WEBSEARCH } from '../scripts/websearch.ts';
+import { SOURCE as VENUES, VENUE_PREFIX, isVenueSource, venueUrlFor } from '../scripts/venues.ts';
 
 /**
- * The two sources whose emptiness means something other than "the parser
- * broke", and so get their own wording. Re-exported so callers compare against
- * the same names rather than their own string literals.
+ * The sources whose emptiness means something other than "the parser broke",
+ * and so get their own wording. Re-exported so callers compare against the
+ * same names rather than their own string literals.
  */
-export { TELEGRAM as TELEGRAM_SOURCE, WEBSEARCH as WEBSEARCH_SOURCE };
+export { TELEGRAM as TELEGRAM_SOURCE, WEBSEARCH as WEBSEARCH_SOURCE, VENUES as VENUES_SOURCE };
 
 /**
  * Ticks of silence before the owner hears about it.
@@ -164,6 +165,7 @@ const SCRIPT: Record<string, string> = {
   'concert.ua': 'concertua',
   karabas: 'karabas',
   kontramarka: 'kontramarka',
+  [VENUES]: 'venues',
 };
 
 /**
@@ -175,6 +177,10 @@ export function nextStep(source: string, city = '<city>'): string {
     return 'npx tsx scripts/websearch.ts --queries, run the searches, then npx tsx scripts/websearch.ts --ingest';
   }
   if (source === TELEGRAM) return 'npx tsx scripts/tg-login.ts';
+  // a venue is one page: read it, and the markup answers the question
+  if (isVenueSource(source)) {
+    return `npx tsx scripts/venues.ts --probe ${venueUrlFor(source) ?? `https://${source.slice(VENUE_PREFIX.length)}/`}`;
+  }
   const script = SCRIPT[source];
   return script ? `npx tsx scripts/${script}.ts --city ${city} --json` : 'npx tsx scripts/doctor.ts --network';
 }
@@ -216,6 +222,27 @@ function deadMessage(source: string, outcome: TickOutcome, after: SourceHealth, 
       '',
       `Sign in again: ${nextStep(source)}`,
       'Then check: npx tsx scripts/doctor.ts',
+    ].join('\n');
+  }
+
+  // Venue pages are read by one collector, and one of them going dark for a
+  // fortnight is the normal case — so each keeps a counter and a /stats row,
+  // and only this aggregate is ever allowed to interrupt anybody.
+  if (source === VENUES) {
+    return [
+      `⚠️ Every configured venue page came back empty on ${deadAfter} consecutive fan-out`,
+      `ticks, while other sources did find events in the same cities (${where}).`,
+      '',
+      'One quiet venue is never reported: a small theatre with nothing on for a',
+      'fortnight looks exactly like a page that stopped parsing, and twenty of those',
+      'would be twenty alerts nobody reads. All of them at once is different.',
+      '',
+      '/stats lists every venue by hostname — find the empty ones, then read the page',
+      'the way the collector does:',
+      '',
+      '  npx tsx scripts/venues.ts --probe <the url from config.yaml → cities.*.venues>',
+      '',
+      last,
     ].join('\n');
   }
 
@@ -310,7 +337,9 @@ export async function recordTick(
       }
     } else if (outcome.verdict === 'empty') {
       after.emptyTicks = before.emptyTicks + 1;
-      if (after.emptyTicks >= deadAfter && !before.alerted) {
+      // a venue keeps its counter (that is what /stats reads) but never pages
+      // anybody; `venues`, the collector they all share, does
+      if (after.emptyTicks >= deadAfter && !before.alerted && !isVenueSource(source)) {
         if (await tell(deadMessage(source, outcome, after, deadAfter))) {
           after.alerted = true;
           report.dead.push(source);

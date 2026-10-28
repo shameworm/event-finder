@@ -164,6 +164,8 @@ weekday names — in English, Ukrainian and Russian.
 npx tsx scripts/concertua.ts    --city kharkiv --from 2026-10-24 --to 2026-10-26
 npx tsx scripts/karabas.ts      --city kharkiv --json
 npx tsx scripts/kontramarka.ts  --city odesa
+npx tsx scripts/venues.ts       --city kharkiv
+npx tsx scripts/venues.ts       --probe https://teatr.example.ua/afisha
 npx tsx scripts/telegram.ts     --city kharkiv --days 14
 npx tsx scripts/websearch.ts    --city kharkiv
 ```
@@ -171,6 +173,11 @@ npx tsx scripts/websearch.ts    --city kharkiv
 - **concert.ua** — `concert.ua/en/catalog/<slug>/<category>?page=N`, schema.org JSON-LD.
 - **karabas** — `<city>.karabas.com/?page=N`, JSON-LD with venue, price range, availability.
 - **kontramarka** — `<city>.kontramarka.ua/uk/<category>?page=N`, microdata via cheerio. Kyiv is on the bare domain.
+- **venues** — every url under `cities.<city>.venues` in config.yaml: a theatre's
+  afisha, a club, a festival programme. One request per url as written, no
+  crawling and no pagination. Items are filed per site (`venue:<hostname>`), so
+  /stats has a row each. Adding one is a config edit — `--probe <url>` prints
+  what a page publishes, which is the check to run before suggesting it.
 
 All three publish a poster on the very pages above — a URL on Concert.ua, an
 `ImageObject` on Karabas, a `<meta itemprop="image">` on Kontramarka — so an
@@ -189,6 +196,12 @@ failure anywhere. The fan-out counts those (`src/health.ts`) and tells the owner
 after three consecutive ticks where that source found nothing and others found
 events in the same cities. `scripts/doctor.ts` prints the same counters — read
 them before concluding a city is simply quiet.
+
+Venue pages are the exception: a small venue with nothing on this fortnight is
+indistinguishable from a page that stopped parsing, so they are counted and
+shown in /stats but never alerted on one by one. Only `venues` — the collector
+they share — can report an outage, and it does so when *every* configured page
+came back empty while other sources found events.
 
 ### websearch needs you
 

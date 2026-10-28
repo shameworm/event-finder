@@ -5,7 +5,7 @@
  * would mean a hundred crawls of Concert.ua. Cached entries hold *unranked*
  * items — ranking and filtering are per user and happen afterwards.
  */
-import type { Item, Query } from './types.ts';
+import type { Item, Query, SourceResult } from './types.ts';
 import { PreferencesSchema } from './types.ts';
 import { loadConfig } from './config.ts';
 import { sha1 } from './util.ts';
@@ -55,6 +55,19 @@ export interface CollectResult {
    * anything, so it is no evidence either way about whether they still work.
    */
   perSource?: { source: string; items: number; ok: boolean; skipped: boolean }[];
+}
+
+/**
+ * One pipeline run as rows for src/health.ts: every source, plus the per-site
+ * rows a collector that reads many sites reported (`parts`, scripts/venues.ts),
+ * so a venue that stopped answering is visible as itself rather than as a
+ * fraction of one "venues" line.
+ */
+export function healthRows(results: SourceResult[]): NonNullable<CollectResult['perSource']> {
+  return results.flatMap((r) => [
+    { source: r.source, items: r.items.length, ok: r.ok, skipped: r.skipped ?? false },
+    ...(r.parts ?? []).map((p) => ({ source: p.source, items: p.items, ok: p.ok, skipped: false })),
+  ]);
 }
 
 /**
@@ -135,11 +148,6 @@ async function scrapeCity(
     failedSources: result.failedSources,
     // pipeline results are one per source for one city, and their items are
     // pre-ranking: what the parser actually pulled off the page
-    perSource: result.results.map((r) => ({
-      source: r.source,
-      items: r.items.length,
-      ok: r.ok,
-      skipped: r.skipped ?? false,
-    })),
+    perSource: healthRows(result.results),
   };
 }

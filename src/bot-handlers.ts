@@ -37,7 +37,7 @@ import {
 } from './categories.ts';
 import { nextWeekRange, parseRequest, thisWeekRange, weekendRange } from './request.ts';
 import { collectCity } from './cache.ts';
-import { ALL_SOURCE_NAMES } from './pipeline.ts';
+import { healthSourceNames } from './pipeline.ts';
 import { describeHealth, readAllHealth } from './health.ts';
 import { rank } from './rank.ts';
 import { deliver, sendToUser } from './deliver.ts';
@@ -1523,7 +1523,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
       if (!isOwner(chatId)) return reply(OWNER_ONLY);
       // a scraper that quietly stopped matching its site is invisible in the
       // row counts — the only sign is the last time it brought anything back
-      const health = describeHealth(await readAllHealth(ctx.store, ALL_SOURCE_NAMES));
+      const health = describeHealth(await readAllHealth(ctx.store, healthSourceNames()));
       return reply(
         `${statsReport(await ctx.store.stats(), await ctx.store.metrics())}\n\n` +
           `<b>Sources</b>\n<code>${health.map((line) => escapeHtml(line)).join('\n')}</code>`,

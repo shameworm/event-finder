@@ -1,0 +1,83 @@
+<!doctype html>
+<!--
+  A venue's own afisha page, captured once and committed: this is the shape
+  scripts/venues.ts has to keep reading. Nothing here is site-specific — a
+  theatre on one CMS, a club on another and a festival hand-rolling its markup
+  all publish this, which is the whole premise of the generic collector.
+
+  It deliberately holds three things worth testing: an event whose markup names
+  its own type (TheaterEvent), one that leaves the type generic and so needs the
+  configured fallback, and one next season, which must not reach a one-weekend
+  digest.
+-->
+<html lang="uk">
+  <head>
+    <meta charset="utf-8" />
+    <title>Афіша — Театр «Прапор»</title>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "PerformingGroup",
+        "name": "Театр «Прапор»",
+        "url": "https://teatr.example.ua/"
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "TheaterEvent",
+            "name": "Тартюф",
+            "url": "https://teatr.example.ua/afisha/tartuffe",
+            "description": "Комедія Мольєра у новій редакції.",
+            "startDate": "2026-12-08T19:00:00+02:00",
+            "endDate": "2026-12-08T21:30:00+02:00",
+            "eventStatus": "https://schema.org/EventScheduled",
+            "image": "/upload/posters/tartuffe.jpg",
+            "location": {
+              "@type": "Place",
+              "name": "Театр «Прапор», велика сцена",
+              "address": {
+                "@type": "PostalAddress",
+                "streetAddress": "вул. Сумська, 25",
+                "addressLocality": "Харків"
+              }
+            },
+            "offers": {
+              "@type": "AggregateOffer",
+              "lowPrice": "250",
+              "highPrice": "600",
+              "priceCurrency": "UAH",
+              "availability": "https://schema.org/InStock"
+            }
+          },
+          {
+            "@type": "ComedyEvent",
+            "name": "Вечір імпровізації",
+            "url": "https://teatr.example.ua/afisha/improv",
+            "startDate": "2026-12-09T20:00:00+02:00",
+            "isAccessibleForFree": true,
+            "location": { "@type": "Place", "name": "Театр «Прапор», мала сцена" }
+          },
+          {
+            "@type": "Event",
+            "name": "Сон літньої ночі",
+            "url": "https://teatr.example.ua/afisha/midsummer",
+            "startDate": "2027-02-14T18:00:00+02:00",
+            "location": { "@type": "Place", "name": "Театр «Прапор», велика сцена" },
+            "offers": { "@type": "Offer", "price": "300", "priceCurrency": "UAH" }
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <h1>Афіша</h1>
+    <ul class="afisha">
+      <li><a href="/afisha/tartuffe">Тартюф — 8 грудня</a></li>
+      <li><a href="/afisha/improv">Вечір імпровізації — 9 грудня</a></li>
+      <li><a href="/afisha/midsummer">Сон літньої ночі — 14 лютого</a></li>
+    </ul>
+  </body>
+</html>

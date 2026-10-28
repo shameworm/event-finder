@@ -20,7 +20,7 @@ import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
 import { withStore } from '../src/db.ts';
 import { DEAD_AFTER_TICKS, WEBSEARCH_SOURCE, describeHealth, nextStep, readAllHealth } from '../src/health.ts';
-import { ALL_SOURCE_NAMES } from '../src/pipeline.ts';
+import { healthSourceNames } from '../src/pipeline.ts';
 import { botToken, defaultChatId, getMe, getMyCommands } from '../src/telegram-api.ts';
 import { politeFetch } from '../src/http.ts';
 import { credentials } from './telegram.ts';
@@ -130,7 +130,7 @@ section('source health (the counters the fan-out keeps — no network)');
 try {
   const home = loadPrefs().home_city;
   await withStore(async (store) => {
-    const rows = await readAllHealth(store, ALL_SOURCE_NAMES);
+    const rows = await readAllHealth(store, healthSourceNames());
     const lines = describeHealth(rows);
     for (const [i, row] of rows.entries()) {
       const line = lines[i] ?? row.source;
