@@ -8,7 +8,7 @@ personalised digests, alerts and reminders.
 - **Places**: new cafés, bars with live music, galleries, unusual spots
 - **Sources**: Concert.ua, Karabas, Kontramarka, Telegram channels (GramJS), web search
 - **Cities**: Kharkiv (default), Kyiv, Lviv, Dnipro, Odesa, Ivano-Frankivsk — add any
-- **Multi-user**: every person gets their own city, taste, delivery hour, quiet hours and reminders
+- **Multi-user**: every person gets their own city, taste, delivery hour and reminders
 - **Ukrainian**: the bot speaks Ukrainian only; it still understands requests typed in Russian or English
 - **One card you walk through**, digests included — one message per event shown, so a ❤️ on it means exactly that event
 
@@ -336,8 +336,8 @@ them with `hermes cron add` (both forms are there, plus a crontab fallback):
 |---|---|---|
 | **every hour** | `digest.ts --week` | whoever set that hour and today's weekday — header + one card |
 | **every hour, Thursday** | `digest.ts --weekend --top 5` | whoever set that hour — header + one card |
-| every 6 hours | `follows.ts` | each user's follow list, outside their quiet hours — one message per alert |
-| Sunday 11:00 | `places.ts` | each user's interests, outside their quiet hours — one message per place |
+| every 6 hours | `follows.ts` | each user's follow list — one message per alert |
+| Sunday 11:00 | `places.ts` | each user's interests — one message per place |
 | every 15 minutes | `reminders.ts` | everyone's ❤️ reminders |
 
 The two digest jobs tick **hourly** and the schedule lives on the user, not in
@@ -372,9 +372,8 @@ a week.
 | `digest_hour` | `9` | the hour digests arrive, in `config.timezone` |
 | `digest_days` | Mon + Thu | the weekdays a digest arrives, as one bit per day (bit 0 = Sunday). Written the first time someone taps the panel |
 | `digest_day` / `digest_freq` | `1` / `twice` | **legacy only** — what a row that predates `digest_days` meant. Read when `digest_days` is still NULL, and ignored for good once that user taps a day |
-| `quiet_from` / `quiet_to` | `23` → `8` | the window the bot keeps quiet in; equal values switch it off. Not on the panel — set the columns by hand if the default does not suit you |
 
-Three things worth knowing:
+One thing worth knowing:
 
 - **`mine` means "only when there is something really mine"** — nothing is sent
   if `rank()` had to top the list up with off-taste items to reach
@@ -383,14 +382,6 @@ Three things worth knowing:
   against: with an empty profile `rank()` has nothing to filter by, never pads
   anything, and `mine` behaves like any other schedule. Nothing on the panel
   sets it any more; the column still decides for whoever has it.
-- **Quiet hours do not cancel a digest.** Pick 07:00 and you get it at 07:00
-  even though the default quiet window covers it — you asked for that hour, and
-  swallowing the choice would make the button look broken. Quiet hours gate the
-  sends nobody scheduled: follow alerts, place tips, and the "tomorrow"
-  reminder. Those are deferred, not dropped — only what actually went out is
-  recorded as sent, so the next tick delivers the same items.
-- **The "in ~3 hours" reminder always fires**, quiet hours or not. Held until
-  the morning it is not politeness, it is the feature failing.
 
 Anyone registered before these columns existed reads as the defaults above, so
 they keep getting exactly the Monday 09:00 + Thursday mailing they always did.
@@ -561,7 +552,7 @@ src/
   cache.ts                one scrape per city
   fanout.ts               scheduled jobs across all users
   health.ts               counts the ok-but-empty runs, and says so once
-  schedule.ts             each person's hour and days, and when to keep quiet
+  schedule.ts             each person's hour and days
   pipeline.ts request.ts rank.ts dedupe.ts normalize.ts render.ts
   db.ts config.ts schemas.ts types.ts http.ts jsonld.ts log.ts …
 drizzle/                  database schema (sqlite + postgres)

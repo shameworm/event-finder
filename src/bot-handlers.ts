@@ -583,9 +583,8 @@ async function handleStepText(
 
 /**
  * "Коли писати" — an hour and the days of the week. That is the whole screen,
- * and deliberately so: hour + day + frequency + quiet window was four concepts
- * and eighteen buttons for a thing people summarise as "Monday and Thursday
- * at seven".
+ * and deliberately so: hour + day + frequency was three concepts and a wall of
+ * buttons for a thing people summarise as "Monday and Thursday at seven".
  *
  * Only six hours are offered, and that is a deliberate limit rather than a
  * shortage of buttons: every distinct hour someone picks is another fan-out

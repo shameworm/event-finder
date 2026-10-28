@@ -39,9 +39,6 @@ export const users = sqliteTable(
      * `digestDay` + `digestFreq` pair still decides. See src/schedule.ts.
      */
     digestDays: integer('digest_days'),
-    /** Quiet window, local hours; from === to means "no quiet hours". */
-    quietFrom: integer('quiet_from').notNull().default(23),
-    quietTo: integer('quiet_to').notNull().default(8),
     /** 'weekly' | 'twice' | 'mine' — see src/schedule.ts. */
     digestFreq: text('digest_freq').notNull().default('twice'),
     /** 1 = stopped the bot or was blocked; no sends, no digests. */

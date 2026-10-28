@@ -72,7 +72,7 @@ const { cacheKey, collectCity } = await import('../src/cache.ts');
 const { parseArgs } = await import('../src/cli.ts');
 const { fanout } = await import('../src/fanout.ts');
 const {
-  DIGEST_DAYS, DIGEST_HOURS, WEEKEND_DAY, digestDueNow, inQuietHours, reminderAllowedNow, scheduleOf, defaultSchedule,
+  DIGEST_DAYS, DIGEST_HOURS, WEEKEND_DAY, digestDueNow, scheduleOf, defaultSchedule,
   describeSchedule, wantsOnlyMine, daysLabel, toggleDay, daysMask, daysFromMask,
 } = await import('../src/schedule.ts');
 const { handleMessage, handleCallback, handleReaction, parseBell, isHeart, isAllowed, BOT_COMMANDS } = await import(
@@ -1724,8 +1724,7 @@ describe('store', () => {
         prefs text NOT NULL, stage text, weekly_digest integer NOT NULL DEFAULT 1,
         weekend_digest integer NOT NULL DEFAULT 1, follow_alerts integer NOT NULL DEFAULT 1,
         place_tips integer NOT NULL DEFAULT 1, digest_hour integer NOT NULL DEFAULT 9,
-        digest_day integer NOT NULL DEFAULT 1, quiet_from integer NOT NULL DEFAULT 23,
-        quiet_to integer NOT NULL DEFAULT 8, digest_freq text NOT NULL DEFAULT 'twice',
+        digest_day integer NOT NULL DEFAULT 1, digest_freq text NOT NULL DEFAULT 'twice',
         blocked integer NOT NULL DEFAULT 0, last_seen_at text,
         created_at text NOT NULL, updated_at text NOT NULL);
       INSERT INTO users (chat_id, city, prefs, digest_hour, digest_day, digest_freq, created_at, updated_at)
@@ -2039,49 +2038,10 @@ describe('schedule', () => {
     assert.ok(DIGEST_DAYS.every((d) => d.short && d.label));
   });
 
-  it('wraps a quiet window around midnight', () => {
-    const night = { quietFrom: 23, quietTo: 8 };
-    assert.ok(inQuietHours(23, night));
-    assert.ok(inQuietHours(0, night));
-    assert.ok(inQuietHours(7, night));
-    assert.ok(!inQuietHours(8, night), 'the window ends exclusively');
-    assert.ok(!inQuietHours(22, night));
-    assert.ok(!inQuietHours(12, night));
-  });
-
-  it('handles a daytime quiet window and an empty one', () => {
-    const daytime = { quietFrom: 9, quietTo: 17 };
-    assert.ok(inQuietHours(9, daytime));
-    assert.ok(inQuietHours(16, daytime));
-    assert.ok(!inQuietHours(17, daytime));
-    assert.ok(!inQuietHours(8, daytime));
-    // from === to means "switched off", not "all day"
-    for (let h = 0; h < 24; h++) assert.ok(!inQuietHours(h, { quietFrom: 0, quietTo: 0 }), `hour ${h}`);
-  });
-
   it('only offers hours that are actually on the menu, and 9 among them', () => {
     assert.ok(DIGEST_HOURS.includes(9), 'the default must be pickable, or it cannot be restored');
     assert.ok(DIGEST_HOURS.every((h) => Number.isInteger(h) && h >= 0 && h <= 23));
     assert.ok(DIGEST_HOURS.length <= 8, 'more slots means more scrapes per day — see the README');
-  });
-
-  it('never holds the 3-hour reminder for quiet hours, but does hold the 1-day one', () => {
-    const night = defaultSchedule(); // quiet 23:00–08:00
-    // a 21:00 gig whose "in ~3 hours" nudge is due at 18:00: not quiet anyway
-    assert.ok(reminderAllowedNow('3h', 18, night));
-    // a 02:00 after-party, or a reminder tick that runs at 01:00 — the whole
-    // point of the feature is that this still arrives
-    assert.ok(reminderAllowedNow('3h', 1, night), 'a late reminder is a useless reminder');
-    assert.ok(reminderAllowedNow('3h', 7, night));
-    // "tomorrow" can wait for the morning
-    assert.ok(!reminderAllowedNow('1d', 1, night));
-    assert.ok(!reminderAllowedNow('1d', 23, night));
-    assert.ok(reminderAllowedNow('1d', 8, night), 'and goes out as soon as the window ends');
-    assert.ok(reminderAllowedNow('1d', 12, night));
-    // quiet hours switched off: both go out whenever they are due
-    const always = { ...defaultSchedule(), quietFrom: 0, quietTo: 0 };
-    assert.ok(reminderAllowedNow('1d', 3, always));
-    assert.ok(reminderAllowedNow('3h', 3, always));
   });
 
   it('describes a schedule in Ukrainian', () => {
@@ -2104,7 +2064,7 @@ describe('schedule', () => {
 
 describe('fanout', () => {
   const window = { from: '2026-10-23', to: '2026-10-25', label: 'this weekend' };
-  /** Midday Thursday: outside everyone's default quiet hours, and the weekend-digest day. */
+  /** Midday Thursday: the weekend-digest day, at an hour people are out. */
   const noon = { hour: 12, weekday: WEEKEND_DAY };
   const standup = makeItem({ city: 'kharkiv', title: 'Антон Тимошенко. Стендап', url: 'https://x/su', source: 'concert.ua', category: 'standup', startsAt: '2026-10-24T19:00:00+03:00', priceMin: 400, status: 'scheduled' })!;
   const classical = makeItem({ city: 'kharkiv', title: 'Класична музика при свічках', url: 'https://x/cl', source: 'karabas', category: 'concert', startsAt: '2026-10-24T18:00:00+03:00', priceMin: 500, status: 'scheduled' })!;
@@ -2327,42 +2287,17 @@ describe('fanout', () => {
     });
   });
 
-  it('holds a non-digest job back during the recipient’s quiet hours', async () => {
+  it('sends a non-digest job at any hour — there is nothing left to hold it back', async () => {
     await withTestStore(async (store) => {
       await seed(store);
       await registerUser(store, { chatId: '2600', city: 'kharkiv' });
-      // follow alerts and place tips keep their fixed cron time, so quiet
-      // hours are the only thing standing between them and 03:00
+      // follow alerts and place tips keep their fixed cron time, and they go
+      // out on it: the cron, not the user row, decides when
       const night = await fanout({
         store, log, optIn: 'weekly_digest', window, dryRun: true,
         title: () => 'A', onlyChats: ['2600'], now: { hour: 3, weekday: 1 },
       });
-      assert.equal(night.quiet, 1);
-      assert.equal(night.recipients, 0);
-
-      await store.setSchedule('2600', { quietFrom: 0, quietTo: 0 });
-      const anytime = await fanout({
-        store, log, optIn: 'weekly_digest', window, dryRun: true,
-        title: () => 'A', onlyChats: ['2600'], now: { hour: 3, weekday: 1 },
-      });
-      assert.equal(anytime.quiet, 0, 'quiet hours switched off means any hour is fine');
-      assert.equal(anytime.recipients, 1);
-    });
-  });
-
-  it('does not let quiet hours swallow a digest the person asked for', async () => {
-    await withTestStore(async (store) => {
-      await seed(store);
-      await registerUser(store, { chatId: '2700', city: 'kharkiv' });
-      // 07:00 is inside the default 23:00–08:00 window, and it is still what
-      // they picked — the hour button would otherwise look broken
-      await store.setSchedule('2700', { hour: 7, days: [1] });
-      const result = await fanout({
-        store, log, optIn: 'weekly_digest', digest: 'weekly', window, dryRun: true,
-        title: () => 'W', onlyChats: ['2700'], now: { hour: 7, weekday: 1 },
-      });
-      assert.equal(result.recipients, 1);
-      assert.equal(result.quiet, 0);
+      assert.equal(night.recipients, 1);
     });
   });
 });
@@ -3077,7 +3012,6 @@ describe('bot handlers', () => {
       for (const d of DIGEST_DAYS) assert.ok(when.includes(`(when:day:${d.day})`), `${d.short} is pickable`);
       // the screen is an hour and a set of days, and nothing else
       assert.ok(!when.includes('when:freq'), 'no frequency — ticking days is the frequency');
-      assert.ok(!when.includes('when:quiet'), 'no quiet window on this screen');
       assert.ok(when.includes('понеділок') && when.includes('четвер'), 'and it says what is ticked now');
     });
   });
@@ -3102,7 +3036,7 @@ describe('bot handlers', () => {
 
       // a legacy column nobody has written since still reads as it always did
       assert.deepEqual((await getUser(store, '3021'))!.schedule, {
-        hour: 18, days: [1, 4], quietFrom: 23, quietTo: 8, frequency: 'twice',
+        hour: 18, days: [1, 4], frequency: 'twice',
       });
     });
   });
@@ -3126,8 +3060,6 @@ describe('bot handlers', () => {
       assert.deepEqual((await getUser(store, '3030'))!.schedule.days, [1, 4], 'and neither does a bogus weekday');
       await tap(store, '3030', 'when:freq:mine');
       assert.equal((await store.getUser('3030'))?.digest_freq, 'twice', 'the frequency button is gone');
-      await tap(store, '3030', 'when:quiet:0-0');
-      assert.equal((await store.getUser('3030'))?.quiet_from, 23, 'and so is the quiet-window one');
     });
   });
 
@@ -4245,7 +4177,7 @@ describe('the bookmark as a taste signal', () => {
 describe('dead source detection', () => {
   /** What one source came back with for one city in one fan-out tick. */
   const saw = (source: string, city: string, items: number) => ({ source, city, items, ok: true });
-  /** Midday on the weekend-digest day: outside everyone's quiet hours. */
+  /** Midday on the weekend-digest day: a busy hour, not a night nothing is on. */
   const noonThursday = { hour: 12, weekday: WEEKEND_DAY };
 
   /** recordTick with the owner's inbox replaced by an array we can read. */

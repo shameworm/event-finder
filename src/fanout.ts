@@ -15,7 +15,7 @@ import { deliver } from './deliver.ts';
 import { WALK_HINT } from './render.ts';
 import { allUsers, citiesFor, type BotUser } from './users.ts';
 import { recordTick, type SourceObservation } from './health.ts';
-import { digestDueNow, inQuietHours, wantsOnlyMine, type DigestKind } from './schedule.ts';
+import { digestDueNow, wantsOnlyMine, type DigestKind } from './schedule.ts';
 import { localTime, localWeekday, sleep, today } from './util.ts';
 
 export interface FanoutJob {
@@ -58,9 +58,9 @@ export interface FanoutJob {
    * did not have to be padded.
    *
    * Leave it unset for the jobs that are not a digest (follow alerts, place
-   * tips) — they keep their fixed cron time and are only held back by the
-   * recipient's quiet hours. Nothing is lost when they are: only what actually
-   * went out is recorded as sent, so the next tick picks the same items up.
+   * tips) — they keep their fixed cron time and go to everyone opted in.
+   * Nothing is lost by that: only what actually went out is recorded as sent,
+   * so the next tick picks the same items up.
    */
   digest?: DigestKind;
   /**
@@ -82,8 +82,6 @@ export interface FanoutResult {
   failedUsers: number;
   /** Opted in, but not at this hour / not on this day. */
   notNow: number;
-  /** Held back by quiet hours (non-digest jobs only). */
-  quiet: number;
   /** Wanted "only when there is something of mine" and there was not. */
   notTheirs: number;
   /**
@@ -105,7 +103,7 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
   const now = job.now ?? { hour: Number(localTime(clock, cfg.timezone).slice(0, 2)), weekday: localWeekday(clock, cfg.timezone) };
   const empty = (): FanoutResult => ({
     users: 0, recipients: 0, items: 0, cities: 0, scrapes: 0, cacheHits: 0,
-    failedSources: [], failedUsers: 0, notNow: 0, quiet: 0, notTheirs: 0,
+    failedSources: [], failedUsers: 0, notNow: 0, notTheirs: 0,
     deadSources: [], recoveredSources: [],
   });
 
@@ -120,22 +118,20 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
   // "the handful of people who asked for this hour".
   const total = users.length;
   let notNow = 0;
-  let quiet = 0;
   const due: BotUser[] = [];
   for (const user of users) {
     if (job.digest) {
       if (digestDueNow(user.schedule, job.digest, now)) due.push(user);
       else notNow++;
-    } else if (inQuietHours(now.hour, user.schedule)) quiet++;
-    else due.push(user);
+    } else due.push(user);
   }
   users = due;
   if (users.length === 0) {
     job.log.info(
       `${job.optIn}: nobody at ${String(now.hour).padStart(2, '0')}:00 ` +
-        `(${total} opted in; ${notNow} another hour, ${quiet} in quiet hours)`,
+        `(${total} opted in; ${notNow} another hour)`,
     );
-    return { ...empty(), users: 0, notNow, quiet };
+    return { ...empty(), users: 0, notNow };
   }
 
   // which cities does this job need, and who wants each one
@@ -152,7 +148,6 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
   const result: FanoutResult = {
     ...empty(),
     notNow,
-    quiet,
     users: users.length,
     cities: wanted.size,
   };
