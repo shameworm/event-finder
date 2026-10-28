@@ -118,8 +118,6 @@ async function bootstrap(d: Driver): Promise<void> {
     digest_hour    integer NOT NULL DEFAULT 9,
     digest_day     integer NOT NULL DEFAULT 1,
     digest_days    integer,
-    quiet_from     integer NOT NULL DEFAULT 23,
-    quiet_to       integer NOT NULL DEFAULT 8,
     digest_freq    text NOT NULL DEFAULT 'twice',
     blocked        integer NOT NULL DEFAULT 0,
     last_seen_at   text,
@@ -139,8 +137,6 @@ async function bootstrap(d: Driver): Promise<void> {
     // digest_day/freq above", and giving it a default would silently move
     // every existing user onto Monday-and-Thursday
     ['digest_days', `integer`],
-    ['quiet_from', `integer NOT NULL DEFAULT 23`],
-    ['quiet_to', `integer NOT NULL DEFAULT 8`],
     ['digest_freq', `text NOT NULL DEFAULT 'twice'`],
   ] as const) {
     await addColumn(d, 'users', column, type);
@@ -301,8 +297,6 @@ export const UserRowSchema = z.object({
    * `digest_day` + `digest_freq` below still say what they want.
    */
   digest_days: z.coerce.number().int().nullable().default(null),
-  quiet_from: z.coerce.number().int().default(23),
-  quiet_to: z.coerce.number().int().default(8),
   digest_freq: z.string().default('twice'),
   blocked: z.coerce.number().int(),
 });
@@ -563,10 +557,7 @@ export class Store {
    * `days` is the weekday set as a bitmask (bit 0 = Sunday), and writing it is
    * what retires the legacy `digest_day`/`digest_freq` for that user.
    */
-  async setSchedule(
-    chatId: string,
-    patch: { hour?: number; days?: number[]; quietFrom?: number; quietTo?: number; frequency?: string },
-  ): Promise<void> {
+  async setSchedule(chatId: string, patch: { hour?: number; days?: number[]; frequency?: string }): Promise<void> {
     const t = this.d.schema;
     const ts = nowIso();
     const set = async (column: SQL, value: number | string) => {
@@ -574,8 +565,6 @@ export class Store {
     };
     if (patch.hour !== undefined) await set(sql`digest_hour`, patch.hour);
     if (patch.days !== undefined) await set(sql`digest_days`, daysMask(patch.days));
-    if (patch.quietFrom !== undefined) await set(sql`quiet_from`, patch.quietFrom);
-    if (patch.quietTo !== undefined) await set(sql`quiet_to`, patch.quietTo);
     if (patch.frequency !== undefined) await set(sql`digest_freq`, patch.frequency);
   }
 

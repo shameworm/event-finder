@@ -12,7 +12,7 @@
  * Friday–Sunday, because a weekend digest any later would be useless — so
  * ticking Thursday is how you ask for the weekend picks.
  *
- * Three rules worth knowing before changing anything:
+ * Two rules worth knowing before changing anything:
  *
  *  - **Hours are a short menu, not a free dial** (`DIGEST_HOURS`). A free
  *    choice of all 24 hours would smear the weekly digest across 7 × 24 = 168
@@ -20,19 +20,9 @@
  *    covers — the 30-minute cache only shares a scrape *inside* one hour. Six
  *    slots keep that bounded; see the README for the arithmetic.
  *
- *  - **Quiet hours do not apply to a digest.** Someone who asks for 07:00 has
- *    already said 07:00 is fine, and silently swallowing their own choice
- *    would make the hour picker look broken. Quiet hours gate the sends the
- *    user did not schedule: follow alerts, place tips, and the "tomorrow"
- *    reminder. The "in ~3 hours" reminder always goes out — arriving late is
- *    the one failure mode that makes it worthless. They are not on the
- *    settings panel any more; the columns keep their defaults and the operator
- *    can still set them by hand.
- *
- *  - **The panel offers an hour and days, and nothing else.** `frequency` and
- *    the quiet window are still read here — a row written before this was
- *    simplified keeps behaving exactly as it did — but nothing in the bot
- *    writes them any more.
+ *  - **The panel offers an hour and days, and nothing else.** `frequency` is
+ *    still read here — a row written before this was simplified keeps behaving
+ *    exactly as it did — but nothing in the bot writes it any more.
  */
 import type { UserRow } from './db.ts';
 
@@ -67,8 +57,6 @@ export interface UserSchedule {
   hour: number;
   /** The weekdays a digest arrives, 0 = Sunday … 6 = Saturday. Never empty. */
   days: number[];
-  quietFrom: number;
-  quietTo: number;
   /** Legacy only — the "say nothing rather than pad the list" narrowing. */
   frequency: Frequency;
 }
@@ -77,8 +65,6 @@ const DEFAULTS: UserSchedule = {
   hour: 9,
   // what the single hard-wired cron did: Monday, plus Thursday's weekend picks
   days: [1, WEEKEND_DAY],
-  quietFrom: 23,
-  quietTo: 8,
   frequency: 'twice',
 };
 
@@ -122,23 +108,11 @@ export function scheduleOf(row: Partial<UserRow> | undefined): UserSchedule {
   return {
     hour: hourish(row?.digest_hour, DEFAULTS.hour),
     days: daysOf(row?.digest_days, weekly, frequency),
-    quietFrom: hourish(row?.quiet_from, DEFAULTS.quietFrom),
-    quietTo: hourish(row?.quiet_to, DEFAULTS.quietTo),
     frequency,
   };
 }
 
 export const defaultSchedule = (): UserSchedule => ({ ...DEFAULTS, days: [...DEFAULTS.days] });
-
-/**
- * Is `hour` inside the quiet window? The window may wrap midnight (23 → 8),
- * and `from === to` means "no quiet hours at all" rather than "all day".
- */
-export function inQuietHours(hour: number, quiet: { quietFrom: number; quietTo: number }): boolean {
-  const { quietFrom: from, quietTo: to } = quiet;
-  if (from === to) return false;
-  return from < to ? hour >= from && hour < to : hour >= from || hour < to;
-}
 
 /** Which digest a fan-out is delivering. */
 export type DigestKind = 'weekly' | 'weekend';
@@ -158,19 +132,6 @@ export function digestDueNow(
   if (schedule.hour !== now.hour) return false;
   if (!schedule.days.includes(now.weekday)) return false;
   return kind === 'weekend' ? now.weekday === WEEKEND_DAY : now.weekday !== WEEKEND_DAY;
-}
-
-/**
- * May this reminder go out at `hour`?
- *
- * The "in ~3 hours" reminder is exempt from quiet hours, and that is the
- * deliberate decision rather than an oversight: a reminder for a 21:00 gig,
- * held until the quiet window ends at 08:00 the next morning, is not a
- * politeness — it is the feature failing. The "tomorrow" one has a whole day
- * of slack, so it waits; the row is left unfired and the next tick delivers it.
- */
-export function reminderAllowedNow(which: '1d' | '3h', hour: number, schedule: UserSchedule): boolean {
-  return which === '3h' || !inQuietHours(hour, schedule);
 }
 
 /** 'mine' means: say nothing rather than send a list that had to be padded. */

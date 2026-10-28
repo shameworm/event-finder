@@ -61,6 +61,10 @@ cron:
   # agent prompt below searches for the names first. The plain
   # `command: npx tsx scripts/follows.ts` still works — it just waits for the
   # acts to appear in the normal city scrape.
+  #
+  # There is nothing standing between this cron and the recipient: no night
+  # guard, no per-user window. `0 */6` means 00:00 and 06:00 too — pick the
+  # hours yourself if you would rather not wake anyone.
   - name: events-finder-follow-alerts
     schedule: "0 */6 * * *"
     timezone: Europe/Kyiv
@@ -111,8 +115,6 @@ cron:
     cwd: ~/.hermes/skills/events-finder
     command: npx tsx scripts/reminders.ts
     description: Fire everyone's due reminders (1 day and 3 hours before).
-    # The "in ~3 hours" reminder ignores quiet hours — held until morning it
-    # would be worthless. The "tomorrow" one waits for the window to end.
 
   # ── 6. OPTIONAL — only if you are NOT running scripts/bot.ts as a service ─
   #
