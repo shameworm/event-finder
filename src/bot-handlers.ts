@@ -209,7 +209,7 @@ function quickActions(): InlineButton[][] {
   return [
     [
       { text: '🎉 Ці вихідні', callback_data: 'go:weekend' },
-      { text: '📍 Поруч', callback_data: 'go:near' },
+      { text: '📅 Сьогодні', callback_data: 'go:today' },
     ],
     [
       { text: '🔖 Збережені', callback_data: 'go:saved' },
@@ -1132,7 +1132,7 @@ async function showMore(
 }
 
 /** The canned searches, reachable both as a command and as a quick-action button. */
-export type Preset = 'week' | 'weekend' | 'today' | 'tomorrow' | 'near';
+export type Preset = 'week' | 'weekend' | 'today' | 'tomorrow';
 
 async function runPreset(ctx: HandlerContext, user: BotUser, preset: Preset, reply: Reply): Promise<void> {
   const cfg = loadConfig();
@@ -1154,19 +1154,6 @@ async function runPreset(ctx: HandlerContext, user: BotUser, preset: Preset, rep
     case 'tomorrow':
       await answerSearch(ctx, user, '', { from: addDays(base, 1), to: addDays(base, 1), label: 'завтра', reply });
       return;
-
-    // "поруч" is the home city, not a radius: Telegram can share a location,
-    // but the ticket sites this bot reads index events by city and nothing
-    // here has coordinates to measure a distance against. The honest version
-    // of "near me" is therefore "where you live, over the next week" — and
-    // /city is what moves it.
-    case 'near':
-      await answerSearch(ctx, user, '', {
-        from: base,
-        to: addDays(base, 7),
-        label: `${cityLabel(user.city)}, найближчий тиждень`,
-        reply,
-      });
   }
 }
 
@@ -1425,7 +1412,6 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
     case '/weekend':
     case '/today':
     case '/tomorrow':
-    case '/near':
       await runPreset(ctx, user, command.slice(1) as Preset, reply);
       return;
 
@@ -1634,7 +1620,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
  *                 onb:unfollow:<index> · onb:next · onb:skip
  *                 onb:step:<step> · onb:taste · onb:start · onb:later
  *                 when:hour:<0-23> · when:day:<0-6> (tap to flip a day on/off)
- *   go:near · go:saved · go:find · go:prefs
+ *   go:today · go:saved · go:find · go:prefs
  *   find:…        the guided search: find:open · find:cat:<category>
  *                 find:clear · find:when · find:run:<period> · find:cancel
  *   more          the next page of an answer, from the stash behind its
@@ -1715,7 +1701,7 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
       const screen = findCategoriesScreen(state);
       return draw(screen, false);
     }
-    const presets: Preset[] = ['week', 'weekend', 'today', 'tomorrow', 'near'];
+    const presets: Preset[] = ['week', 'weekend', 'today', 'tomorrow'];
     if (presets.includes(arg as Preset)) return runPreset(ctx, user, arg as Preset, reply);
     return;
   }
