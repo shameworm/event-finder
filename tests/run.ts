@@ -3927,6 +3927,73 @@ describe('welcome, saved events and the guided search', () => {
     });
   });
 
+  /**
+   * The bot used to find places as well as events, and `saved`, `deliveries`
+   * and `messages` all store whole Items as JSON, re-parsed on every read. A
+   * bookmarked café was stored with `category: 'cafe'`, which is not a
+   * category any more — so these rows cannot be read back at all.
+   *
+   * They must be skipped, not thrown: /saved showing four of five bookmarks
+   * beats /saved erroring. scripts/unplace.ts is the broom.
+   */
+  it('still answers /saved when one of the rows is a place nobody can parse', async () => {
+    await withTestStore(async (store) => {
+      await registerUser(store, { chatId: '3610', city: 'kharkiv' });
+      const event = gig();
+      await store.saveItem('3610', event);
+
+      // the row a ❤️ on a café wrote, exactly as it was written
+      const { default: Database } = await import('better-sqlite3');
+      const raw = new Database(process.env['EVENTS_FINDER_DB']!);
+      const cafe = {
+        id: 'deadbeefdeadbeef',
+        kind: 'place',
+        title: 'Kofein Lab',
+        category: 'cafe',
+        city: 'kharkiv',
+        address: 'вул. Сумська, 11',
+        url: 'https://x/kofein',
+        source: 'websearch',
+        sources: ['websearch'],
+        status: 'unknown',
+      };
+      raw
+        .prepare('INSERT INTO saved (chat_id, item_id, title, starts_at, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run('3610', cafe.id, cafe.title, null, JSON.stringify(cafe), '2026-10-01T00:00:00.000Z');
+      raw.close();
+
+      // the unreadable row is skipped, and the rest of the list survives it
+      const list = await store.listSaved('3610');
+      assert.deepEqual(list.map((i) => i.id), [event.id], 'the café is gone, the gig is not');
+
+      const shown = await say(store, '3610', '/saved');
+      assert.ok(shown.includes('Збережена подія 1'), shown.slice(0, 400));
+      assert.ok(!shown.includes('Kofein Lab'), 'and the café is not half-rendered either');
+
+      // a message carrying both keeps the half it can still read, so a ❤️ on
+      // the card next to the café still resolves to an event
+      await store.recordMessage('3610', 91, [event]);
+      const rawBoth = new Database(process.env['EVENTS_FINDER_DB']!);
+      rawBoth
+        .prepare('UPDATE messages SET payload = ? WHERE chat_id = ? AND message_id = ?')
+        .run(JSON.stringify([cafe, event]), '3610', 91);
+      rawBoth.close();
+      assert.deepEqual(
+        (await store.itemsForMessage('3610', 91)).map((i) => i.id),
+        [event.id],
+        'the event beside the café is still there',
+      );
+
+      // and the one-off broom finds exactly those two rows
+      const dry = await store.sweepUnreadable();
+      assert.equal(dry.saved, 1, JSON.stringify(dry));
+      assert.equal(dry.messagesTrimmed, 1, JSON.stringify(dry));
+      assert.equal((await store.sweepUnreadable({ write: true })).saved, 1);
+      assert.equal((await store.sweepUnreadable()).saved, 0, 'and leaves nothing behind for a second run');
+      assert.deepEqual((await store.listSaved('3610')).map((i) => i.id), [event.id], 'the gig survived the sweep');
+    });
+  });
+
   it('edits a photo card as a caption, never as text', async () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3604', city: 'kharkiv' });

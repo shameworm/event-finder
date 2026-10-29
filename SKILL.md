@@ -252,6 +252,13 @@ user the favourites, dislikes and genres that are identical to the
 seed file — the ones they were handed rather than chose. It leaves the ❤️ tally
 and the price cap alone.
 
+One-off cleanup for a bot that ran when it still found places:
+`npx tsx scripts/unplace.ts` (dry run; `--yes` to write) throws away the stored
+items that are places — a bookmarked café has a category that no longer exists,
+so it cannot be read back. Nothing breaks without it: every read already skips
+what it cannot parse, counts it and logs it, so `/saved` shows four of five
+bookmarks rather than erroring. Messages are trimmed rather than dropped when
+only some of their items were places.
 
 `preferences.yaml` is the operator's own profile and what the CLI falls back to;
 it is not handed to new users, who build their own through the walkthrough. Live
