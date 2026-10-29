@@ -5,7 +5,7 @@
  * users care about, scrape each city **once** (through the cache), then rank
  * and filter per person and send them their own version. One crawl, N digests.
  */
-import type { Item, Kind, Query } from './types.ts';
+import type { Item, Query } from './types.ts';
 import { DIGEST_PAGE_TTL_SECONDS, jobOf, lastPageKey, pageKey, type OptIn, type Store } from './db.ts';
 import type { Logger } from './log.ts';
 import { loadConfig } from './config.ts';
@@ -25,7 +25,6 @@ export interface FanoutJob {
   optIn: OptIn;
   /** The window to look at, as local dates. */
   window: { from: string; to: string; label: string };
-  kinds?: Kind[];
   /** Per-user title for the message. */
   title: (user: BotUser, city: string) => string;
   footer?: string;
@@ -36,7 +35,7 @@ export interface FanoutJob {
   newOnly?: boolean;
   /** Also cover each user's watch cities (used by follow alerts). */
   includeWatch?: boolean;
-  /** Restrict sources, e.g. ['websearch'] for places. */
+  /** Restrict sources, e.g. ['websearch'] on its own. */
   sources?: string[];
   maxPages?: number;
   dryRun?: boolean;
@@ -57,8 +56,8 @@ export interface FanoutJob {
    * are covered, and 'mine' people only hear from us when their ranked list
    * did not have to be padded.
    *
-   * Leave it unset for the jobs that are not a digest (follow alerts, place
-   * tips) — they keep their fixed cron time and go to everyone opted in.
+   * Leave it unset for the jobs that are not a digest (follow alerts) — they
+   * keep their fixed cron time and go to everyone opted in.
    * Nothing is lost by that: only what actually went out is recorded as sent,
    * so the next tick picks the same items up.
    */
@@ -98,7 +97,6 @@ export interface FanoutResult {
 export async function fanout(job: FanoutJob): Promise<FanoutResult> {
   const cfg = loadConfig();
   const base = today(cfg.timezone);
-  const kinds = job.kinds ?? ['event'];
   const clock = new Date();
   const now = job.now ?? { hour: Number(localTime(clock, cfg.timezone).slice(0, 2)), weekday: localWeekday(clock, cfg.timezone) };
   const empty = (): FanoutResult => ({
@@ -165,7 +163,6 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
       city,
       from: job.window.from,
       to: job.window.to,
-      kinds,
       sources: job.sources,
       maxPages: job.maxPages,
       fetchText: job.fetchText,
@@ -221,7 +218,6 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
       like: [],
       dislike: [],
       rangeLabel: job.window.label,
-      kinds,
     };
 
     const ranked = rank(collected, { query, prefs: user.prefs, tz: cfg.timezone });
@@ -255,9 +251,8 @@ export async function fanout(job: FanoutJob): Promise<FanoutResult> {
     // for search, and the reason the per-day cap stops applying here: the tail
     // is not a flood any more, it is a stash.
     //
-    // Not every scheduled job wants this. A follow alert is one event and a
-    // place tip is three; neither is something you page through, so they keep
-    // sending as they always did.
+    // Not every scheduled job wants this. A follow alert is one event, which
+    // is not something you page through, so it keeps sending as it always did.
     const title = job.title(user, city);
     const paged = Boolean(job.digest);
     const card = paged ? items.slice(0, cfg.bot.cards_at_once) : items;

@@ -9,7 +9,6 @@ import type { Item, Preferences, Query, SourceResult } from './types.ts';
 import { loadConfig } from './config.ts';
 import { dedupe } from './dedupe.ts';
 import { rank, type Ranked } from './rank.ts';
-import { wantedKind } from './filter.ts';
 import { safeCollect, type Collector, type SourceContext } from './source.ts';
 import type { Logger } from './log.ts';
 
@@ -79,7 +78,7 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
     s.status === 'fulfilled' ? s.value : { source: 'unknown', ok: false, error: String(s.reason), items: [] },
   );
 
-  const collected = results.flatMap((r) => r.items).filter((i) => wantedKind(i, opts.query));
+  const collected = results.flatMap((r) => r.items);
   const all = dedupe(collected, cfg.timezone);
   const ranked = rank(all, {
     query: opts.query,

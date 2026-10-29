@@ -13,12 +13,16 @@
  */
 import { sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
-import { ItemSchema, QuerySchema, type Item } from './types.ts';
+import { ItemSchema, QuerySchema, formatZodError, type Item } from './types.ts';
 import { DB_FILE, ensureDirs, loadEnv } from './paths.ts';
+import { makeLogger } from './log.ts';
 import { fingerprint } from './dedupe.ts';
 import { daysMask } from './schedule.ts';
 import * as sqliteSchema from '../drizzle/schema.sqlite.ts';
 import * as pgSchema from '../drizzle/schema.pg.ts';
+
+/** Reads that quietly drop a row have to say so somewhere. */
+const dbLog = makeLogger('db');
 
 export type Dialect = 'sqlite' | 'postgres';
 type Schema = typeof sqliteSchema | typeof pgSchema;
@@ -114,6 +118,8 @@ async function bootstrap(d: Driver): Promise<void> {
     weekly_digest  integer NOT NULL DEFAULT 1,
     weekend_digest integer NOT NULL DEFAULT 1,
     follow_alerts  integer NOT NULL DEFAULT 1,
+    -- Same as deliveries.kind below: the place-tips job is gone, the column
+    -- stays because there is nothing here to migrate it away with.
     place_tips     integer NOT NULL DEFAULT 1,
     digest_hour    integer NOT NULL DEFAULT 9,
     digest_day     integer NOT NULL DEFAULT 1,
@@ -145,6 +151,9 @@ async function bootstrap(d: Driver): Promise<void> {
   await d.run(sql`CREATE TABLE IF NOT EXISTS ${t.deliveries} (
     chat_id       text NOT NULL,
     item_id       text NOT NULL,
+    -- No longer written or read: it dates from when an item was an event or a
+    -- place. There are no migration files here, so dropping a column would
+    -- mean writing the first one; its default keeps old inserts honest.
     kind          text NOT NULL DEFAULT 'event',
     title         text NOT NULL,
     city          text,
@@ -286,7 +295,6 @@ export const UserRowSchema = z.object({
   weekly_digest: z.coerce.number().int(),
   weekend_digest: z.coerce.number().int(),
   follow_alerts: z.coerce.number().int(),
-  place_tips: z.coerce.number().int(),
   // the personal schedule; defaulted rather than required, so a row that
   // predates these columns still parses and behaves as it always did
   digest_hour: z.coerce.number().int().default(9),
@@ -322,7 +330,7 @@ export interface SendDecision {
   reason: string;
 }
 
-export type OptIn = 'weekly_digest' | 'weekend_digest' | 'follow_alerts' | 'place_tips';
+export type OptIn = 'weekly_digest' | 'weekend_digest' | 'follow_alerts';
 
 /**
 /**
@@ -362,7 +370,7 @@ export const lastPageKey = (chatId: string): string => `lastpage:${chatId}`;
  * This is the axis /stats reports reactions along: a ❤️ on a weekly digest and
  * a ❤️ on a /today answer say different things about the ranking.
  */
-export const JOBS = ['weekly', 'weekend', 'follows', 'places', 'search'] as const;
+export const JOBS = ['weekly', 'weekend', 'follows', 'search'] as const;
 export type Job = (typeof JOBS)[number];
 
 /** The four things a person can do to a card, and the only four we count. */
@@ -371,12 +379,7 @@ export type Gesture = (typeof GESTURES)[number];
 
 /** The job behind one of the scheduled fan-outs. */
 export function jobOf(optIn: OptIn): Job {
-  return (
-    optIn === 'weekly_digest' ? 'weekly'
-    : optIn === 'weekend_digest' ? 'weekend'
-    : optIn === 'follow_alerts' ? 'follows'
-    : 'places'
-  );
+  return optIn === 'weekly_digest' ? 'weekly' : optIn === 'weekend_digest' ? 'weekend' : 'follows';
 }
 
 /** One row of /feedback. */
@@ -421,12 +424,12 @@ export const PendingPageSchema = z.object({
   title: z.string(),
   query: QuerySchema,
   /** Ranked, in order, none of them shown yet. */
-  rest: z.array(ItemSchema),
+  rest: storedItems('page.rest'),
   /**
    * The ones already walked past, oldest first — what "← Назад" steps back
    * into. Defaulted, so a stash parked before the cursor existed still parses.
    */
-  seen: z.array(ItemSchema).default([]),
+  seen: storedItems('page.seen').default([]),
   /** The message the cursor is currently drawn on, when there is one. */
   cardMessageId: z.number().int().optional(),
   /**
@@ -450,17 +453,56 @@ export type PendingPage = z.infer<typeof PendingPageSchema>;
 /** What a caller has to supply; the defaulted fields may be left out. */
 export type PendingPageInput = z.input<typeof PendingPageSchema>;
 
-function itemsFromPayload(payload: unknown): Item[] {
+/**
+ * Stored items that still parse, one by one — the rest are skipped, counted
+ * and logged.
+ *
+ * `saved`, `deliveries` and `messages` hold whole Items as JSON and re-parse
+ * them through zod on every read, so narrowing `ItemSchema` retroactively
+ * invalidates rows that were perfectly good when they were written. Places
+ * are the case this was built for: their categories (`cafe`, `bar`,
+ * `gallery`, `spot`) are no longer in the enum, so every bookmarked café is
+ * now an unparseable row.
+ *
+ * Element by element on purpose. `z.array(ItemSchema)` fails the *whole*
+ * array for one bad member, which would have cost somebody the three events in
+ * a message because a café was sitting next to them. /saved showing four of
+ * five bookmarks beats /saved erroring, and neither beats showing the four.
+ */
+function keepParsable(entries: unknown[], where: string): Item[] {
+  const kept: Item[] = [];
+  let skipped = 0;
+  let why = '';
+  for (const entry of entries) {
+    const parsed = ItemSchema.safeParse(entry);
+    if (parsed.success) kept.push(parsed.data);
+    else {
+      skipped++;
+      if (!why) why = formatZodError(parsed.error, 2);
+    }
+  }
+  if (skipped > 0) {
+    dbLog.warn(`${where}: skipped ${skipped} stored item(s) that no longer parse (${why})`);
+  }
+  return kept;
+}
+
+/** The same, for a zod field: a stored list of items, minus the unreadable. */
+function storedItems(where: string) {
+  return z.array(z.unknown()).transform((list) => keepParsable(list, where));
+}
+
+function itemsFromPayload(payload: unknown, where = 'payload'): Item[] {
   if (typeof payload !== 'string' || !payload) return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(payload);
   } catch {
+    dbLog.warn(`${where}: payload is not JSON — skipped`);
     return [];
   }
-  const result = z.union([ItemSchema, z.array(ItemSchema)]).safeParse(parsed);
-  if (!result.success) return [];
-  return Array.isArray(result.data) ? result.data : [result.data];
+  // one row holds either a single item (deliveries, saved) or a message's list
+  return keepParsable(Array.isArray(parsed) ? parsed : [parsed], where);
 }
 
 export class Store {
@@ -544,8 +586,7 @@ export class Store {
     const column =
       which === 'weekly_digest' ? sql`weekly_digest`
       : which === 'weekend_digest' ? sql`weekend_digest`
-      : which === 'follow_alerts' ? sql`follow_alerts`
-      : sql`place_tips`;
+      : sql`follow_alerts`;
     await this.d.run(sql`UPDATE ${t.users} SET ${column} = ${value}, updated_at = ${ts} WHERE chat_id = ${chatId}`);
   }
 
@@ -586,7 +627,6 @@ export class Store {
       opts.optIn === 'weekly_digest' ? sql` AND weekly_digest = 1`
       : opts.optIn === 'weekend_digest' ? sql` AND weekend_digest = 1`
       : opts.optIn === 'follow_alerts' ? sql` AND follow_alerts = 1`
-      : opts.optIn === 'place_tips' ? sql` AND place_tips = 1`
       : sql``;
     const city = opts.city ? sql` AND city = ${opts.city}` : sql``;
     const rows = await this.d.all(
@@ -616,7 +656,7 @@ export class Store {
     if (!row) return { send: true, reason: 'new' };
     if (row['fingerprint'] === fingerprint(item)) return { send: false, reason: 'already sent' };
 
-    const prev = itemsFromPayload(row['payload'])[0];
+    const prev = itemsFromPayload(row['payload'], 'deliveries')[0];
     const prevStart = typeof row['starts_at'] === 'string' ? row['starts_at'] : undefined;
     if (item.startsAt && prevStart && item.startsAt.slice(0, 16) !== prevStart.slice(0, 16)) {
       return { send: true, reason: 'new date' };
@@ -658,8 +698,8 @@ export class Store {
       );
       if (already.length === 0) await this.bump(`sent.${job}`);
       await this.d.run(sql`
-        INSERT INTO ${t.deliveries} (chat_id, item_id, kind, title, city, starts_at, url, fingerprint, first_sent_at, last_sent_at, send_count, payload)
-        VALUES (${chatId}, ${i.id}, ${i.kind}, ${i.title}, ${i.city}, ${i.startsAt ?? null}, ${i.url}, ${fingerprint(i)}, ${ts}, ${ts}, 1, ${JSON.stringify(i)})
+        INSERT INTO ${t.deliveries} (chat_id, item_id, title, city, starts_at, url, fingerprint, first_sent_at, last_sent_at, send_count, payload)
+        VALUES (${chatId}, ${i.id}, ${i.title}, ${i.city}, ${i.startsAt ?? null}, ${i.url}, ${fingerprint(i)}, ${ts}, ${ts}, 1, ${JSON.stringify(i)})
         ON CONFLICT (chat_id, item_id) DO UPDATE SET
           fingerprint  = ${fingerprint(i)},
           last_sent_at = ${ts},
@@ -712,7 +752,7 @@ export class Store {
     const rows = await this.d.all(
       sql`SELECT payload FROM ${this.d.schema.messages} WHERE chat_id = ${chatId} AND message_id = ${messageId}`,
     );
-    return itemsFromPayload(rows[0]?.['payload']);
+    return itemsFromPayload(rows[0]?.['payload'], 'messages');
   }
 
   /** The most recent message we sent this chat that carried items. */
@@ -720,7 +760,7 @@ export class Store {
     const rows = await this.d.all(
       sql`SELECT payload FROM ${this.d.schema.messages} WHERE chat_id = ${chatId} ORDER BY sent_at DESC LIMIT 1`,
     );
-    return itemsFromPayload(rows[0]?.['payload']);
+    return itemsFromPayload(rows[0]?.['payload'], 'messages');
   }
 
   /* ------------------------------------------------------------ reminders --- */
@@ -851,7 +891,7 @@ export class Store {
     const rows = await this.d.all(
       sql`SELECT payload FROM ${this.d.schema.saved} WHERE chat_id = ${chatId} ORDER BY starts_at IS NULL, starts_at, created_at`,
     );
-    return rows.flatMap((r) => itemsFromPayload(r['payload']));
+    return rows.flatMap((r) => itemsFromPayload(r['payload'], 'saved'));
   }
 
   /* --------------------------------------------------------- taste ledger --- */
@@ -886,8 +926,18 @@ export class Store {
     if (!row) return null;
     const expires = typeof row['expires_at'] === 'string' ? Date.parse(row['expires_at']) : 0;
     if (!expires || expires <= Date.now()) return null;
-    const parsed = z.array(ItemSchema).safeParse(JSON.parse(String(row['payload'] ?? '[]')));
-    return parsed.success ? parsed.data : null;
+    // An unreadable payload is a miss, not a warm empty city: returning []
+    // here would pin "nothing on in Kharkiv" in place for the whole TTL.
+    // A *readable* payload with an unparseable item in it is served without
+    // that item — the cache refills in half an hour either way.
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(String(row['payload'] ?? ''));
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(parsed)) return null;
+    return keepParsable(parsed, 'scrape_cache');
   }
 
   async putCache(key: string, items: Item[], ttlSeconds: number): Promise<void> {

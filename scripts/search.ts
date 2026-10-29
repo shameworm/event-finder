@@ -13,7 +13,6 @@
  *   --like / --dislike   extra taste tags, comma-separated
  *   --max-price N        budget for this run
  *   --top N              keep only the N best items overall
- *   --kind place|event   search places instead of events (default: events)
  *   --only / --skip      restrict sources, e.g. --only concert.ua,karabas
  *   --pages N            pages per source/category
  *   --new-only           hide anything already sent to --chat (unless date/price/status changed)
@@ -23,7 +22,7 @@
  *   --explain            show the ranking reasons
  *   --include-disliked / --include-expensive   do not filter those out
  */
-import type { Item, Kind } from '../src/types.ts';
+import type { Item } from '../src/types.ts';
 import { loadConfig, loadPrefs } from '../src/config.ts';
 import { makeLogger } from '../src/log.ts';
 import { parseArgs } from '../src/cli.ts';
@@ -39,10 +38,6 @@ const log = makeLogger('search');
 const cfg = loadConfig();
 const prefs = loadPrefs((m) => log.warn(m));
 
-const kinds: Kind[] | undefined = args.get('kind')
-  ? (args.get('kind') === 'place' ? ['place'] : ['event'])
-  : undefined;
-
 const query = parseRequest(args.text(), {
   prefs,
   city: args.get('city') ?? args.get('cities'),
@@ -51,7 +46,6 @@ const query = parseRequest(args.text(), {
   like: args.list('like'),
   dislike: args.list('dislike'),
   maxPrice: args.num('max-price'),
-  kinds,
 });
 
 log.info(
@@ -90,7 +84,7 @@ await withStore(async (store) => {
   }
 
   // the header already names the cities; --send puts this in front of a real person
-  const title = query.kinds.includes('place') ? '📍 Варто зайти' : '🗓 Що знайшлося';
+  const title = '🗓 Що знайшлося';
 
   if (args.has('send')) {
     if (!chatId) {

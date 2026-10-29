@@ -1,14 +1,22 @@
-import type { Category, Item, Kind, Status } from './types.ts';
+import type { Category, Item, Status } from './types.ts';
 import { ItemSchema, formatZodError } from './types.ts';
 import { SchemaEventSchema, type SchemaEvent } from './schemas.ts';
 import { categoryFromSchemaType, classify } from './categories.ts';
 import { localDate, sha1, titleKey, truncate } from './util.ts';
 import { loadConfig } from './config.ts';
 
-/** Stable id, so the same show from three sources collapses into one row. */
-export function itemId(kind: Kind, title: string, city: string, startsAt?: string, tz = loadConfig().timezone): string {
+/**
+ * Stable id, so the same show from three sources collapses into one row.
+ *
+ * The literal 'event' is the first thing hashed because it always was: ids
+ * used to be keyed by an item's kind, and every id already in `deliveries`,
+ * `saved` and `reminders` was hashed with it. Dropping it from the hash would
+ * change every id there is and re-send everybody everything they have already
+ * seen, which is a far worse outcome than one constant nobody reads.
+ */
+export function itemId(title: string, city: string, startsAt?: string, tz = loadConfig().timezone): string {
   const day = startsAt ? localDate(startsAt, tz) : '';
-  return sha1(kind, titleKey(title), city, day);
+  return sha1('event', titleKey(title), city, day);
 }
 
 /** schema.org availability / eventStatus -> our status. */
@@ -122,8 +130,7 @@ function buildFromSchemaEvent(ev: SchemaEvent, opts: NormalizeOpts): Item | null
 
   return validate(
     {
-      id: itemId('event', ev.name, opts.city, ev.startDate),
-      kind: 'event',
+      id: itemId(ev.name, opts.city, ev.startDate),
       title: truncate(ev.name, 160),
       category,
       city: opts.city,
@@ -148,21 +155,16 @@ function buildFromSchemaEvent(ev: SchemaEvent, opts: NormalizeOpts): Item | null
   );
 }
 
-/** Build an Item from loose fields (Telegram posts, web results, places). */
+/** Build an Item from loose fields (Telegram posts, web results). */
 export function makeItem(
-  fields: Partial<Item> & { title: string; url: string; city: string; source: string; kind?: Kind },
+  fields: Partial<Item> & { title: string; url: string; city: string; source: string },
   opts: { onReject?: (reason: string) => void } = {},
 ): Item | null {
-  const kind = fields.kind ?? 'event';
-  const category =
-    fields.category ??
-    classify(`${fields.title} ${fields.description ?? ''}`) ??
-    (kind === 'place' ? 'spot' : 'other');
+  const category = fields.category ?? classify(`${fields.title} ${fields.description ?? ''}`) ?? 'other';
   return validate(
     {
       ...fields,
-      id: fields.id ?? itemId(kind, fields.title, fields.city, fields.startsAt),
-      kind,
+      id: fields.id ?? itemId(fields.title, fields.city, fields.startsAt),
       title: truncate(fields.title, 160),
       category,
       currency: fields.currency ?? 'UAH',

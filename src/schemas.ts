@@ -8,7 +8,7 @@
  * hard failure for that one item, which the caller skips.
  */
 import { z } from 'zod';
-import { CategorySchema, KindSchema, StatusSchema } from './types.ts';
+import { CategorySchema, StatusSchema } from './types.ts';
 
 /* ------------------------------------------------------------ config.yaml --- */
 
@@ -41,7 +41,6 @@ export const CityConfigSchema = z.strictObject({
   karabas: KarabasCitySchema.optional(),
   kontramarka: KontramarkaCitySchema.optional(),
   telegram_channels: z.array(z.string()).default([]),
-  place_queries: z.array(z.string()).default([]),
 });
 
 export const ConfigSchema = z.strictObject({
@@ -70,7 +69,6 @@ export const ConfigSchema = z.strictObject({
       max_items_per_day: z.number().int().nonnegative().default(8),
       week_top: z.number().int().positive().default(15),
       weekend_top: z.number().int().positive().default(5),
-      places_top: z.number().int().positive().default(3),
     })
     .prefault({}),
   bot: z
@@ -276,7 +274,6 @@ export const WebResultSchema = z.object({
   snippet: z.string().optional(),
   description: z.string().optional(),
   city: z.string().optional(),
-  kind: KindSchema.optional(),
   category: CategorySchema.optional(),
   venue: z.string().optional(),
   address: z.string().optional(),
@@ -293,7 +290,6 @@ export const WebIngestSchema = z.union([
   z.array(WebResultSchema),
   z.object({
     city: z.string().optional(),
-    kind: KindSchema.optional(),
     results: z.array(WebResultSchema),
   }),
 ]);

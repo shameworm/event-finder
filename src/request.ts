@@ -1,7 +1,7 @@
-import type { Kind, Preferences, Query } from './types.ts';
-import { EVENT_CATEGORIES, KEYWORDS, PLACE_CATEGORIES, TAG_SYNONYMS } from './categories.ts';
+import type { Preferences, Query } from './types.ts';
+import { EVENT_CATEGORIES, KEYWORDS, TAG_SYNONYMS } from './categories.ts';
 import { loadConfig, resolveCity } from './config.ts';
-import { WORD_START, addDays, hasWord, monthFromWord, nextOccurrence, normText, pad2, parseBudget, today, weekdayOf } from './util.ts';
+import { addDays, hasWord, monthFromWord, nextOccurrence, normText, pad2, parseBudget, today, weekdayOf } from './util.ts';
 
 /* ------------------------------------------------------------- date ranges --- */
 
@@ -144,7 +144,7 @@ interface VocabEntry { term: string; canonical: string }
 
 function buildVocab(): VocabEntry[] {
   const v: VocabEntry[] = [];
-  for (const cat of [...EVENT_CATEGORIES, ...PLACE_CATEGORIES]) {
+  for (const cat of EVENT_CATEGORIES) {
     v.push({ term: normText(cat), canonical: cat });
     for (const kw of KEYWORDS[cat]) v.push({ term: normText(kw), canonical: cat });
   }
@@ -191,7 +191,6 @@ export interface ParseOptions {
   like?: string[];
   dislike?: string[];
   maxPrice?: number;
-  kinds?: Kind[];
 }
 
 /**
@@ -250,19 +249,6 @@ export function parseRequest(text: string, opts: ParseOptions = {}): Query {
   // bare "до 20:00" used to cap the search at 20 ₴ and hide everything
   const maxPrice = opts.maxPrice ?? parseBudget(text);
 
-  // --- kinds
-  let kinds: Kind[] = opts.kinds ?? ['event'];
-  if (!opts.kinds) {
-    // these are prefixes ("місц" matches "місця"), so only the left boundary
-    const wantsPlaces = new RegExp(
-      `${WORD_START}(place|places|cafe|café|bar|gallery|spot|місц|кафе|бар|галере|локац|заклад)`,
-      'iu',
-    ).test(normText(text));
-    const onlyPlaces = new RegExp(`${WORD_START}(only places|тільки місця|лише місця)`, 'iu').test(normText(text));
-    if (onlyPlaces) kinds = ['place'];
-    else if (wantsPlaces) kinds = ['event', 'place'];
-  }
-
   return {
     cities,
     from: range.from,
@@ -272,6 +258,5 @@ export function parseRequest(text: string, opts: ParseOptions = {}): Query {
     dislike: [...dislike],
     maxPrice,
     text: text || undefined,
-    kinds,
   };
 }

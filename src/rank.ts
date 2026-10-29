@@ -1,5 +1,5 @@
 import type { Item, Preferences, Query } from './types.ts';
-import { PLACE_CATEGORIES, categoryKeyOf, containsTerm, expandTag } from './categories.ts';
+import { categoryKeyOf, containsTerm, expandTag } from './categories.ts';
 import { localDate, normText, stemText } from './util.ts';
 import { loadConfig } from './config.ts';
 
@@ -101,19 +101,9 @@ export function rank(items: Item[], opts: RankOptions): Ranked {
    * What counts as "their thing" for this search. An explicit request wins
    * over the stored profile: someone who asks for stand-up wants stand-up, not
    * everything they have ever liked.
-   *
-   * Tags for the wrong kind of thing are left out, or /places would filter a
-   * concert-lover's café suggestions down to nothing and then pad them all
-   * back with an apology. Free-text tags ("speciality coffee") fit both.
    */
-  const placesOnly = query.kinds.includes('place') && !query.kinds.includes('event');
-  const forThisKind = (tag: string) => {
-    const cat = categoryKeyOf(tag);
-    return !cat || PLACE_CATEGORIES.includes(cat) === placesOnly;
-  };
-  const asked = (
-    query.like.length > 0 ? query.like : [...prefs.favourite_categories, ...(prefs.genres ?? [])]
-  ).filter(forThisKind);
+  const asked =
+    query.like.length > 0 ? query.like : [...prefs.favourite_categories, ...(prefs.genres ?? [])];
   const filtering = !opts.keepOffTaste && asked.length > 0;
 
   const kept: { item: Item; onTaste: boolean }[] = [];

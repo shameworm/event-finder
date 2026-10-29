@@ -309,10 +309,8 @@ export function applyThumbsDown(current: Preferences, opts: { tag: string; act?:
   if (demoted) {
     const fromFav = drop(prefs.favourite_categories, tag);
     const fromGenres = drop(prefs.genres, tag);
-    const fromPlaces = drop(prefs.place_likes, tag);
     if (fromFav) changes.push(`улюблене − ${tagLabel(tag)}`);
     if (fromGenres) changes.push(`жанири − ${tagLabel(tag)}`);
-    if (fromPlaces) changes.push(`місця − ${tagLabel(tag)}`);
     if (add(prefs.disliked_categories, tag)) changes.push(`небажане + ${tagLabel(tag)}`);
   } else {
     changes.push(`${tagLabel(tag)} важить менше (${score})`);
@@ -326,7 +324,7 @@ const money = (currency: string): string => (currency === 'UAH' ? '₴' : curren
 
 /** One-screen summary of the current preferences, for the bot and the CLI. */
 export function describePrefs(prefs: Preferences): string {
-  // four lists, four lines: "what does the bot think I like" should be answerable
+  // one line per list: "what does the bot think I like" should be answerable
   // without knowing which schema field holds which half of the answer
   const lines = [
     `домашнє місто: ${cityLabel(prefs.home_city)}`,
@@ -334,7 +332,6 @@ export function describePrefs(prefs: Preferences): string {
     `улюблені категорії: ${prefs.favourite_categories.map(tagLabel).join(', ') || '—'}`,
     `жанири: ${prefs.genres.map(tagLabel).join(', ') || '—'}`,
     `небажане: ${prefs.disliked_categories.map(tagLabel).join(', ') || '—'}`,
-    `місця: ${prefs.place_likes.map(tagLabel).join(', ') || '—'}`,
     `стежу за: ${prefs.follow.join(', ') || '—'}`,
     `не показую: ${(prefs.blocked_acts ?? []).join(', ') || '—'}`,
     `максимум за квиток: ${prefs.max_ticket_price ? `${prefs.max_ticket_price} ${money(prefs.currency)}` : 'без обмежень'}`,

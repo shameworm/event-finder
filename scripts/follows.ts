@@ -60,7 +60,6 @@ await withStore(async (store) => {
       .filter(([, follow]) => follow.length > 0)
       .map(([city, follow]) => ({
         city,
-        kind: 'event' as const,
         queries: follow.map((name) => followQuery(name, city)),
       }));
     process.stdout.write(JSON.stringify(out, null, 2) + '\n');
