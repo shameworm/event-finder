@@ -492,6 +492,28 @@ function storedItems(where: string) {
   return z.array(z.unknown()).transform((list) => keepParsable(list, where));
 }
 
+/** What `Store.sweepUnreadable` found (or removed). */
+export interface SweepReport {
+  /** Bookmarks whose item cannot be read any more. */
+  saved: number;
+  /** Already-sent rows whose item cannot be read any more. */
+  deliveries: number;
+  /** Messages with nothing readable left at all. */
+  messages: number;
+  /** Messages that lost some items but kept the rest. */
+  messagesTrimmed: number;
+}
+
+/** Does this row's payload hold exactly one item we can still read? */
+function readable(payload: unknown): boolean {
+  if (typeof payload !== 'string' || !payload) return false;
+  try {
+    return ItemSchema.safeParse(JSON.parse(payload)).success;
+  } catch {
+    return false;
+  }
+}
+
 function itemsFromPayload(payload: unknown, where = 'payload'): Item[] {
   if (typeof payload !== 'string' || !payload) return [];
   let parsed: unknown;
@@ -1029,6 +1051,81 @@ export class Store {
     await this.d.run(
       sql`DELETE FROM ${t.usage} WHERE bucket < ${new Date(Date.now() - RETENTION.usageHours * 3_600_000).toISOString().slice(0, 13)}`,
     );
+  }
+
+  /* ------------------------------------------------------------- one-offs --- */
+
+  /**
+   * Find — and optionally remove — the stored items that no longer parse.
+   *
+   * `saved`, `deliveries` and `messages` hold whole Items as JSON, so a
+   * narrowed `ItemSchema` leaves rows behind that cannot be read any more.
+   * Every read already skips them (see `keepParsable`), which is enough for
+   * correctness; this is the tidying up, because `scrape_cache` self-heals in
+   * half an hour and a bookmark never does.
+   *
+   * `messages` is rewritten rather than deleted when only *some* of its items
+   * are unreadable: the row is a whole message, and the events next to the
+   * unreadable one are still what the ❤️ on it resolves against. A row with
+   * nothing readable left goes.
+   *
+   * Driven by scripts/unplace.ts.
+   */
+  async sweepUnreadable(opts: { write?: boolean } = {}): Promise<SweepReport> {
+    const t = this.d.schema;
+    const report: SweepReport = { saved: 0, deliveries: 0, messages: 0, messagesTrimmed: 0 };
+
+    // one item per row: unreadable means the row has nothing left to say
+    for (const [table, key] of [
+      [t.saved, 'saved'],
+      [t.deliveries, 'deliveries'],
+    ] as const) {
+      const rows = await this.d.all(sql`SELECT chat_id, item_id, payload FROM ${table}`);
+      for (const row of rows) {
+        if (readable(row['payload'])) continue;
+        report[key]++;
+        if (!opts.write) continue;
+        await this.d.run(
+          sql`DELETE FROM ${table} WHERE chat_id = ${String(row['chat_id'])} AND item_id = ${String(row['item_id'])}`,
+        );
+      }
+    }
+
+    const rows = await this.d.all(sql`SELECT chat_id, message_id, payload FROM ${t.messages}`);
+    for (const row of rows) {
+      const raw = row['payload'];
+      if (typeof raw !== 'string' || !raw) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = null;
+      }
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      const kept = list.filter((entry) => ItemSchema.safeParse(entry).success);
+      if (kept.length === list.length) continue;
+
+      const chatId = String(row['chat_id']);
+      const messageId = Number(row['message_id']);
+      if (kept.length === 0) {
+        report.messages++;
+        if (opts.write) {
+          await this.d.run(
+            sql`DELETE FROM ${t.messages} WHERE chat_id = ${chatId} AND message_id = ${messageId}`,
+          );
+        }
+        continue;
+      }
+      report.messagesTrimmed++;
+      if (opts.write) {
+        await this.d.run(sql`
+          UPDATE ${t.messages} SET payload = ${JSON.stringify(kept)}, item_id = ${(kept[0] as Item).id}
+          WHERE chat_id = ${chatId} AND message_id = ${messageId}
+        `);
+      }
+    }
+
+    return report;
   }
 
   /* -------------------------------------------------------- rate limiting --- */
