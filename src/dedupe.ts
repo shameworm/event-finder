@@ -66,7 +66,7 @@ function merge(a: Item, b: Item): Item {
 
 /**
  * Collapse the same event seen on several sources.
- *  pass 1 — exact id (kind + title signature + city + local day)
+ *  pass 1 — exact id (title signature + city + local day)
  *  pass 2 — same city/day, fuzzy title overlap (handles "Jerry Heil" vs "Jerry Heil. Jerelo")
  */
 export function dedupe(items: Item[], tz = loadConfig().timezone): Item[] {
@@ -79,7 +79,7 @@ export function dedupe(items: Item[], tz = loadConfig().timezone): Item[] {
   const buckets = new Map<string, Item[]>();
   for (const it of byId.values()) {
     const day = it.startsAt ? localDate(it.startsAt, tz) : 'noday';
-    const key = `${it.kind}|${it.city}|${day}`;
+    const key = `${it.city}|${day}`;
     const list = buckets.get(key);
     if (list) list.push(it);
     else buckets.set(key, [it]);

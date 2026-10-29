@@ -2,7 +2,7 @@
   "name": "events-finder",
   "version": "1.0.0",
   "private": true,
-  "description": "Hermes Agent skill + Telegram bot: finds events and places in Ukrainian cities for any number of users, sends personalised digests, alerts and reminders.",
+  "description": "Hermes Agent skill + Telegram bot: finds events in Ukrainian cities for any number of users, sends personalised digests, alerts and reminders.",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -13,7 +13,6 @@
     "search": "tsx scripts/search.ts",
     "digest": "tsx scripts/digest.ts",
     "follows": "tsx scripts/follows.ts",
-    "places": "tsx scripts/places.ts",
     "reminders": "tsx scripts/reminders.ts",
     "prefs": "tsx scripts/prefs.ts",
     "tg-login": "tsx scripts/tg-login.ts",

@@ -5,19 +5,20 @@
  * Hermes has no HTTP search API of its own, so this source works as a two-step
  * hand-off, which also keeps it free of extra API keys:
  *
- *   1) ask for the queries           npx tsx scripts/websearch.ts --queries --city kharkiv --kind place
+ *   1) ask for the queries           npx tsx scripts/websearch.ts --queries --city kharkiv
  *   2) run them with web_search      (the agent does this)
  *   3) hand the results back         npx tsx scripts/websearch.ts --ingest results.json
  *      (or pipe them:  cat results.json | npx tsx scripts/websearch.ts --ingest -)
  *   4) read what was ingested        npx tsx scripts/websearch.ts --city kharkiv
  *
  * Ingested results are cached in ~/.hermes/data/events-finder/websearch-inbox.json
- * and picked up automatically by scripts/search.ts, digests and place suggestions.
+ * and picked up automatically by scripts/search.ts, the digests and the
+ * follow-alert pass (see scripts/follows.ts, which runs the same cycle).
  * Entries older than --ttl days (default 7) are ignored.
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
-import type { Item, Kind, SourceResult } from '../src/types.ts';
+import type { Item, SourceResult } from '../src/types.ts';
 import { ItemSchema, formatZodError } from '../src/types.ts';
 import { WebIngestSchema, type WebResult } from '../src/schemas.ts';
 import { cityLocalName, loadConfig, loadPrefs, resolveCity } from '../src/config.ts';
@@ -81,23 +82,14 @@ export function followQuery(name: string, city: string): string {
  */
 export function buildQueries(
   city: string,
-  kind: Kind,
-  opts: { from: string; to: string; like: string[]; genres: string[]; placeLikes: string[]; follow?: string[] },
+  opts: { from: string; to: string; like: string[]; genres: string[]; follow?: string[] },
 ): string[] {
-  const cfg = loadConfig();
   // Ukrainian listings are in Ukrainian, so search in Ukrainian
   const name = cityLocalName(city);
-  const cityCfg = cfg.cities[city];
   const year = opts.from.slice(0, 4);
   const uk = (date: string) =>
     new Intl.DateTimeFormat('uk-UA', { day: 'numeric', month: 'long', timeZone: 'UTC' }).format(new Date(`${date}T12:00:00Z`));
   const when = opts.from === opts.to ? uk(opts.from) : `${uk(opts.from)} - ${uk(opts.to)}`;
-
-  if (kind === 'place') {
-    const configured = cityCfg?.place_queries ?? [];
-    const fromPlaceLikes = opts.placeLikes.slice(0, 3).map((i) => `${i} ${name} ${year}`);
-    return [...new Set([...configured, ...fromPlaceLikes, `нові заклади ${name} ${year} відкриття`])].slice(0, 8);
-  }
 
   const followed = (opts.follow ?? []).slice(0, 4).map((who) => followQuery(who, city));
   const tastes = [...new Set([...opts.like, ...opts.genres])].slice(0, 4);
@@ -116,16 +108,15 @@ export function buildQueries(
 /* --------------------------------------------------------------- ingest --- */
 
 /** One web result -> Item, using the post parsers for dates and prices. */
-export function resultToItem(result: WebResult, opts: { city: string; kind: Kind; base: string; tz: string }): Item | null {
+export function resultToItem(result: WebResult, opts: { city: string; base: string; tz: string }): Item | null {
   const text = [result.title, result.snippet, result.description, result.date].filter(Boolean).join('\n');
-  const kind = result.kind ?? opts.kind;
 
   let startsAt = result.startsAt;
-  if (!startsAt && kind === 'event') {
+  if (!startsAt) {
     const date = findDate(result.date ?? text, opts.base);
     if (date) startsAt = isoInZone(date, findTime(result.date ?? text) ?? '00:00', opts.tz);
   }
-  if (kind === 'event' && !startsAt) return null; // an event with no date is not actionable
+  if (!startsAt) return null; // an event with no date is not actionable
 
   const price = parsePriceText(result.price ?? text);
   return makeItem({
@@ -133,8 +124,7 @@ export function resultToItem(result: WebResult, opts: { city: string; kind: Kind
     url: result.url,
     city: result.city ? resolveCity(result.city) ?? opts.city : opts.city,
     source: SOURCE,
-    kind,
-    category: result.category ?? classify(text) ?? (kind === 'place' ? 'spot' : undefined),
+    category: result.category ?? classify(text) ?? undefined,
     venue: result.venue,
     address: result.address,
     image: result.image,
@@ -148,7 +138,7 @@ export function resultToItem(result: WebResult, opts: { city: string; kind: Kind
   });
 }
 
-function ingest(raw: string, fallback: { city: string; kind: Kind }, log = makeLogger(SOURCE)): number {
+function ingest(raw: string, fallback: { city: string }, log = makeLogger(SOURCE)): number {
   const cfg = loadConfig();
   let json: unknown;
   try {
@@ -163,14 +153,13 @@ function ingest(raw: string, fallback: { city: string; kind: Kind }, log = makeL
   const payload = parsed.data;
   const results = Array.isArray(payload) ? payload : payload.results;
   const city = (!Array.isArray(payload) && payload.city ? resolveCity(payload.city) : null) ?? fallback.city;
-  const kind = (!Array.isArray(payload) ? payload.kind : undefined) ?? fallback.kind;
 
   const inbox = readInbox(log);
   const base = today(cfg.timezone);
   const now = new Date().toISOString();
   let added = 0;
   for (const result of results) {
-    const item = resultToItem(result, { city, kind, base, tz: cfg.timezone });
+    const item = resultToItem(result, { city, base, tz: cfg.timezone });
     if (!item) {
       log.debug(`skipped "${result.title}" — no usable date`);
       continue;
@@ -181,7 +170,7 @@ function ingest(raw: string, fallback: { city: string; kind: Kind }, log = makeL
     added++;
   }
   writeInbox(inbox);
-  log.info(`ingested ${added}/${results.length} results for ${city} (${kind})`);
+  log.info(`ingested ${added}/${results.length} results for ${city}`);
   return added;
 }
 
@@ -211,7 +200,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const cfg = loadConfig();
   const log = makeLogger(SOURCE);
   const prefs = loadPrefs((m) => log.warn(m));
-  const kind: Kind = args.get('kind') === 'place' ? 'place' : 'event';
 
   if (args.has('queries')) {
     const query = parseRequest(args.text(), {
@@ -219,17 +207,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       city: args.get('city'),
       from: args.get('from'),
       to: args.get('to'),
-      kinds: [kind],
     });
     const out = query.cities.map((city) => ({
       city,
-      kind,
-      queries: buildQueries(city, kind, {
+      queries: buildQueries(city, {
         from: query.from,
         to: query.to,
         like: query.like,
         genres: prefs.genres,
-        placeLikes: prefs.place_likes,
         follow: prefs.follow,
       }),
     }));
@@ -238,7 +223,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const file = args.get('ingest');
     const raw = !file || file === '-' ? readFileSync(0, 'utf8') : readFileSync(file, 'utf8');
     const city = resolveCity(args.get('city') ?? prefs.home_city) ?? cfg.default_city;
-    const added = ingest(raw, { city, kind }, log);
+    const added = ingest(raw, { city }, log);
     process.stdout.write(`ingested ${added} result(s) into ${WEBSEARCH_INBOX}\n`);
   } else if (args.has('clear')) {
     writeInbox({ updatedAt: new Date().toISOString(), entries: [] });

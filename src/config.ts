@@ -116,7 +116,6 @@ export function savePrefs(prefs: Preferences): void {
       currency: validated.currency,
       trip: validated.trip,
       genres: validated.genres,
-      place_likes: validated.place_likes,
       // the ❤️ tallies: learned slowly, and lost silently if left out here
       taste: validated.taste,
       notes: validated.notes,

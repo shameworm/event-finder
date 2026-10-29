@@ -172,7 +172,7 @@ const SCRIPT: Record<string, string> = {
  */
 export function nextStep(source: string, city = '<city>'): string {
   if (source === WEBSEARCH) {
-    return 'npx tsx scripts/places.ts --queries, run the searches, then npx tsx scripts/websearch.ts --ingest';
+    return 'npx tsx scripts/websearch.ts --queries, run the searches, then npx tsx scripts/websearch.ts --ingest';
   }
   if (source === TELEGRAM) return 'npx tsx scripts/tg-login.ts';
   const script = SCRIPT[source];
@@ -185,8 +185,8 @@ function deadMessage(source: string, outcome: TickOutcome, after: SourceHealth, 
     ? `Last returned items: ${after.lastItemsAt} (${after.lastItemsCount}).`
     : 'It has never returned an item.';
 
-  // websearch is fed by a manual hand-off, not by a crawl: places.ts --queries
-  // → somebody runs the searches → websearch.ts --ingest. Nothing is broken
+  // websearch is fed by a manual hand-off, not by a crawl: websearch.ts
+  // --queries → somebody runs the searches → --ingest. Nothing is broken
   // when it is empty; the inbox is just stale, and "fix the parser" would send
   // the operator looking in the wrong place entirely.
   if (source === WEBSEARCH) {

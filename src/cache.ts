@@ -5,7 +5,7 @@
  * would mean a hundred crawls of Concert.ua. Cached entries hold *unranked*
  * items — ranking and filtering are per user and happen afterwards.
  */
-import type { Item, Kind, Query } from './types.ts';
+import type { Item, Query } from './types.ts';
 import { PreferencesSchema } from './types.ts';
 import { loadConfig } from './config.ts';
 import { sha1 } from './util.ts';
@@ -20,7 +20,6 @@ export interface CityWindow {
   city: string;
   from: string;
   to: string;
-  kinds: Kind[];
 }
 
 /**
@@ -29,7 +28,7 @@ export interface CityWindow {
  * one entry let a quick question thin out that city's digest for the whole TTL.
  */
 export function cacheKey(w: CityWindow, sources: string[], depth: number): string {
-  return sha1('v1', w.city, w.from, w.to, w.kinds.join(','), [...sources].sort().join(','), String(depth));
+  return sha1('v2', w.city, w.from, w.to, [...sources].sort().join(','), String(depth));
 }
 
 export interface CollectOptions extends CityWindow {
@@ -108,7 +107,6 @@ async function scrapeCity(
     like: [],
     dislike: [],
     rangeLabel: `${opts.from}..${opts.to}`,
-    kinds: opts.kinds,
   };
 
   const result = await runPipeline({

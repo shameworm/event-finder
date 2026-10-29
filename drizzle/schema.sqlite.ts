@@ -23,6 +23,11 @@ export const users = sqliteTable(
     weeklyDigest: integer('weekly_digest').notNull().default(1),
     weekendDigest: integer('weekend_digest').notNull().default(1),
     followAlerts: integer('follow_alerts').notNull().default(1),
+    /**
+     * Dead: the weekly place-tip job is gone. There are no migration files in
+     * this project, so the column stays rather than becoming the first one;
+     * nothing reads it.
+     */
     placeTips: integer('place_tips').notNull().default(1),
     /**
      * Personal schedule. Additive with defaults that reproduce the old
@@ -56,6 +61,11 @@ export const deliveries = sqliteTable(
   {
     chatId: text('chat_id').notNull(),
     itemId: text('item_id').notNull(),
+    /**
+     * Dead: an item used to be an event or a place. Left for the same reason
+     * as users.place_tips — nothing reads it, and its default keeps any
+     * hand-written insert honest.
+     */
     kind: text('kind').notNull().default('event'),
     title: text('title').notNull(),
     city: text('city'),

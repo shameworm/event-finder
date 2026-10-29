@@ -33,14 +33,11 @@ export const countEventsAcc = (n: number): string => `${n} ${plural(n, ['под�
 /** "1 подія чекає", "2 події чекають" — the verb agrees with the count too. */
 export const eventsWaiting = (n: number): string =>
   `${countEvents(n)} ${plural(n, ['чекає', 'чекають', 'чекають'])}`;
-export const countPlaces = (n: number): string => `${n} ${plural(n, ['місце', 'місця', 'місць'])}`;
-
 export const countReminders = (n: number): string => `${n} ${plural(n, ['нагадування', 'нагадування', 'нагадувань'])}`;
 
 export const REMINDER_HINT = 'Тисни ⏰ під подією або ❤️ на ній — нагадаю за день і за 3 години до початку.';
 export const NO_REMINDERS = 'Нагадувань поки немає. Тисни ⏰ під подією або ❤️ на ній — і я поставлю.';
 export const CANCEL_HINT = 'Тисни ⏰ під подією ще раз або знімеш ❤️ — скасую нагадування.';
-export const PLACES_HINT = 'Скажи, як тобі — і я підлаштую підказки.';
 export const NOTHING_FOUND = 'Цього разу нічого не знайшлося. Спробуй ширший період або інше місто.';
 
 /**
@@ -106,7 +103,7 @@ export interface RenderItemOptions {
   compact?: boolean;
 }
 
-/** One event/place line: emoji, title, venue, time, price, description, link. */
+/** One event line: emoji, title, venue, time, price, description, link. */
 export function renderItem(item: Item, opts: RenderItemOptions = {}): string {
   const cfg = loadConfig();
   const format = opts.format ?? 'html';
@@ -121,9 +118,7 @@ export function renderItem(item: Item, opts: RenderItemOptions = {}): string {
     ? [day, timeKnown ? localTime(item.startsAt, tz) : 'час уточнюється'].filter(Boolean).join(' ')
     : 'дата уточнюється';
 
-  const facts = (item.kind === 'place'
-    ? [item.address, item.venue]
-    : [when, item.venue, priceText(item)])
+  const facts = [when, item.venue, priceText(item)]
     .filter((x): x is string => Boolean(x && x.trim()))
     .map((x) => plain(x, format))
     .join(' · ');
@@ -135,7 +130,7 @@ export function renderItem(item: Item, opts: RenderItemOptions = {}): string {
   ];
   if (item.description && !opts.compact) lines.push(plain(truncate(item.description, 140), format));
   // "квитки" is a promise; a free event or one with no price has none to make
-  const buyable = item.kind === 'event' && !item.free && (item.priceMin !== undefined || item.priceMax !== undefined);
+  const buyable = !item.free && (item.priceMin !== undefined || item.priceMax !== undefined);
   lines.push(link(buyable ? 'квитки →' : 'детальніше →', item.url, format));
   if (opts.explain && !opts.compact && item.reasons?.length) {
     lines.push(plain(`· ${item.reasons.slice(0, 4).join(', ')} (бали ${item.score})`, format));
@@ -278,11 +273,7 @@ export function buildDigest(opts: DigestOptions): { text: string; ordered: Item[
   const maxPerDay = opts.maxPerDay ?? cfg.digest.max_items_per_day;
   const cities = opts.query.cities.map((c) => cityLabel(c)).join(', ');
 
-  // places are not pinned to a day, so they get a flat list and no date range
-  const placesOnly = opts.items.length > 0 && opts.items.every((i) => i.kind === 'place');
-  const head = placesOnly
-    ? `${bold(opts.title, format)}\n${plain(cities, format)}`
-    : `${bold(opts.title, format)}\n${plain(`${cities} · ${rangeText(opts.query)}`, format)}`;
+  const head = `${bold(opts.title, format)}\n${plain(`${cities} · ${rangeText(opts.query)}`, format)}`;
   if (opts.items.length === 0) {
     const empty = opts.footer ?? NOTHING_FOUND;
     return { text: `${head}\n\n${plain(empty, format)}`, ordered: [] };
@@ -291,17 +282,6 @@ export function buildDigest(opts: DigestOptions): { text: string; ordered: Item[
   const blocks: string[] = [head];
   const ordered: Item[] = [];
   let n = 1;
-
-  if (placesOnly) {
-    ordered.push(...opts.items);
-    blocks.push(
-      opts.items
-        .map((it) => renderItem(it, { format, index: opts.numbered === false ? undefined : n++, explain: opts.explain }))
-        .join('\n\n'),
-    );
-    blocks.push(plain(opts.footer ?? PLACES_HINT, format));
-    return { text: blocks.join('\n\n'), ordered };
-  }
 
   for (const group of groupByDay(opts.items, cfg.timezone)) {
     const label = group.day === 'tbd' ? '' : dayLabel(group.day, cfg.locale);
@@ -426,7 +406,7 @@ export function renderDetails(item: Item, opts: { format?: Format; tz?: string }
   if (item.performers?.length) lines.push(plain(`🎤 ${item.performers.slice(0, 5).join(', ')}`, format));
   if (item.description) lines.push('', plain(truncate(item.description, 700), format));
   lines.push('', plain(`Джерело: ${item.sources.join(', ') || item.source}`, format));
-  lines.push(link(item.kind === 'place' ? 'сторінка місця →' : 'сторінка події →', item.url, format));
+  lines.push(link('сторінка події →', item.url, format));
   if (item.confidence === 'low') {
     lines.push(plain('⚠️ Це з телеграм-каналу чи пошуку — дату й час варто перевірити за посиланням.', format));
   }
@@ -460,7 +440,7 @@ export function detailsKeyboard(item: Item, opts: CardState = {}): InlineButton[
       { text: opts.reminded ? '⏰ Не нагадувати' : '⏰ Нагадати', callback_data: ev('r') },
     ],
     [
-      { text: item.kind === 'place' ? '🔗 Сторінка' : '🎟 Квитки', url: item.url },
+      { text: '🎟 Квитки', url: item.url },
       ...(google ? [{ text: '📅 В календар', url: google }] : []),
     ],
     [{ text: '⬅️ До картки', callback_data: ev('b') }],
@@ -502,16 +482,11 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
   const cfg = loadConfig();
   const format = opts.format ?? 'html';
   const maxPerDay = opts.maxPerDay ?? cfg.digest.max_items_per_day;
-  const placesOnly = opts.items.length > 0 && opts.items.every((i) => i.kind === 'place');
 
   // same order and same per-day cap as the digest, then flattened
   const kept: Item[] = [];
-  if (placesOnly) {
-    kept.push(...opts.items);
-  } else {
-    for (const group of groupByDay(opts.items, cfg.timezone)) {
-      kept.push(...(maxPerDay > 0 ? group.items.slice(0, maxPerDay) : group.items));
-    }
+  for (const group of groupByDay(opts.items, cfg.timezone)) {
+    kept.push(...(maxPerDay > 0 ? group.items.slice(0, maxPerDay) : group.items));
   }
 
   // the header counts the answer, not the batch: one card may be on its way
@@ -521,13 +496,13 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
     opts.query.cities.map((c) => cityLabel(c)).join(', '),
     // dates only: the title already names the window, and "(цього тижня)"
     // under a "Цього тижня" heading is just noise
-    placesOnly ? '' : rangeDates(opts.query),
-    found ? (placesOnly ? countPlaces(found) : countEvents(found)) : '',
+    rangeDates(opts.query),
+    found ? countEvents(found) : '',
   ]
     .filter(Boolean)
     .join(' · ');
 
-  const tail = kept.length === 0 ? opts.footer ?? NOTHING_FOUND : opts.footer ?? (placesOnly ? PLACES_HINT : REMINDER_HINT);
+  const tail = kept.length === 0 ? opts.footer ?? NOTHING_FOUND : opts.footer ?? REMINDER_HINT;
   const header = `${bold(opts.title, format)}\n${plain(facts, format)}\n\n${plain(tail, format)}`;
 
   const headerKeyboard =
@@ -538,7 +513,7 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
     ...kept.map((item) => {
       const itemOpts: RenderItemOptions = {
         format,
-        withDay: !placesOnly,
+        withDay: true,
         explain: opts.explain,
         changeNote: opts.changeNotes?.get(item.id),
       };
@@ -546,8 +521,7 @@ export function buildMessages(opts: DigestOptions): OutgoingMessage[] {
       return {
         text: renderItem(item, itemOpts),
         items: [item],
-        // places have no start time to remind about and no ticket to share
-        ...(item.kind === 'event' ? { inlineKeyboard: eventKeyboard(item, opts.cardState?.(item)) } : {}),
+        inlineKeyboard: eventKeyboard(item, opts.cardState?.(item)),
         ...(item.image && caption ? { image: item.image, caption } : {}),
       };
     }),

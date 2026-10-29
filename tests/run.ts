@@ -135,7 +135,6 @@ describe('categories', () => {
     ['майстер-клас з гончарства', 'workshop'],
     ['фестиваль вуличної їжі', 'festival'],
     ['вечірка з діджеєм', 'party'],
-    ['нова кав’ярня зі спешелті кавою', 'cafe'],
   ];
   for (const [text, expected] of cases) {
     it(`classifies "${text}" as ${expected}`, () => assert.equal(classify(text), expected));
@@ -235,17 +234,16 @@ describe('request parsing', () => {
 
   it('uses the Ukrainian city name for web search queries', () => {
     assert.equal(cityLocalName('kharkiv'), 'Харків');
-    const queries = buildQueries('kharkiv', 'event', { from: base, to: base, like: ['standup'], genres: [], placeLikes: [] });
+    const queries = buildQueries('kharkiv', { from: base, to: base, like: ['standup'], genres: [] });
     assert.ok(queries.every((q) => !q.includes('Kharkiv')), 'Ukrainian queries should not use the English name');
   });
 
   it('looks for a followed act by name, before anything generic', () => {
-    const queries = buildQueries('kharkiv', 'event', {
+    const queries = buildQueries('kharkiv', {
       from: base,
       to: base,
       like: ['standup'],
       genres: [],
-      placeLikes: [],
       follow: ['Антон Тимошенко'],
     });
     assert.ok(queries[0]?.startsWith('Антон Тимошенко'), queries.join(' | '));
@@ -533,15 +531,6 @@ describe('ranking', () => {
     assert.equal(rank([theatre], { query, prefs, keepOffTaste: true, tasteFloor: 0 }).items.length, 1);
   });
 
-  it('does not filter café suggestions by a taste for concerts', () => {
-    const p = PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['concert'] });
-    const cafe = makeItem({ city: 'kharkiv', kind: 'place', title: 'Нова кавʼярня', url: 'https://x/pl', source: 'websearch', category: 'cafe' })!;
-    const places = parseRequest('', { prefs: p, base: '2026-10-20', kinds: ['place'] });
-    const ranked = rank([cafe], { query: places, prefs: p, tasteFloor: 0 });
-    assert.equal(ranked.items.length, 1, 'a concert favourite says nothing about cafés');
-    assert.equal(ranked.toppedUp, 0, 'and there is nothing to apologise for');
-  });
-
   it('counts every ❤️ on a category, so a repeated like outranks a one-off', () => {
     const once = PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['standup'], taste: { standup: 1 } });
     const often = PreferencesSchema.parse({ home_city: 'kharkiv', favourite_categories: ['standup'], taste: { standup: 6 } });
@@ -728,13 +717,6 @@ describe('render', () => {
     const html = buildDigest({ title: 'T', query, items, format: 'html' }).text;
     assert.ok(html.includes('Rock &amp; &lt;b&gt;Roll&lt;/b&gt;'));
     assert.ok(html.includes('href="https://x/d?a=1&amp;b=2"'));
-  });
-
-  it('shows places as a flat list with no time', () => {
-    const place = makeItem({ city: 'kharkiv', kind: 'place', title: 'Kofein Lab', url: 'https://x/e', source: 'websearch', category: 'cafe', address: 'вул. Сумська, 11' })!;
-    const text = buildDigest({ title: 'Places', query, items: [place], format: 'text' }).text;
-    assert.ok(text.includes('вул. Сумська, 11'));
-    assert.ok(!text.includes('date TBA'));
   });
 
   it('splits long messages on blank lines', () => {
@@ -1105,12 +1087,6 @@ describe('messages', () => {
     assert.equal(googleCalendarUrl(undated), undefined);
   });
 
-  it('sends one message per place too', () => {
-    const place = makeItem({ city: 'kharkiv', kind: 'place', title: 'Kofein Lab', url: 'https://m/e', source: 'websearch', category: 'cafe', address: 'вул. Сумська, 11' })!;
-    const msgs = buildMessages({ title: 'Місця', query, items: [place], format: 'text' });
-    assert.equal(msgs.length, 2);
-    assert.ok(msgs[1]!.text.includes('вул. Сумська, 11'));
-  });
 });
 
 /* --------------------------------------------------------------- calendar --- */
@@ -1229,19 +1205,8 @@ describe('telegram posts', () => {
 /* -------------------------------------------------------------- websearch --- */
 
 describe('web search ingest', () => {
-  it('turns a search result into a place', () => {
-    const item = resultToItem(
-      { title: 'Kofein Lab — нова кав’ярня', url: 'https://example.com/k', snippet: 'Спешелті кава, вініл. вул. Сумська, 11' },
-      { city: 'kharkiv', kind: 'place', base: '2026-10-20', tz: TZ },
-    );
-    assert.ok(item);
-    assert.equal(item.kind, 'place');
-    assert.equal(item.category, 'cafe');
-    assert.equal(item.confidence, 'low');
-  });
-
-  it('refuses an event with no date', () => {
-    const item = resultToItem({ title: 'Якась подія', url: 'https://example.com/e' }, { city: 'kharkiv', kind: 'event', base: '2026-10-20', tz: TZ });
+  it('refuses a result with no date — an event nobody can attend', () => {
+    const item = resultToItem({ title: 'Якась подія', url: 'https://example.com/e' }, { city: 'kharkiv', base: '2026-10-20', tz: TZ });
     assert.equal(item, null);
   });
 });
@@ -1269,33 +1234,48 @@ describe('taste words, as people read them', () => {
 /**
  * `prefs.interests` used to do two unrelated jobs — feed event ranking and
  * build the weekly place queries — and filled itself whenever someone hearted
- * a place. It is now two fields with two owners, and this is the seam between
- * the old rows and the new ones.
+ * a place. Places are gone, so what is left of it is `genres`, and this is
+ * the seam between the old rows and the new ones. Profiles written before the
+ * split still exist, so the carry-over has to keep working.
  */
-describe('the taste split', () => {
-  it('carries an old interests list over, exactly once', () => {
+describe('the taste carry-over', () => {
+  it('carries an old interests list over to genres, exactly once', () => {
     const legacy = PreferencesSchema.parse({
       home_city: 'kharkiv',
       interests: ['indie', 'speciality coffee', 'vinyl', 'концерти'],
     });
     assert.deepEqual(legacy.genres, ['indie'], 'a word we know as a genre becomes one');
-    assert.deepEqual(legacy.place_likes, ['speciality coffee', 'vinyl', 'концерти'], 'the rest is place taste');
     assert.ok(!('interests' in legacy), 'the field is gone from the value, not merely unread');
+    // what used to become place taste is simply dropped — there is no field
+    // left to put "speciality coffee" in
+    assert.ok(!('place_likes' in legacy), 'and nothing is kept as a place taste');
 
     // the same value parsed again must not drift: there is nothing left to move
     assert.deepEqual(PreferencesSchema.parse(legacy), legacy);
+    assert.deepEqual(PreferencesSchema.parse(PreferencesSchema.parse(legacy)), legacy);
     assert.deepEqual(PreferencesSchema.parse({ ...legacy, genres: ['indie'] }), legacy);
   });
 
-  it('does not duplicate an entry that is already in its new home', () => {
+  it('drops a place taste an old profile still carries, and says nothing about it', () => {
+    const old = PreferencesSchema.parse({
+      home_city: 'kharkiv',
+      genres: ['jazz'],
+      place_likes: ['vinyl', 'speciality coffee'],
+    });
+    assert.deepEqual(old.genres, ['jazz'], 'the genres survive untouched');
+    assert.ok(!('place_likes' in old));
+    // and twice, because this is the read path and it runs on every read
+    assert.deepEqual(PreferencesSchema.parse(old), old);
+  });
+
+  it('does not duplicate an entry that is already a genre', () => {
     const both = PreferencesSchema.parse({
       home_city: 'kharkiv',
       genres: ['jazz'],
-      place_likes: ['vinyl'],
       interests: ['jazz', 'indie', 'vinyl'],
     });
     assert.deepEqual(both.genres, ['jazz', 'indie'], 'the one already there stays put');
-    assert.deepEqual(both.place_likes, ['vinyl'], 'and neither list gains a second copy');
+    assert.deepEqual(PreferencesSchema.parse(both), both, 'and a second parse adds nothing');
   });
 
   it('offers only genres that exist as genres, and labels them', () => {
@@ -1415,13 +1395,6 @@ describe('preference commands', () => {
   it('folds an inflected tag onto the same key as its dictionary form', () => {
     assert.equal(canonicalTag('класичну'), 'classical');
     assert.equal(canonicalTag('класична'), 'classical');
-  });
-
-  it('switches to places when the request is Ukrainian', () => {
-    const base = '2026-10-21';
-    assert.deepEqual(parseRequest('тільки місця у Львові', { prefs, base }).kinds, ['place']);
-    assert.ok(parseRequest('нові кафе в Харкові', { prefs, base }).kinds.includes('place'));
-    assert.deepEqual(parseRequest('концерти на вихідних', { prefs, base }).kinds, ['event']);
   });
 
   it('ignores things that are not preference changes', () => {
@@ -1894,7 +1867,7 @@ describe('the shared city scrape', () => {
   const page = () => `<html><script type="application/ld+json">${fixture('karabas-event.json')}</script></html>`;
 
   it('gives a deeper digest and a quick chat search their own cache entries', () => {
-    const window = { city: 'kharkiv', from: '2026-10-24', to: '2026-10-26', kinds: ['event' as const] };
+    const window = { city: 'kharkiv', from: '2026-10-24', to: '2026-10-26' };
     assert.notEqual(
       cacheKey(window, ALL_SOURCE_NAMES, 6),
       cacheKey(window, ALL_SOURCE_NAMES, 2),
@@ -1917,7 +1890,6 @@ describe('the shared city scrape', () => {
           city: 'kharkiv',
           from: '2026-12-08',
           to: '2026-12-09',
-          kinds: ['event'],
           sources: ['karabas'],
           maxPages: 1,
           fetchText,
@@ -1940,7 +1912,7 @@ describe('the shared city scrape', () => {
       // nothing in them, which is exactly the silent failure we are after
       const fetchText = async (url: string) => (url.includes('karabas') && !url.includes('page=') ? page() : '<html></html>');
       const res = await collectCity({
-        store, log, city: 'kharkiv', from: '2026-12-08', to: '2026-12-09', kinds: ['event'],
+        store, log, city: 'kharkiv', from: '2026-12-08', to: '2026-12-09',
         sources: ['karabas', 'kontramarka', 'telegram'], maxPages: 1, ttlSeconds: 0, fetchText,
       });
       const per = res.perSource ?? [];
@@ -1956,7 +1928,7 @@ describe('the shared city scrape', () => {
       // config.example.yaml configures no telegram_channels anywhere, so the
       // collector returns ok with nothing to show — not a broken parser
       const res = await collectCity({
-        store, log, city: 'kharkiv', from: '2026-12-08', to: '2026-12-09', kinds: ['event'],
+        store, log, city: 'kharkiv', from: '2026-12-08', to: '2026-12-09',
         sources: ['telegram'], maxPages: 1, ttlSeconds: 0, fetchText: async () => '<html></html>',
       });
       assert.equal(res.perSource?.find((p) => p.source === 'telegram')?.skipped, true);
@@ -2115,7 +2087,7 @@ describe('fanout', () => {
   /** Pre-seed the cache so the fan-out runs without touching the network. */
   async function seed(store: StoreType, items = [standup, classical]) {
     // the depth is part of the key: a digest scrapes deeper than a chat search
-    const key = cacheKey({ city: 'kharkiv', from: window.from, to: window.to, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().http.max_pages);
+    const key = cacheKey({ city: 'kharkiv', from: window.from, to: window.to }, ALL_SOURCE_NAMES, loadConfig().http.max_pages);
     await store.putCache(key, items, 600);
   }
 
@@ -2389,7 +2361,7 @@ describe('a digest is one card you walk through', () => {
 
   /** Pre-seed the city cache and a user whose digest hour is now. */
   async function ready(store: StoreType, chatId: string, items: Item[]): Promise<void> {
-    const key = cacheKey({ city: 'kharkiv', from: window.from, to: window.to, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().http.max_pages);
+    const key = cacheKey({ city: 'kharkiv', from: window.from, to: window.to }, ALL_SOURCE_NAMES, loadConfig().http.max_pages);
     await store.putCache(key, items, 600);
     await registerUser(store, { chatId, city: 'kharkiv' });
     await store.setSchedule(chatId, { hour: 9, days: [1] });
@@ -2624,7 +2596,7 @@ describe('a digest is one card you walk through', () => {
     await withTestStore(async (store) => {
       const weekend = { from: '2026-10-23', to: '2026-10-25', label: 'this weekend' };
       const items = gigs(6).map((i) => ({ ...i, startsAt: i.startsAt!.replace('2026-10-20', '2026-10-24') }));
-      const key = cacheKey({ city: 'kharkiv', from: weekend.from, to: weekend.to, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().http.max_pages);
+      const key = cacheKey({ city: 'kharkiv', from: weekend.from, to: weekend.to }, ALL_SOURCE_NAMES, loadConfig().http.max_pages);
       await store.putCache(key, items, 600);
       await registerUser(store, { chatId: '2813', city: 'kharkiv' });
       await store.setSchedule('2813', { hour: 9, days: [WEEKEND_DAY] });
@@ -2671,7 +2643,7 @@ describe('a digest is one card you walk through', () => {
     await withTestStore(async (store) => {
       await ready(store, '2810', gigs(1));
       // the one event there is has already been sent, so there is nothing new
-      const key = cacheKey({ city: 'kharkiv', from: window.from, to: window.to, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().http.max_pages);
+      const key = cacheKey({ city: 'kharkiv', from: window.from, to: window.to }, ALL_SOURCE_NAMES, loadConfig().http.max_pages);
       await store.recordSent('2810', (await store.getCache(key))!);
       assert.deepEqual(await sendDigest(store, '2810'), [], 'an empty digest is silence, not a header');
       assert.equal(await store.getState(lastPageKey('2810')), null, 'and no stash pointer either');
@@ -2848,7 +2820,7 @@ describe('bot handlers', () => {
   /** An answer comes out of the shared cache, so these run without a network. */
   async function seedToday(store: StoreType, items: Item[]): Promise<void> {
     const base = today(loadConfig().timezone);
-    const key = cacheKey({ city: 'kharkiv', from: base, to: base, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().bot.interactive_pages);
+    const key = cacheKey({ city: 'kharkiv', from: base, to: base }, ALL_SOURCE_NAMES, loadConfig().bot.interactive_pages);
     await store.putCache(key, items, 600);
   }
   const onToday = (title: string, category: Item['category'], extra: Record<string, unknown> = {}) =>
@@ -3204,7 +3176,6 @@ describe('onboarding', () => {
       const noted = await say(store, '3107', 'рок, джаз, speciality coffee');
       const user = await getUser(store, '3107');
       assert.deepEqual(user?.prefs.genres, ['rock', 'jazz'], 'a known genre is added');
-      assert.deepEqual(user?.prefs.place_likes, [], 'the genres screen is not a place screen');
       assert.ok(noted.includes('✅ Жанри'), noted.slice(0, 300));
       assert.ok(noted.includes('не жанр'), 'an unknown word is turned away, not stored');
       // typing answers the screen, it does not leave it
@@ -3308,27 +3279,6 @@ describe('the heart', () => {
       await react(store, '3202', 778);
       const user = await getUser(store, '3202');
       assert.ok(user?.prefs.favourite_categories.includes('standup'), JSON.stringify(user?.prefs.favourite_categories));
-    });
-  });
-
-  /**
-   * The two lists have two owners: an event heart is a category somebody likes,
-   * a place heart is a taste in places. Sharing one field meant /prefs showed a
-   * person a list they had never built.
-   */
-  it('learns a place taste from a heart on a place, not a category', async () => {
-    await withTestStore(async (store) => {
-      await registerUser(store, { chatId: '3260', city: 'kharkiv' });
-      const cafe = makeItem({
-        city: 'kharkiv', kind: 'place', title: 'Kofein Lab', url: 'https://h/p9',
-        source: 'websearch', category: 'cafe', address: 'вул. Сумська, 11',
-        startsAt: '2026-11-01T19:00:00+02:00',
-      })!;
-      await store.recordMessage('3260', 790, [cafe]);
-      await react(store, '3260', 790);
-      const user = await getUser(store, '3260');
-      assert.deepEqual(user?.prefs.place_likes, ['cafe'], JSON.stringify(user?.prefs.place_likes));
-      assert.deepEqual(user?.prefs.favourite_categories, [], 'a café is not an event category');
     });
   });
 
@@ -4922,7 +4872,6 @@ describe('the operator', () => {
       const job = (name: string) => m.jobs.find((j) => j.job === name);
       assert.deepEqual(job('weekly'), { job: 'weekly', sent: 1, heart: 1, down: 1, save: 1, remind: 0 });
       assert.deepEqual(job('search'), { job: 'search', sent: 1, heart: 0, down: 0, save: 0, remind: 0 });
-      assert.deepEqual(job('places'), { job: 'places', sent: 0, heart: 0, down: 0, save: 0, remind: 0 });
       // three gestures, one event: coverage counts events, not taps
       assert.deepEqual(m.coverage, { sent: 2, gestured: 1, share: 50 });
     });
@@ -4936,7 +4885,7 @@ describe('the operator', () => {
         category: 'concert', startsAt: '2026-10-24T18:00:00+03:00', status: 'scheduled',
       })!;
       await store.putCache(
-        cacheKey({ city: 'kharkiv', from: window.from, to: window.to, kinds: ['event'] }, ALL_SOURCE_NAMES, loadConfig().http.max_pages),
+        cacheKey({ city: 'kharkiv', from: window.from, to: window.to }, ALL_SOURCE_NAMES, loadConfig().http.max_pages),
         [classical],
         600,
       );

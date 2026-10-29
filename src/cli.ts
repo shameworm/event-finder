@@ -20,7 +20,7 @@ export interface Args {
  */
 const KNOWN_VALUE_FLAGS = new Set([
   'city', 'cities', 'from', 'to', 'like', 'dislike', 'max-price', 'top', 'pages', 'days',
-  'chat', 'hour', 'day', 'kind', 'source', 'limit', 'ingest', 'out', 'format', 'base', 'per-day', 'label', 'title', 'channel',
+  'chat', 'hour', 'day', 'source', 'limit', 'ingest', 'out', 'format', 'base', 'per-day', 'label', 'title', 'channel',
   'only', 'skip', 'timeout', 'ttl', 'cancel',
 ]);
 

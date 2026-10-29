@@ -6,7 +6,7 @@
  * cron mode, so the behaviour is identical either way.
  */
 import { z } from 'zod';
-import type { Item, Kind } from './types.ts';
+import type { Item } from './types.ts';
 import { SEARCH_PAGE_TTL_SECONDS, lastPageKey, pageKey, type FeedbackRow, type Gesture, type Job, type Metrics, type OptIn, type Store } from './db.ts';
 import type { Logger } from './log.ts';
 import type { TgCallbackQuery, TgMessage, TgReactionUpdate } from './schemas.ts';
@@ -81,7 +81,6 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: 'find', description: '🔎 Пошук по категоріях' },
   { command: 'saved', description: '🔖 Збережені події' },
   { command: 'tomorrow', description: '📅 Що завтра' },
-  { command: 'places', description: '📍 Нові кавʼярні, бари та галереї' },
   { command: 'settings', description: '⚙️ Розсилки, година, місто і смаки' },
   { command: 'setup', description: '🎛 Налаштувати смаки кнопками' },
   { command: 'city', description: '🏙 Змінити місто' },
@@ -93,14 +92,13 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
 ];
 
 /**
- * The four scheduled jobs a person can switch on and off, in one place: the
+ * The scheduled jobs a person can switch on and off, in one place: the
  * /settings text, its buttons and the /mute command all read from this list.
  */
 const OPT_INS: { key: OptIn; emoji: string; label: string; hint: string; names: string[] }[] = [
   { key: 'weekly_digest', emoji: '🗓', label: 'Тиждень', hint: 'що буде цього тижня', names: ['week', 'weekly', 'тиждень'] },
   { key: 'weekend_digest', emoji: '🎉', label: 'Вихідні', hint: 'у четвер — пʼятниця–неділя', names: ['weekend', 'вихідні'] },
   { key: 'follow_alerts', emoji: '⭐️', label: 'Стежу за', hint: 'нові події тих, за ким ти стежиш', names: ['follows', 'follow', 'стежу'] },
-  { key: 'place_tips', emoji: '📍', label: 'Місця', hint: 'щотижня кавʼярні, бари та галереї', names: ['places', 'place', 'місця'] },
 ];
 
 const COMMANDS = `<b>Що я вмію</b>
@@ -110,7 +108,6 @@ const COMMANDS = `<b>Що я вмію</b>
 /weekend — з пʼятниці по неділю
 /today · /tomorrow — просто зараз
 /saved — твої збережені події 🔖
-/places — нові кавʼярні, бари й галереї, куди варто зайти
 /settings — розсилки, коли писати, місто і смаки, кнопками
 /setup — зібрати смаки заново, крок за кроком
 /city — змінити місто
@@ -229,8 +226,7 @@ function quickActions(): InlineButton[][] {
 function welcome(user: BotUser): string {
   return (
     `<b>Привіт! 👋 Знайдімо, куди піти.</b>\n\n` +
-    `Я шукаю концерти, стендап, театр, виставки, лекції, вечірки та фестивалі — ` +
-    `і нові місця, куди варто зайти. ` +
+    `Я шукаю концерти, стендап, театр, виставки, лекції, вечірки та фестивалі. ` +
     `Чим більше ти тапаєш ❤️ і 👎, тим точніше я влучаю.\n\n` +
     `Твоє місто — <b>${escapeHtml(cityLabel(user.city))}</b>, /city щоб змінити.\n\n` +
     `<b>Чого хочеться?</b> Тисни кнопку — або просто напиши, ` +
@@ -917,7 +913,6 @@ export async function answerSearch(
     from?: string;
     to?: string;
     label?: string;
-    kinds?: Kind[];
     top?: number;
     /** Categories picked with buttons, for /find; free text supplies its own. */
     like?: string[];
@@ -926,14 +921,12 @@ export async function answerSearch(
 ): Promise<number> {
   const cfg = loadConfig();
   const base = today(cfg.timezone);
-  const kinds: Kind[] = opts.kinds ?? ['event'];
 
   const query = parseRequest(text, {
     prefs: user.prefs,
     base,
     from: opts.from,
     to: opts.to,
-    kinds: opts.kinds,
     like: opts.like,
   });
   if (opts.label) query.rangeLabel = opts.label;
@@ -950,7 +943,7 @@ export async function answerSearch(
   // loading feedback that says what it is loading, and is taken back once the
   // answer it stood in for has arrived
   const what = [
-    query.like.length ? query.like.map((t) => tagLabel(t)).join(', ') : kinds.includes('place') ? 'місця' : 'події',
+    query.like.length ? query.like.map((t) => tagLabel(t)).join(', ') : 'події',
     query.rangeLabel,
     query.cities.map((c) => cityLabel(c)).join(', '),
   ]
@@ -971,7 +964,6 @@ export async function answerSearch(
       city,
       from: query.from,
       to: query.to,
-      kinds,
       maxPages: cfg.bot.interactive_pages,
     });
     collected.push(...res.items);
@@ -992,10 +984,7 @@ export async function answerSearch(
   const rest = ranked.items.slice(first);
   const offTaste = ranked.dropped.filter((d) => d.why === 'not in their taste').length;
 
-  const title =
-    kinds.includes('place')
-      ? `📍 Місця — ${query.cities.map((c) => cityLabel(c)).join(', ')}`
-      : `🗓 ${query.cities.map((c) => cityLabel(c)).join(', ')}`;
+  const title = `🗓 ${query.cities.map((c) => cityLabel(c)).join(', ')}`;
 
   // one read, so every card knows whether its 🔖 is already on
   const saved = new Set((await ctx.store.listSaved(user.chatId)).map((i) => i.id));
@@ -1143,7 +1132,7 @@ async function showMore(
 }
 
 /** The canned searches, reachable both as a command and as a quick-action button. */
-export type Preset = 'week' | 'weekend' | 'today' | 'tomorrow' | 'places' | 'near';
+export type Preset = 'week' | 'weekend' | 'today' | 'tomorrow' | 'near';
 
 async function runPreset(ctx: HandlerContext, user: BotUser, preset: Preset, reply: Reply): Promise<void> {
   const cfg = loadConfig();
@@ -1164,15 +1153,6 @@ async function runPreset(ctx: HandlerContext, user: BotUser, preset: Preset, rep
       return;
     case 'tomorrow':
       await answerSearch(ctx, user, '', { from: addDays(base, 1), to: addDays(base, 1), label: 'завтра', reply });
-      return;
-    case 'places':
-      await answerSearch(ctx, user, '', {
-        from: base,
-        to: addDays(base, 30),
-        label: 'зараз відкрито',
-        kinds: ['place'],
-        reply,
-      });
       return;
 
     // "поруч" is the home city, not a radius: Telegram can share a location,
@@ -1406,8 +1386,8 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
       const step = parked ?? 'city';
       const lead =
         step === 'city'
-          ? `👋 Я знаходжу концерти, стендап, театр, виставки, лекції, вечірки та фестивалі в українських містах — ` +
-            `і нові місця, куди варто зайти.\n\nСпершу налаштуємо тебе — місто й чотири коротких екрани.\n\n`
+          ? `👋 Я знаходжу концерти, стендап, театр, виставки, лекції, вечірки та фестивалі в українських містах.` +
+            `\n\nСпершу налаштуємо тебе — місто й чотири коротких екрани.\n\n`
           : '';
       await showStep(ctx, user, step, reply, lead);
       return;
@@ -1445,7 +1425,6 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
     case '/weekend':
     case '/today':
     case '/tomorrow':
-    case '/places':
     case '/near':
       await runPreset(ctx, user, command.slice(1) as Preset, reply);
       return;
@@ -1490,7 +1469,7 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
       const on = command === '/unmute';
       const which = text.slice(command.length).trim().toLowerCase();
       const key = OPT_INS.find((o) => o.names.includes(which))?.key;
-      if (!key) return reply('Яку саме? week, weekend, follows або places. Простіше — кнопками в /settings.');
+      if (!key) return reply('Яку саме? week, weekend або follows. Простіше — кнопками в /settings.');
       await ctx.store.setOptIn(chatId, key, on);
       return reply(`${on ? '🔔' : '🔕'} Розсилка «${escapeHtml(which)}» ${on ? 'увімкнена' : 'вимкнена'}.`);
     }
@@ -1736,7 +1715,7 @@ export async function handleCallback(ctx: HandlerContext, cq: TgCallbackQuery): 
       const screen = findCategoriesScreen(state);
       return draw(screen, false);
     }
-    const presets: Preset[] = ['week', 'weekend', 'today', 'tomorrow', 'places', 'near'];
+    const presets: Preset[] = ['week', 'weekend', 'today', 'tomorrow', 'near'];
     if (presets.includes(arg as Preset)) return runPreset(ctx, user, arg as Preset, reply);
     return;
   }
@@ -2398,7 +2377,7 @@ interface Unlearned {
  * named one) and save the result, the way learnFromYes does.
  */
 async function learnFromThumbsDown(ctx: HandlerContext, user: BotUser, item: Item): Promise<Unlearned> {
-  const who = item.kind === 'place' ? undefined : (item.performers ?? []).map((n) => n.trim()).find((n) => n.length >= 3);
+  const who = (item.performers ?? []).map((n) => n.trim()).find((n) => n.length >= 3);
   const edit = applyThumbsDown(user.prefs, { tag: item.category, act: who });
   await saveUserPrefs(ctx.store, user, edit.prefs);
   return { tag: edit.tag, score: edit.score, demoted: edit.demoted, blocked: edit.blocked };
@@ -2426,7 +2405,7 @@ function thumbsDownSaid(u: Unlearned): string {
 
 /** What one ❤️, ⏰ or 🔖 taught us that is worth saying out loud. */
 interface Learned {
-  /** The tag added to their favourites or place taste, if it was not there already. */
+  /** The tag added to their favourites, if it was not there already. */
   tag: string | null;
   /** The performer added to their follow list. */
   follow: string | null;
@@ -2436,8 +2415,7 @@ interface Learned {
  * Every way of saying "yes, this one" — ❤️, ⏰, 🔖 — is a free sample of
  * someone's taste, so take all of it:
  *
- *  · the event's category joins their favourites (a place joins their place
- *    taste — the two are separate fields now, see PreferencesSchema)
+ *  · the event's category joins their favourites
  *  · the tally for that tag goes up, every time — that is what makes twenty
  *    concerts kept mean more to the ranker than one
  *  · whoever is on stage joins the follow list, where the real weight lives:
@@ -2461,20 +2439,18 @@ async function learnFromYes(ctx: HandlerContext, user: BotUser, item: Item): Pro
   // whichever lands first is the one the tally hears
   if (!(await ctx.store.claimTaste(user.chatId, item.id))) return nothing;
 
-  const place = item.kind === 'place';
-  const list = place ? user.prefs.place_likes : user.prefs.favourite_categories;
+  const list = user.prefs.favourite_categories;
   const fresh = !has(list, tag);
 
   // schema.org gives us a performer only when the ticket site bothered to fill
   // it in, and a title is not a name ("Вечір імпровізації" is nobody)
-  const who = place ? undefined : (item.performers ?? []).map((n) => n.trim()).find((n) => n.length >= 3);
+  const who = (item.performers ?? []).map((n) => n.trim()).find((n) => n.length >= 3);
   const follow = who && !has(user.prefs.follow, who) ? who : null;
 
   await saveUserPrefs(ctx.store, user, {
     ...user.prefs,
     taste: { ...user.prefs.taste, [tag]: (user.prefs.taste[tag] ?? 0) + 1 },
-    favourite_categories: !place && fresh ? [...list, tag] : user.prefs.favourite_categories,
-    place_likes: place && fresh ? [...list, tag] : user.prefs.place_likes,
+    favourite_categories: fresh ? [...list, tag] : user.prefs.favourite_categories,
     follow: follow ? [...user.prefs.follow, follow] : user.prefs.follow,
   });
   return { tag: fresh ? tag : null, follow };

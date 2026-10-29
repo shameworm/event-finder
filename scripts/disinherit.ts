@@ -38,7 +38,7 @@ const onlyChats = args.list('chat');
 
 const seed = loadPrefs((m) => log.warn(m));
 /** The lists that used to be copied wholesale. */
-const SEEDED = ['favourite_categories', 'disliked_categories', 'genres', 'place_likes'] as const;
+const SEEDED = ['favourite_categories', 'disliked_categories', 'genres'] as const;
 
 await withStore(async (store) => {
   let users = await allUsers(store, undefined, log);

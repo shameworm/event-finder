@@ -14,10 +14,6 @@ export const EMOJI: Record<Category, string> = {
   kids: '🧸',
   sport: '🏟',
   other: '✨',
-  cafe: '☕️',
-  bar: '🍸',
-  gallery: '🎨',
-  spot: '📍',
 };
 
 /**
@@ -38,10 +34,6 @@ export const CATEGORY_LABEL: Record<Category, string> = {
   kids: 'дітям',
   sport: 'спорт',
   other: 'інше',
-  cafe: 'кавʼярні',
-  bar: 'бари',
-  gallery: 'галереї',
-  spot: 'місця',
 };
 
 /** The genre keys of TAG_SYNONYMS, for the same reason. */
@@ -92,7 +84,6 @@ export function tagLabel(tag: string): string {
 export const EVENT_CATEGORIES: Category[] = [
   'concert', 'standup', 'theatre', 'exhibition', 'lecture', 'party', 'festival', 'workshop', 'cinema', 'kids', 'sport', 'other',
 ];
-export const PLACE_CATEGORIES: Category[] = ['cafe', 'bar', 'gallery', 'spot'];
 
 /**
  * Specificity order, most specific first — used whenever two categories tie.
@@ -101,7 +92,7 @@ export const PLACE_CATEGORIES: Category[] = ['cafe', 'bar', 'gallery', 'spot'];
  */
 const CLASSIFY_ORDER: Category[] = [
   'standup', 'theatre', 'exhibition', 'workshop', 'lecture', 'festival', 'party',
-  'cinema', 'kids', 'sport', 'cafe', 'bar', 'gallery', 'spot', 'concert', 'other',
+  'cinema', 'kids', 'sport', 'concert', 'other',
 ];
 
 /**
@@ -155,12 +146,6 @@ export const KEYWORDS: Record<Category, string[]> = {
   kids: ['kids', 'children', 'family', 'дітям', 'діти', 'дитячи', 'родинн', 'дети', 'детски'],
   sport: ['sport', 'match', 'tournament', 'marathon', 'спорт', 'матч', 'турнір', 'марафон', 'турнир'],
   other: [],
-  cafe: ['cafe', 'café', 'coffee', 'coffee shop', 'bakery', 'brunch', 'speciality coffee',
-    'кафе', 'кава', "кав'ярня", 'кавярня', 'кофейня', 'пекарня', 'бранч'],
-  bar: ['bar', 'pub', 'wine bar', 'cocktail bar', 'brewery', 'live music bar',
-    'бар', 'паб', 'винний бар', 'коктейльний бар', 'пивоварня'],
-  gallery: ['gallery', 'art space', 'studio', 'галерея', 'артпростір', 'арт простір', 'майстерня'],
-  spot: ['spot', 'place', 'rooftop', 'hidden', 'unusual', 'місце', 'локація', 'дах', 'незвичайн', 'незвычайн'],
 };
 
 /** schema.org @type -> our category. */

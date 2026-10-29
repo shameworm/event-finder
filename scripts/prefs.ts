@@ -74,7 +74,7 @@ await withStore(async (store) => {
       process.stdout.write(
         `${r.chat_id.padEnd(14)} ${cityLabel(r.city).padEnd(16)} ` +
           `${r.username ? '@' + r.username : '—'}  ` +
-          `[week:${r.weekly_digest} weekend:${r.weekend_digest} follows:${r.follow_alerts} places:${r.place_tips}] ` +
+          `[week:${r.weekly_digest} weekend:${r.weekend_digest} follows:${r.follow_alerts}] ` +
           `${describeSchedule(scheduleOf(r))}\n`,
       );
     }
