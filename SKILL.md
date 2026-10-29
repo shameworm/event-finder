@@ -172,6 +172,12 @@ npx tsx scripts/websearch.ts    --city kharkiv
 
 - **concert.ua** — `concert.ua/en/catalog/<slug>/<category>?page=N`, schema.org JSON-LD.
 - **karabas** — `<city>.karabas.com/?page=N`, JSON-LD with venue, price range, availability.
+  Its JSON-LD start times are the Kyiv offset *ahead* of the times its own cards
+  display (a 19:00 concert is marked up as 21:00 — 14 for 14 when sampled), so
+  the collector reads the card's time and keeps the markup only as a fallback.
+  A run logs `corrected N start time(s)`; when that reaches 0 they have fixed it
+  and the correction can go. Never quote a Karabas time straight out of its
+  JSON-LD.
 - **kontramarka** — `<city>.kontramarka.ua/uk/<category>?page=N`, microdata via cheerio. Kyiv is on the bare domain.
 - **venues** — every url under `cities.<city>.venues` in config.yaml: a theatre's
   afisha, a club, a festival programme. One request per url as written, no

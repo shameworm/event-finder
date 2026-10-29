@@ -960,6 +960,93 @@ describe('scrapers, offline', () => {
     assert.equal(res.items[0]?.source, 'karabas');
   });
 
+  /**
+   * Karabas states a time in its JSON-LD that is the Kyiv offset ahead of the
+   * time its own card shows: «Гидке каченя» is displayed as 12:00 and marked up
+   * as 14:00. Sampled across its catalogue on 2026-10-29 it was 14 for 14, so
+   * the digest was telling people to turn up two hours after the show started —
+   * and the same gig on Kontramarka looked like a different one, because
+   * dedupe's sameSlot compares local times.
+   */
+  it('takes the time a Karabas card shows, not the one its markup states', async () => {
+    const res = await collectKarabas({
+      query: wide,
+      city: 'kharkiv',
+      log,
+      maxPages: 1,
+      fetchText: serve(fixture('karabas-listing.html')),
+    });
+    assert.equal(res.ok, true, res.error);
+    const concert = res.items.find((i) => i.title === 'IVAN LIULENOV');
+    assert.ok(concert, JSON.stringify(res.items.map((i) => i.title)));
+    assert.equal(concert.startsAt, '2026-12-08T19:00:00+02:00', 'the card says 19:00; the markup says 21:00');
+    const play = res.items.find((i) => i.title.includes('Гидке каченя'));
+    assert.ok(play, JSON.stringify(res.items.map((i) => i.title)));
+    assert.equal(play.startsAt, '2026-10-31T12:00:00+02:00', 'the card says 12:00; the markup says 14:00');
+  });
+
+  it('moves the end time with the start, so the duration survives the correction', async () => {
+    const res = await collectKarabas({
+      query: wide,
+      city: 'kharkiv',
+      log,
+      maxPages: 1,
+      fetchText: serve(fixture('karabas-listing.html')),
+    });
+    const concert = res.items.find((i) => i.title === 'IVAN LIULENOV');
+    assert.equal(concert?.endsAt, '2026-12-08T22:00:00+02:00', 'markup had 21:00–00:00, so the pair shifts together');
+  });
+
+  it('says how many times it had to correct, so a fix on their side is visible', async () => {
+    const lines: string[] = [];
+    const spy: LoggerType = {
+      info: (m: string) => void lines.push(m),
+      warn: (m: string) => void lines.push(m),
+      error: (m: string) => void lines.push(m),
+      debug: () => {},
+      child: () => spy,
+    };
+    await collectKarabas({ query: wide, city: 'kharkiv', log: spy, maxPages: 1, fetchText: serve(fixture('karabas-listing.html')) });
+    assert.match(lines.join('\n'), /2 .*time/i, lines.join('\n'));
+  });
+
+  it('keeps the markup time when the page shows none', async () => {
+    const bare = `<html><head><script type="application/ld+json">${fixture('karabas-event.json')}</script></head></html>`;
+    const res = await collectKarabas({ query: wide, city: 'kharkiv', log, maxPages: 1, fetchText: serve(bare) });
+    assert.equal(res.items[0]?.startsAt, '2026-12-08T21:00:00+02:00', 'nothing to compare against, so the markup stands');
+  });
+
+  it('is one card for one play, not two for a two-hour gap that was never real', async () => {
+    // exactly the pair that reached a digest: Karabas's card and Kontramarka's
+    // listing of the same 12:00 children's play at the same theatre
+    const karabas = await collectKarabas({
+      query: wide,
+      city: 'kharkiv',
+      log,
+      maxPages: 1,
+      fetchText: serve(fixture('karabas-listing.html')),
+    });
+    const onKarabas = karabas.items.find((i) => i.title.includes('Гидке каченя'));
+    assert.ok(onKarabas);
+    const onKontramarka = fromSchemaEvent(
+      {
+        '@type': 'TheaterEvent',
+        name: 'Гидке каченя',
+        url: 'https://kharkiv.kontramarka.ua/uk/gidke-kacena-67853.html',
+        startDate: '2026-10-31T12:00:00+02:00',
+        endDate: '2026-10-31T14:00:00+02:00',
+        location: { '@type': 'Place', name: 'Харківський театр для дітей та юнацтва (Коцарська)' },
+        offers: { '@type': 'AggregateOffer', lowPrice: '250', priceCurrency: 'UAH' },
+      },
+      { city: 'kharkiv', source: 'kontramarka' },
+    );
+    assert.ok(onKontramarka);
+    const merged = dedupe([onKarabas, onKontramarka], TZ);
+    assert.equal(merged.length, 1, `two cards for one play: ${JSON.stringify(merged.map((i) => [i.title, i.startsAt]))}`);
+    assert.deepEqual([...(merged[0]?.sources ?? [])].sort(), ['karabas', 'kontramarka']);
+    assert.equal(merged[0]?.startsAt, '2026-10-31T12:00:00+02:00');
+  });
+
   it('runs the whole pipeline over stubbed pages, deduping across sources', async () => {
     const karabasPage = `<html><script type="application/ld+json">${fixture('karabas-event.json')}</script></html>`;
     const result = await runPipeline({
@@ -5039,6 +5126,12 @@ describe('fixture contracts', () => {
     assert.equal(priceText(item), 'від 450 ₴');
   });
 
+  /**
+   * 21:00 is what the markup says and what this fixture must keep saying — it
+   * is a captured page, not a wish. The live site displays 19:00 for this
+   * concert, and karabas-listing.html pins the correction that reads it; a bare
+   * JSON-LD object with no card beside it has nothing to correct against.
+   */
   it('pulls a title, a date and a price range out of the Karabas page', async () => {
     const page = `<html><head><script type="application/ld+json">${fixture('karabas-event.json')}</script></head></html>`;
     const res = await collectKarabas({ query: wide, city: 'kharkiv', log, maxPages: 1, fetchText: once(page) });
