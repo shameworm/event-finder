@@ -3882,7 +3882,7 @@ describe('welcome, saved events and the guided search', () => {
     await withTestStore(async (store) => {
       await registerUser(store, { chatId: '3601', city: 'kharkiv' });
       const hello = await say(store, '3601', '/start');
-      for (const data of ['go:weekend', 'go:near', 'go:saved', 'go:find', 'go:settings']) {
+      for (const data of ['go:weekend', 'go:today', 'go:saved', 'go:find', 'go:settings']) {
         assert.ok(hello.includes(`(${data})`), `${data} is missing from the welcome: ${hello.slice(0, 500)}`);
       }
       assert.ok(hello.includes('Знайдімо'), hello.slice(0, 300));

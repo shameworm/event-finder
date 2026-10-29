@@ -56,7 +56,7 @@ check nothing is already running (`pgrep -fl "scripts/bot.ts"`). In production i
 belongs under a supervisor — see the README.
 
 What users can send it: `/start` (the walkthrough — see below), `/find` (the
-guided search), `/week`, `/weekend`, `/today`, `/tomorrow`, `/near`,
+guided search), `/week`, `/weekend`, `/today`, `/tomorrow`,
 `/saved`, `/city`, `/prefs`, `/setup`, `/settings`,
 `/mute week|weekend|follows`, `/unmute`, `/reminders`, `/follow X`,
 `/unfollow X`, `/stop`, `/help`, `/feedback <text>` (stored in the `feedback`
@@ -118,11 +118,6 @@ message, so these redraws go through `editMessageCaption`, not
 category screen, then a period screen, with the choice parked in the `state`
 table under `find:<chat id>` — the bot also runs in `--once` cron mode, where
 no wizard can live in a variable.
-
-"📍 Поруч" is the home city over the next week, not a radius. Telegram can share
-a location, but the ticket sites index by city and the items carry no
-coordinates, so there is nothing to measure a distance against; `/city` is what
-moves it.
 
 Most of that is also reachable without typing. The bot publishes `BOT_COMMANDS`
 with `setMyCommands` on start-up, so Telegram autocompletes `/` and fills the ☰
