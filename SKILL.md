@@ -1,6 +1,6 @@
 ---
 name: events-finder
-description: Use when the user asks what is on in a Ukrainian city — concerts, stand-up, theatre, exhibitions, lectures, parties, festivals, workshops — or asks for new places (cafés, bars with live music, galleries, unusual spots). Also use to operate the shared Telegram bot behind it: start or check the bot service, inspect or edit a user's taste, run the weekly/weekend digest, follow alerts, place suggestions or reminder jobs, and diagnose why someone did not get a digest. Covers Kharkiv (default), Kyiv, Lviv, Dnipro, Odesa and any city configured in config.yaml.
+description: Use when the user asks what is on in a Ukrainian city — concerts, stand-up, theatre, exhibitions, lectures, parties, festivals, workshops. Also use to operate the shared Telegram bot behind it: start or check the bot service, inspect or edit a user's taste, run the weekly/weekend digest, follow alerts or reminder jobs, and diagnose why someone did not get a digest. Covers Kharkiv (default), Kyiv, Lviv, Dnipro, Odesa and any city configured in config.yaml.
 ---
 
 # events-finder
@@ -28,7 +28,7 @@ behind it; «Далі →» and «← Назад» under the card swap the event
 message. Every message that does go out is recorded against the single event it
 showed, which is what makes a ❤️ reaction unambiguous. Only what was shown
 counts as sent, so an event still in the stash can turn up in a later digest.
-Follow alerts and place tips are still one message per item. Console output
+Follow alerts are still one message per item. Console output
 (`scripts/search.ts`) still uses the one-block digest.
 
 ## Before anything else
@@ -56,9 +56,9 @@ check nothing is already running (`pgrep -fl "scripts/bot.ts"`). In production i
 belongs under a supervisor — see the README.
 
 What users can send it: `/start` (the walkthrough — see below), `/find` (the
-guided search), `/week`, `/weekend`, `/today`, `/tomorrow`, `/near`, `/places`,
+guided search), `/week`, `/weekend`, `/today`, `/tomorrow`, `/near`,
 `/saved`, `/city`, `/prefs`, `/setup`, `/settings`,
-`/mute week|weekend|follows|places`, `/unmute`, `/reminders`, `/follow X`,
+`/mute week|weekend|follows`, `/unmute`, `/reminders`, `/follow X`,
 `/unfollow X`, `/stop`, `/help`, `/feedback <text>` (stored in the `feedback`
 table and forwarded to the owner), and — owner only, invisible to everybody
 else — `/stats` and `/broadcast <message>`, which previews and asks before it
@@ -150,7 +150,6 @@ by day.
 | `--like standup,indie` / `--dislike classical` | extra taste tags for this run |
 | `--max-price 800` | budget for this run |
 | `--top 10` | keep only the best N |
-| `--kind place` | look for places instead of events |
 | `--only concert.ua,karabas` / `--skip telegram` | restrict sources |
 | `--pages 2` | fewer pages per source (faster, less complete) |
 | `--chat ID` | act as that user (defaults to `TELEGRAM_CHAT_ID`) |
@@ -202,18 +201,17 @@ Hermes has no HTTP search API, so this source borrows your `web_search` tool:
 
 ```bash
 # 1. ask what to search for — one entry per city that has users
-npx tsx scripts/places.ts --queries
+npx tsx scripts/websearch.ts --queries --city kharkiv
 npx tsx scripts/follows.ts --queries                  # the names people follow
-npx tsx scripts/websearch.ts --queries --city kharkiv --kind place
 
 # 2. run those queries with your own web_search tool
 
 # 3. hand the results back
-npx tsx scripts/websearch.ts --ingest results.json --kind place --city kharkiv
-#    or: echo "$JSON" | npx tsx scripts/websearch.ts --ingest - --kind place --city kharkiv
+npx tsx scripts/websearch.ts --ingest results.json --city kharkiv
+#    or: echo "$JSON" | npx tsx scripts/websearch.ts --ingest - --city kharkiv
 
 # 4. they are now part of every run for 7 days
-npx tsx scripts/places.ts --dry-run
+npx tsx scripts/follows.ts --dry-run
 ```
 
 Per result: `title` and `url` are required; `snippet`, `date`, `venue`,
@@ -229,7 +227,6 @@ npx tsx scripts/digest.ts --week --hour 18 --day 5 --dry-run   # rehearse one sl
 npx tsx scripts/digest.ts --week --now          # ignore the schedule, send to everyone
 npx tsx scripts/follows.ts                      # every 6h — new shows by people they follow
 npx tsx scripts/follows.ts --queries            #   …run these first: tours are announced by name
-npx tsx scripts/places.ts                       # weekly — places to try
 npx tsx scripts/reminders.ts                    # every 15min — fire due ❤️ reminders
 ```
 
@@ -251,9 +248,10 @@ npx tsx scripts/prefs.ts --defaults "add jazz to favourites"  # defaults for NEW
 
 One-off cleanup for a bot that ran before the walkthrough existed:
 `npx tsx scripts/disinherit.ts` (dry run; `--yes` to write) removes from every
-user the favourites, dislikes, genres and place taste that are identical to the
+user the favourites, dislikes and genres that are identical to the
 seed file — the ones they were handed rather than chose. It leaves the ❤️ tally
 and the price cap alone.
+
 
 `preferences.yaml` is the operator's own profile and what the CLI falls back to;
 it is not handed to new users, who build their own through the walkthrough. Live
@@ -328,7 +326,7 @@ Taking the ❤️ off cancels the reminder; the taste it taught is kept. A heart
 does three things at once, in one save, which is why the model improves without
 anyone typing anything:
 
-- the event's category joins their favourites (a place joins their place taste)
+- the event's category joins their favourites
 - `prefs.taste[tag]` goes up — **every** heart, not just the first
 - whoever is on stage joins their follow list, when the ticket site filled in a
   performer. A show title is never used as a name: «Вечір імпровізації» is

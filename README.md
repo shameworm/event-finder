@@ -1,11 +1,10 @@
 # events-finder
 
-A Telegram bot — and the Hermes Agent skill behind it — that finds events and
-places in Ukrainian cities, ranks them against each user's taste, and sends
-personalised digests, alerts and reminders.
+A Telegram bot — and the Hermes Agent skill behind it — that finds events in
+Ukrainian cities, ranks them against each user's taste, and sends personalised
+digests, alerts and reminders.
 
 - **Events**: concerts, stand-up, theatre, exhibitions, lectures, parties, festivals, workshops
-- **Places**: new cafés, bars with live music, galleries, unusual spots
 - **Sources**: Concert.ua, Karabas, Kontramarka, Telegram channels (GramJS), web search
 - **Cities**: Kharkiv (default), Kyiv, Lviv, Dnipro, Odesa, Ivano-Frankivsk — add any
 - **Multi-user**: every person gets their own city, taste, delivery hour and reminders
@@ -67,7 +66,7 @@ cp preferences.example.yaml preferences.yaml
   unknown key is rejected with the file name and the key, rather than falling
   back to a default you did not ask for. One
   section per city with the Concert.ua slug, the Karabas and Kontramarka
-  subdomains, Telegram channels and place-search queries. All commented.
+  subdomains and Telegram channels. All commented.
 - **`preferences.yaml`** — **your own** taste model, used by the CLI. New bot
   users inherit none of it: `/start` walks them through building their own with
   buttons, and their live preferences live in the database per chat id.
@@ -123,7 +122,7 @@ megabytes, held for a day).
 `message_delay_ms` is the pause between the messages of one send. A digest is
 now a header plus one card, so it barely applies there; what still needs it is
 **📋 Показати списком**, which hands out `max_results` events in one go, and the
-follow-alert and place-tip jobs, which are still one message per item. Telegram
+follow-alert job, which is still one message per item. Telegram
 throttles a sustained burst at roughly one message per second — lower this and
 you will start seeing 429s (both `sendMessage` and `sendPhoto` retry once, then
 give up on that message).
@@ -175,7 +174,7 @@ The command menu — what Telegram autocompletes after `/` and shows behind the
 Two things are still worth setting in @BotFather by hand:
 
 ```
-/setdescription  Знаходжу концерти, стендап, театр, виставки й нові місця в українських містах.
+/setdescription  Знаходжу концерти, стендап, театр, виставки та фестивалі в українських містах.
 /setabouttext    Твоє місто, твій смак, одне повідомлення на тиждень.
 ```
 
@@ -337,7 +336,6 @@ them with `hermes cron add` (both forms are there, plus a crontab fallback):
 | **every hour** | `digest.ts --week` | whoever set that hour and today's weekday — header + one card |
 | **every hour, Thursday** | `digest.ts --weekend --top 5` | whoever set that hour — header + one card |
 | every 6 hours | `follows.ts` | each user's follow list — one message per alert |
-| Sunday 11:00 | `places.ts` | each user's place taste — one message per place |
 | every 15 minutes | `reminders.ts` | everyone's ❤️ reminders |
 
 The two digest jobs tick **hourly** and the schedule lives on the user, not in
@@ -347,8 +345,8 @@ exits without scraping anything, so 23 of every 24 runs are free.
 
 Both digests arrive as **a header plus one card**, with the rest of the ranked
 week in a stash you walk with the buttons under it (§Bot policy). The follow
-alerts and place tips are left as they were — a single-event alert and three
-place suggestions are not lists you page through.
+alerts are left as they were — a single-event alert is not a list you page
+through.
 
 Rehearse each one with `--dry-run`, and against yourself with
 `--chat <your-chat-id>`, before letting it loose on real users:
@@ -466,7 +464,7 @@ broken parser.
   empty. A source that *threw* is left alone too — that one is already loud, in
   `failedSources` and the log.
 - **websearch** and **telegram** get their own wording: an empty websearch means
-  nobody has run the `places.ts --queries` → `websearch.ts --ingest` hand-off
+  nobody has run the `websearch.ts --queries` → `--ingest` hand-off
   lately, and an empty telegram usually means the GramJS session expired. Both
   are different problems with different fixes from "the markup moved".
 
@@ -512,7 +510,7 @@ one line, so neither can be found by guessing.
   | block | the question |
   |---|---|
   | Do people page? | how many answers got at least one `Далі →`, and how deep the people who do walk, go. If nobody pages, the 37 events in a stash do not exist. |
-  | Reactions per job | ❤️ / 👎 / 🔖 / ⏰ counted separately for weekly digests, weekend picks, follow alerts, place tips and on-demand searches |
+  | Reactions per job | ❤️ / 👎 / 🔖 / ⏰ counted separately for weekly digests, weekend picks, follow alerts and on-demand searches |
   | Gesture coverage | the share of sent events that were ever touched at all |
   | Padding frequency | how often `rank()` had to let off-taste events back in — overall and per city, which is the direct measure of whether a city has anything worth ranking |
 
@@ -544,8 +542,8 @@ preferences.example.yaml  the operator's own taste model (CLI defaults)
 scripts/
   bot.ts                  the bot service (long-poll, or --once for cron)
   concertua.ts karabas.ts kontramarka.ts telegram.ts websearch.ts
-  search.ts digest.ts follows.ts places.ts reminders.ts
-  prefs.ts disinherit.ts tg-login.ts doctor.ts
+  search.ts digest.ts follows.ts reminders.ts
+  prefs.ts disinherit.ts unplace.ts tg-login.ts doctor.ts
 src/
   bot-handlers.ts         the conversation, the buttons and the ❤️ reaction
   users.ts                chat id ↔ taste model
