@@ -122,8 +122,8 @@ conversation, `src/render.ts` for events), so that is where to look.
    «пт, 24 жовт. 19:00» and the price like «400–800 ₴».
 6. **Tap ❤️ on one of those event messages** → «⏰ Нагадування поставив — …» as
    a reply to that message, plus «(додав … до улюбленого)» the first time and
-   «стежу за «…»» when the ticket site named a performer. Heart two more of the
-   same kind, then `npx tsx scripts/prefs.ts --chat <your id>` → the ❤️ tally
+   «стежу за «…»» when the ticket site named a performer. Heart two more in the
+   same category, then `npx tsx scripts/prefs.ts --chat <your id>` → the ❤️ tally
    has gone up, and the favourites list has not grown a duplicate.
    Run `/weekend` again → the answer should now be mostly that category, with a
    line saying how many events it filtered out.
@@ -228,7 +228,6 @@ npx tsx scripts/digest.ts  --week --dry-run                 # hourly weekly job,
 npx tsx scripts/digest.ts  --week --dry-run --hour 9 --day 1  # rehearse the Monday 09:00 slot
 npx tsx scripts/digest.ts  --weekend --top 5 --dry-run      # hourly Thursday job
 npx tsx scripts/follows.ts --dry-run                        # every-6-hours job
-npx tsx scripts/places.ts  --dry-run                        # weekly job
 npx tsx scripts/reminders.ts --dry-run                      # every-15-minutes job
 npx tsx scripts/bot.ts     --once --dry-run                 # message drain
 ```
@@ -254,15 +253,16 @@ npx tsx scripts/digest.ts --weekend --top 5 --chat <your-chat-id>
 ## 5. Web-search hand-off
 
 ```bash
-npx tsx scripts/places.ts --queries          # one entry per city that has users
+npx tsx scripts/websearch.ts --queries --city kharkiv   # what to search for
+npx tsx scripts/follows.ts --queries                    # …plus the names people follow
 # run those queries with web_search, save as results.json
-npx tsx scripts/websearch.ts --ingest results.json --kind place --city kharkiv
-npx tsx scripts/places.ts --dry-run
-npx tsx scripts/websearch.ts --clear          # start over
+npx tsx scripts/websearch.ts --ingest results.json --city kharkiv
+npx tsx scripts/follows.ts --dry-run
+npx tsx scripts/websearch.ts --clear                    # start over
 ```
 
-Expect Ukrainian queries with the Ukrainian city name, `ingested N/M`, and
-places rendered as a flat list with addresses and no times.
+Expect Ukrainian queries with the Ukrainian city name, `ingested N/M`, and a
+result with no recognisable date dropped rather than stored.
 
 ## 6. Reminders
 

@@ -11,7 +11,7 @@
 # A digest arrives as ONE CARD with a header, not one message per event: the
 # rest of the ranked week waits in a stash for 24 hours and «Далі →» under the
 # card walks it. So a fifteen-event week is two sends per user, not sixteen.
-# The follow-alert and place-tip jobs are unchanged — one message per item.
+# The follow-alert job is unchanged — one message per item.
 #
 # Do not "optimise" these back to `0 9 * * 1`: that would pin everybody to one
 # hour again and quietly ignore the hour they picked.
@@ -79,35 +79,7 @@ cron:
       Report how many alerts went out, and name any source that failed.
     description: Has anyone a user follows announced a show in one of their cities?
 
-  # ── 4. Sunday 11:00 — 2–3 places to try ───────────────────────────────────
-  #
-  # Places come from web search, so this job needs the agent's web_search tool.
-  # Two ways to run it:
-  #
-  #   (a) agent prompt (preferred — it can actually search):
-  #         prompt: |
-  #           Use the events-finder skill. Run
-  #           `npx tsx scripts/places.ts --queries`, run those queries with
-  #           web_search, ingest the results with
-  #           `npx tsx scripts/websearch.ts --ingest - --kind place`,
-  #           then run `npx tsx scripts/places.ts` to send the suggestions.
-  #
-  #   (b) plain command — only sends what is already in the websearch inbox.
-  - name: events-finder-places
-    schedule: "0 11 * * 0"
-    timezone: Europe/Kyiv
-    cwd: ~/.hermes/skills/events-finder
-    prompt: |
-      Use the events-finder skill (~/.hermes/skills/events-finder).
-      1. npx tsx scripts/places.ts --queries
-      2. run each query with web_search
-      3. pipe the combined results into
-         npx tsx scripts/websearch.ts --ingest - --kind place
-      4. npx tsx scripts/places.ts
-      Report only what was sent.
-    description: Weekly suggestion of 2–3 new places per user.
-
-  # ── 5. Every 15 minutes — deliver ❤️ reminders ─────────────────────────────
+  # ── 4. Every 15 minutes — deliver ❤️ reminders ─────────────────────────────
   # Required for the "remind me 1 day and 3 hours before" feature.
   - name: events-finder-reminders
     schedule: "*/15 * * * *"
@@ -116,7 +88,7 @@ cron:
     command: npx tsx scripts/reminders.ts
     description: Fire everyone's due reminders (1 day and 3 hours before).
 
-  # ── 6. OPTIONAL — only if you are NOT running scripts/bot.ts as a service ─
+  # ── 5. OPTIONAL — only if you are NOT running scripts/bot.ts as a service ─
   #
   # This drains pending messages every minute instead of long-polling. Replies
   # then take up to a minute to arrive, which feels broken to a stranger, so
@@ -135,7 +107,6 @@ cron:
 #   hermes cron add events-finder-weekly-digest  --schedule "0 * * * *"    --tz Europe/Kyiv --cwd "$PWD" --command "npx tsx scripts/digest.ts --week"
 #   hermes cron add events-finder-weekend-picks  --schedule "0 * * * 4"    --tz Europe/Kyiv --cwd "$PWD" --command "npx tsx scripts/digest.ts --weekend --top 5"
 #   hermes cron add events-finder-follow-alerts  --schedule "0 */6 * * *"  --tz Europe/Kyiv --cwd "$PWD" --command "npx tsx scripts/follows.ts"
-#   hermes cron add events-finder-places         --schedule "0 11 * * 0"   --tz Europe/Kyiv --cwd "$PWD" --command "npx tsx scripts/places.ts"
 #   hermes cron add events-finder-reminders      --schedule "*/15 * * * *" --tz Europe/Kyiv --cwd "$PWD" --command "npx tsx scripts/reminders.ts"
 #   # only without a long-running bot process:
 #   # hermes cron add events-finder-inbox        --schedule "* * * * *"    --tz Europe/Kyiv --cwd "$PWD" --command "npx tsx scripts/bot.ts --once"
@@ -147,7 +118,6 @@ cron:
 #   0  *    * * *  cd ~/.hermes/skills/events-finder && npx tsx scripts/digest.ts --week             >> ~/.hermes/data/events-finder/logs/cron.log 2>&1
 #   0  *    * * 4  cd ~/.hermes/skills/events-finder && npx tsx scripts/digest.ts --weekend --top 5  >> ~/.hermes/data/events-finder/logs/cron.log 2>&1
 #   0  */6  * * *  cd ~/.hermes/skills/events-finder && npx tsx scripts/follows.ts                   >> ~/.hermes/data/events-finder/logs/cron.log 2>&1
-#   0  11   * * 0  cd ~/.hermes/skills/events-finder && npx tsx scripts/places.ts                    >> ~/.hermes/data/events-finder/logs/cron.log 2>&1
 #   */15 *  * * *  cd ~/.hermes/skills/events-finder && npx tsx scripts/reminders.ts                 >> ~/.hermes/data/events-finder/logs/cron.log 2>&1
 #
 # Rehearse every job before trusting it (sends nothing):
@@ -157,7 +127,6 @@ cron:
 #   npx tsx scripts/digest.ts --week --dry-run --chat 123456789 --now  # ignore the schedule entirely
 #   npx tsx scripts/digest.ts --weekend --top 5 --dry-run
 #   npx tsx scripts/follows.ts --dry-run
-#   npx tsx scripts/places.ts --dry-run
 #   npx tsx scripts/reminders.ts --dry-run
 #   npx tsx scripts/bot.ts   --once --dry-run
 # ─────────────────────────────────────────────────────────────────────────────

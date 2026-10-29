@@ -30,7 +30,6 @@ watch_cities:
 
 # Categories you like. Known keys:
 #   concert standup theatre exhibition lecture party festival workshop cinema kids sport
-#   cafe bar gallery spot
 # NOT copied to new users — the walkthrough asks them directly. This list is the
 # operator's own taste, used by the CLI (scripts/search.ts) when no --chat is given.
 favourite_categories:
@@ -71,13 +70,6 @@ trip: null
 # borrow the concert keyword list and match every gig in town.
 genres:
   - indie
-
-# What a ❤️ or 🔖 on a *place* writes: free text, so a taste in cafés does not
-# have to be a word we know. This is what the weekly place suggestions read.
-place_likes:
-  - speciality coffee
-  - vinyl
-  - contemporary art
 
 notes: []
 

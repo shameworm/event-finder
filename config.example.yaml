@@ -26,7 +26,6 @@ digest:
                            # scheduled digests do not use it
   week_top: 15             # Monday "this week" digest
   weekend_top: 5           # Thursday weekend picks
-  places_top: 3            # weekly place suggestions
 
 # The public bot. Every user gets their own city, taste and digest schedule;
 # these settings are about protecting the source sites and staying inside
@@ -47,9 +46,9 @@ bot:
   message_delay_ms: 400    # pause between the messages of ONE send. A digest is
                            # a header plus one card, so this mostly applies to
                            # "показати списком" (max_results at once) and to the
-                           # follow-alert and place-tip jobs, which are still one
-                           # message per item — Telegram throttles a sustained
-                           # burst at roughly one per second
+                           # follow-alert job, which is still one message per
+                           # item — Telegram throttles a sustained burst at
+                           # roughly one per second
 
 cache:
   # One scrape of a city/window serves every user in it for this long.
@@ -66,7 +65,6 @@ cache:
 #   kontramarka.subdomain -> https://<subdomain>.kontramarka.ua/uk/<category>
 #                            (Kyiv has no subdomain — leave it as "")
 #   telegram_channels     -> @usernames or t.me links, read via GramJS
-#   place_queries         -> web-search queries for new cafés/bars/galleries
 # ─────────────────────────────────────────────────────────────────────────────
 cities:
 
@@ -83,11 +81,6 @@ cities:
       subdomain: kharkiv
       categories: [concert, standUp, theatre, exhibition, festival, clubs, museum]
     telegram_channels: []     # ← fill in, e.g. ["@kharkiv_afisha", "@standup_kharkiv"]
-    place_queries:
-      - "нові кав'ярні Харків 2026 відкриття"
-      - "бар з живою музикою Харків"
-      - "галерея виставка Харків новий простір"
-      - "незвичайні місця Харків куди піти"
 
   kyiv:
     label: Київ
@@ -102,10 +95,6 @@ cities:
       subdomain: ""           # Kyiv lives on https://kontramarka.ua/uk
       categories: [concert, standUp, theatre, exhibition, festival, clubs]
     telegram_channels: []
-    place_queries:
-      - "нові кав'ярні Київ відкриття 2026"
-      - "бар з живою музикою Київ"
-      - "нова галерея Київ виставка"
 
   lviv:
     label: Львів
@@ -120,10 +109,6 @@ cities:
       subdomain: lviv
       categories: [concert, standUp, theatre, exhibition, festival]
     telegram_channels: []
-    place_queries:
-      - "нові кав'ярні Львів 2026"
-      - "бар з живою музикою Львів"
-      - "галерея Львів виставка"
 
   dnipro:
     label: Дніпро
@@ -138,9 +123,6 @@ cities:
       subdomain: dnipro
       categories: [concert, standUp, theatre, exhibition, festival]
     telegram_channels: []
-    place_queries:
-      - "нові кав'ярні Дніпро 2026"
-      - "бар з живою музикою Дніпро"
 
   odesa:
     label: Одеса
@@ -155,9 +137,6 @@ cities:
       subdomain: odesa
       categories: [concert, standUp, theatre, exhibition, festival]
     telegram_channels: []
-    place_queries:
-      - "нові кав'ярні Одеса 2026"
-      - "бар з живою музикою Одеса"
 
   # Add more cities the same way. Check the slug works before trusting it:
   #   curl -sI https://concert.ua/en/catalog/<slug>/all-categories | head -1
@@ -176,5 +155,3 @@ cities:
       subdomain: ivano-frankivsk
       categories: [concert, standUp, theatre]
     telegram_channels: []
-    place_queries:
-      - "нові кав'ярні Івано-Франківськ"
