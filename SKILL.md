@@ -64,7 +64,14 @@ table and forwarded to the owner), and — owner only, invisible to everybody
 else — `/stats` and `/broadcast <message>`, which previews and asks before it
 announces anything to every user.
 Anything else is treated as a preference change if it reads like one, otherwise
-as a search.
+as a search. When the parser made nothing at all of such a message — no tags, no
+budget, no date — and `ANTHROPIC_API_KEY` is set, `claude-haiku-5-5` reads it
+first (`src/intent.ts`): it answers with search *parameters* (period, city, tags
+to prefer or avoid), a preference command for `applyPrefsCommand`, or one
+Ukrainian question back. It never sees an event and never picks one, and its
+tags are dropped unless they exist in `src/categories.ts` — so «чому воно
+показало не те» is always answerable from the query it produced plus `/prefs`.
+Without the key nothing in this paragraph happens.
 
 Requests may be written in Ukrainian, Russian or English — that was always true
 of the parser and is unchanged.

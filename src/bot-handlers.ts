@@ -35,7 +35,8 @@ import {
   isGenreKey,
   tagLabel,
 } from './categories.ts';
-import { nextWeekRange, parseRequest, thisWeekRange, weekendRange } from './request.ts';
+import { DEFAULT_RANGE_LABEL, nextWeekRange, parseRequest, thisWeekRange, weekendRange } from './request.ts';
+import { readIntent, type Intent, type IntentDeps } from './intent.ts';
 import { collectCity } from './cache.ts';
 import { healthSourceNames } from './pipeline.ts';
 import { describeHealth, readAllHealth } from './health.ts';
@@ -63,6 +64,8 @@ export interface HandlerContext {
   store: Store;
   log: Logger;
   dryRun?: boolean;
+  /** Passed through to src/intent.ts; the test suite injects `ask` here. */
+  intent?: IntentDeps;
 }
 
 /**
@@ -901,6 +904,40 @@ function footerFor(n: { shown: number; waiting: number; toppedUp: number; offTas
 }
 
 /**
+ * Should a model read this message, and what did it make of it?
+ *
+ * The regexes go first and keep everything they understand, so this only runs
+ * on a query that came back **bare**: no tags either way, no budget, and the
+ * date range still the default. Bare means the rules found nothing at all and
+ * the person is one line away from a generic week — the only case where a
+ * classifier can improve on them. A message with two words or fewer is left
+ * alone too: that is a venue name or a typo, and a search handles both better.
+ *
+ * The budget is taken before the call and lives in its own hourly bucket, the
+ * mechanism /feedback already uses, so reading a sentence can never spend
+ * somebody's search. Over it, this is silence and a plain search, not an error.
+ */
+async function readBareIntent(ctx: HandlerContext, user: BotUser, text: string): Promise<Intent | null> {
+  const cfg = loadConfig();
+  const query = parseRequest(text, { prefs: user.prefs, base: today(cfg.timezone) });
+  const bare =
+    query.like.length === 0 &&
+    query.dislike.length === 0 &&
+    query.maxPrice === undefined &&
+    query.rangeLabel === DEFAULT_RANGE_LABEL;
+  if (!bare) return null;
+  if (text.trim().split(/\s+/).length <= 2) return null;
+
+  const limit = await ctx.store.hitRateLimit(user.chatId, cfg.bot.intents_per_hour, 'intent');
+  if (!limit.allowed) {
+    ctx.log.info(`chat ${user.chatId} is over intents_per_hour (${limit.used}); answering with a plain search`);
+    return null;
+  }
+
+  return readIntent(text, { log: ctx.log, ...ctx.intent });
+}
+
+/**
  * Run a search for one user and send them the result.
  * Goes through the shared city cache, so several users asking the same thing
  * cost one scrape.
@@ -916,6 +953,13 @@ export async function answerSearch(
     top?: number;
     /** Categories picked with buttons, for /find; free text supplies its own. */
     like?: string[];
+    /**
+     * The three the intent layer adds (src/intent.ts). Buttons and digests pass
+     * none of them, so their answers are the same as before this existed.
+     */
+    city?: string;
+    dislike?: string[];
+    maxPrice?: number;
     reply: Reply;
   } = { reply: async () => {} },
 ): Promise<number> {
@@ -925,9 +969,12 @@ export async function answerSearch(
   const query = parseRequest(text, {
     prefs: user.prefs,
     base,
+    city: opts.city,
     from: opts.from,
     to: opts.to,
     like: opts.like,
+    dislike: opts.dislike,
+    maxPrice: opts.maxPrice,
   });
   if (opts.label) query.rangeLabel = opts.label;
 
@@ -1603,7 +1650,40 @@ export async function handleMessage(ctx: HandlerContext, msg: TgMessage): Promis
   }
   if (edit.understood) return reply(`Нічого міняти — ${escapeHtml(edit.note ?? 'вже так і є')}.`);
 
-  await answerSearch(ctx, user, text, { reply });
+  /* --- the rules found nothing: a model reads the sentence -------------- */
+  // Mood and occasion are what is left over once the regexes have had their
+  // turn, and that is the whole of this layer's job. Without a key it returns
+  // null and the next line is the search this always was.
+  const intent = await readBareIntent(ctx, user, text);
+
+  if (intent?.action === 'unclear') return reply(escapeHtml(intent.question));
+
+  if (intent?.action === 'prefs') {
+    // the model proposes, applyPrefsCommand decides: the confirmation is the
+    // same «✅ Записав:» as the typed path because it is the same code
+    const asked = applyPrefsCommand(intent.command, user.prefs);
+    if (asked.understood && asked.changes.length > 0) {
+      await saveUserPrefs(ctx.store, user, asked.prefs);
+      ctx.log.info(`chat ${chatId} via the model: ${asked.changes.join('; ')}`);
+      return reply(`✅ Записав:\n${asked.changes.map((c) => `· ${escapeHtml(c)}`).join('\n')}`);
+    }
+    ctx.log.warn(`chat ${chatId}: «${intent.command}» from the model changed nothing; searching instead`);
+  }
+
+  await answerSearch(ctx, user, text, {
+    reply,
+    ...(intent?.action === 'search'
+      ? {
+          city: intent.city,
+          from: intent.from,
+          to: intent.to,
+          label: intent.rangeLabel,
+          like: intent.like,
+          dislike: intent.dislike,
+          maxPrice: intent.maxPrice,
+        }
+      : {}),
+  });
 }
 
 /* ----------------------------------------------------------- the buttons --- */

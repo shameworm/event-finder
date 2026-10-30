@@ -212,6 +212,7 @@ Create `~/.hermes/.env` (shared with your other Hermes skills) or
 | `TELEGRAM_API_HASH` | same | same page |
 | `TELEGRAM_SESSION` | your GramJS login (optional) | written by `scripts/tg-login.ts` (§6) |
 | `DATABASE_URL` | Postgres instead of SQLite (optional) | your database |
+| `ANTHROPIC_API_KEY` | understanding sentences the regexes miss (optional, see below) | [console.anthropic.com](https://console.anthropic.com) → API keys |
 
 The command menu — what Telegram autocompletes after `/` and shows behind the
 ☰ button — is published by the bot itself on every start (`setMyCommands`, from
@@ -232,6 +233,39 @@ than in a catalogue with a lookup layer on top. Logs, CLI output, `/stats` and
 `/broadcast` stay English: they are for whoever runs the bot. `/feedback` is the
 exception on the operator side of that line — the person writing it is a user,
 so it answers in Ukrainian and only the copy that reaches *you* is English.
+
+### Understanding sentences: `ANTHROPIC_API_KEY`
+
+This is the only paid thing in the project, and it is optional.
+
+Free text is read by the rules in `src/request.ts`, which know dates, budgets,
+cities and genre names. They do not know moods. «куди піти з дівчиною на вечір,
+щось нешумне» has nothing in it they can match, so the question gets a generic
+week back. With a key set, a message they made nothing of is read by
+`claude-haiku-5-5` (`src/intent.ts`), which answers with search parameters —
+a period, a city, tags to prefer and tags to avoid — or with one Ukrainian
+question when it cannot tell what was meant.
+
+What it cannot do is as important:
+
+- **It never sees an event and never searches.** It only fills in the options
+  `parseRequest` already takes, so it cannot invent a concert, and why
+  something was ranked where it was is still explainable.
+- **It never writes your preferences.** It proposes a Ukrainian command and
+  `applyPrefsCommand` decides whether that is a command at all.
+- **Its answer is checked against this project**: tags must be in
+  `src/categories.ts`, a city must resolve through `config.yaml`, dates must be
+  inside 180 days, the price must be sane. Anything else is dropped.
+- **It runs last, and only on a bare query.** Buttons, `/find`, `/week` and the
+  scheduled digests never reach it, and neither does a message the rules
+  understood — which is most of them. Its own hourly budget
+  (`bot.intents_per_hour`) means reading a sentence can never cost somebody a
+  search.
+
+Without the key: `readIntent` returns null, every path behaves exactly as it
+did before, and the only trace is one WARN line in the log. At chat volume the
+key costs cents a month — ~200 tokens in and ~100 out per message that reaches
+it.
 
 ## 4. Storage
 

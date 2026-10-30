@@ -7,6 +7,13 @@ import { addDays, hasWord, monthFromWord, nextOccurrence, normText, pad2, parseB
 
 export interface DateRange { from: string; to: string; label: string }
 
+/**
+ * What a request with no date in it is called. Exported because the bot's
+ * intent gate compares against it to decide whether the regexes understood the
+ * date at all, and a string compared across two files must not be typed twice.
+ */
+export const DEFAULT_RANGE_LABEL = 'найближчі 7 днів';
+
 /** Friday–Sunday of the current (or upcoming) weekend. */
 export function weekendRange(base: string): DateRange {
   const wd = weekdayOf(base); // 0=Sun
@@ -135,7 +142,7 @@ export function parseDateRange(text: string, base = today(loadConfig().timezone)
     }
   }
 
-  return { from: base, to: addDays(base, 7), label: 'найближчі 7 днів' };
+  return { from: base, to: addDays(base, 7), label: DEFAULT_RANGE_LABEL };
 }
 
 /* -------------------------------------------------------------- taste tags --- */
@@ -166,7 +173,23 @@ function tagsIn(text: string): string[] {
   return [...found];
 }
 
-const NEGATION = /(?:^|[,;.!]|\s)(?:no|not|without|except|but not|без|окрім|крім|кроме|не хочу|не люблю|не треба|не надо|ніякого|никакого|hate)\s+([^,;.!]{2,60})/gi;
+/**
+ * The cues that mark the phrase after them as *disliked*.
+ *
+ * A bare «не» is last in the alternation, and the position is load-bearing.
+ * JavaScript tries alternatives left to right at each starting position, so
+ * `не хочу` has to be reached before bare `не`: the other way round,
+ * «не хочу класику» captures «хочу класику», `tagsIn` finds no tag in that,
+ * and the dislike is silently lost. It is there at all because «тільки не
+ * класика» is the most ordinary way to say it in Ukrainian, and without it the
+ * phrase fell through to the likes — the ranker then pushed classical concerts
+ * *up* for somebody who had just rejected them.
+ *
+ * Only «не». «ні» and «нет» are deliberately out: «ні, давай інше» would make
+ * a dislike out of the rest of the sentence, and «без» already covers the
+ * Russian phrasing people actually type.
+ */
+const NEGATION = /(?:^|[,;.!]|\s)(?:no|not|without|except|but not|без|окрім|крім|кроме|не хочу|не люблю|не треба|не надо|ніякого|никакого|hate|не)\s+([^,;.!]{2,60})/gi;
 
 /** Pull disliked phrases out of the text, and return the text with them removed. */
 export function splitNegations(text: string): { negated: string[]; rest: string } {
