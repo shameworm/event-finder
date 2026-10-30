@@ -28,6 +28,9 @@ process.env['EVENTS_FINDER_QUIET'] = '1';
 // only fills variables that are unset — an operator's real Postgres url would
 // otherwise be pulled into the test run
 process.env['DATABASE_URL'] = '';
+// the same trick, and the same reason with money attached: a developer who has
+// a real key in ~/.hermes/.env would otherwise run a suite that calls the API
+process.env['ANTHROPIC_API_KEY'] = '';
 
 // a known preferences file, so ranking tests do not depend on the user's own
 writeFileSync(
@@ -49,8 +52,9 @@ writeFileSync(
 // everything else is imported after the sandbox env vars are set above
 const { describe, it, run } = await import('./harness.ts');
 const { normText, stemText, isoInZone, localDate, localTime, addDays, today, weekdayOf, titleKey, dayLabel } = await import('../src/util.ts');
-const { classify, canonicalTag, expandTag, isGenreKey, LIKE_SUGGESTIONS } = await import('../src/categories.ts');
-const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange, splitNegations } = await import('../src/request.ts');
+const { classify, canonicalTag, expandTag, isGenreKey, EVENT_CATEGORIES, LIKE_SUGGESTIONS } = await import('../src/categories.ts');
+const { parseDateRange, parseRequest, weekendRange, thisWeekRange, nextWeekRange, splitNegations, DEFAULT_RANGE_LABEL } = await import('../src/request.ts');
+const { readIntent } = await import('../src/intent.ts');
 const { fromSchemaEvent, makeItem, priceText, parsePriceText, statusFrom, pickImage } = await import('../src/normalize.ts');
 const { dedupe, fingerprint } = await import('../src/dedupe.ts');
 const { rank, matchesFollow, matchesTag, groupByDay } = await import('../src/rank.ts');
@@ -219,6 +223,41 @@ describe('request parsing', () => {
     assert.ok(!rest.includes('класики'));
   });
 
+  /**
+   * A bare «не» used to fall through to `tagsIn(rest)`, so «тільки не класика»
+   * put `classical` in *like* — the ranker then pushed classical concerts up
+   * for somebody who had just rejected them. One case per row of the table in
+   * the brief, including the ones that must not move.
+   */
+  it('reads a bare «не» as a dislike, and leaves the phrasings that already worked alone', () => {
+    const neg = (t: string) => splitNegations(t).negated;
+    assert.deepEqual(neg('хочу щось спокійне в пятницю, бюджет 500, тільки не класика'), ['класика']);
+    assert.deepEqual(neg('є щось типу стендапу але не класика'), ['класика']);
+    assert.deepEqual(neg('лише не класика'), ['класика']);
+    // harmless: there is no tag anywhere in that phrase
+    assert.deepEqual(neg('не знаю куди піти'), ['знаю куди піти']);
+    // the capture stops at the comma, so the джаз after it is still a like
+    assert.deepEqual(neg('щось не дуже гучне, хочу джаз'), ['дуже гучне']);
+    assert.deepEqual(parseRequest('щось не дуже гучне, хочу джаз', { prefs, base }).like.includes('jazz'), true);
+    // «не хочу» has to be matched before bare «не», or these two capture the
+    // verb instead of the noun and the dislike is lost in silence
+    assert.deepEqual(neg('не хочу класику'), ['класику']);
+    assert.deepEqual(neg('стендап без класики'), ['класики']);
+  });
+
+  it('puts the tag of a «тільки не …» into dislike rather than like', () => {
+    const q = parseRequest('хочу щось спокійне в пятницю, бюджет 500, тільки не класика', { prefs, base });
+    assert.deepEqual(q.dislike, ['classical']);
+    assert.ok(!q.like.includes('classical'), `like should not contain classical, got ${q.like.join(',')}`);
+    // and the halves that already worked are untouched by the fix
+    assert.equal(q.maxPrice, 500);
+    assert.equal(q.rangeLabel, 'наступної пʼятниці');
+
+    const standup = parseRequest('є щось типу стендапу але не класика', { prefs, base });
+    assert.deepEqual(standup.dislike, ['classical']);
+    assert.ok(standup.like.includes('standup'), standup.like.join(','));
+  });
+
   it('resolves city names in any spelling or case', () => {
     assert.equal(resolveCity('Харкові'), 'kharkiv');
     assert.equal(resolveCity('kharkov'), 'kharkiv');
@@ -293,6 +332,111 @@ describe('dates people actually type', () => {
     assert.equal(parseRequest('що буде до 20:00?', { prefs, base: '2026-10-20' }).maxPrice, undefined);
     assert.equal(parseRequest('стендап до 500 грн', { prefs, base: '2026-10-20' }).maxPrice, 500);
     assert.equal(parseRequest('концерт, бюджет 900', { prefs, base: '2026-10-20' }).maxPrice, 900);
+  });
+});
+
+/* ------------------------------------------------------------ the model --- */
+
+/** A canned responder for the `ask` seam, in the shape of politeFetch's one. */
+function responder(reply: string | (() => never)): { ask: (s: string, t: string) => Promise<string>; asked: string[] } {
+  const asked: string[] = [];
+  return {
+    asked,
+    ask: async (_system: string, text: string) => {
+      asked.push(text);
+      return typeof reply === 'string' ? reply : reply();
+    },
+  };
+}
+
+/**
+ * The suite runs with an empty ANTHROPIC_API_KEY so a developer's real key can
+ * never be billed by `npm test`; a test about what the model *does* — or about
+ * a message that must not reach it — has to lend it a fake one for the length
+ * of the call, or the assertion passes for the wrong reason.
+ */
+async function withKey<T>(body: () => Promise<T>): Promise<T> {
+  process.env['ANTHROPIC_API_KEY'] = 'test-key-that-is-never-sent-anywhere';
+  try {
+    return await body();
+  } finally {
+    process.env['ANTHROPIC_API_KEY'] = '';
+  }
+}
+
+/**
+ * The intent layer, with the network replaced by a function that hands back a
+ * string. Nothing in here asserts on the model's wording — only on the Intent
+ * that came out of a given reply, and on what was dropped on the way.
+ */
+describe('intent', () => {
+  const inVocabulary = (tag: string) => isGenreKey(tag) || (EVENT_CATEGORIES as string[]).includes(tag);
+
+  it('turns a mood and an occasion into search parameters inside the closed vocabulary', async () => {
+    const { ask } = responder(
+      JSON.stringify({
+        action: 'search',
+        range_label: 'сьогодні ввечері',
+        like: ['theatre', 'candlelight'],
+        dislike: ['party', 'metal', 'karaoke'],
+      }),
+    );
+    const intent = await withKey(() => readIntent('куди піти з дівчиною на вечір, щось нешумне', { ask, log }));
+    assert.equal(intent?.action, 'search');
+    if (intent?.action !== 'search') return;
+    assert.equal(intent.rangeLabel, 'сьогодні ввечері');
+    assert.ok(intent.dislike?.includes('party'), JSON.stringify(intent.dislike));
+    for (const tag of [...(intent.like ?? []), ...(intent.dislike ?? [])]) {
+      assert.ok(inVocabulary(tag), `${tag} is not a tag this project has`);
+    }
+  });
+
+  it('drops a genre and a city it does not have, and keeps the rest of the intent', async () => {
+    const { ask } = responder(
+      JSON.stringify({ action: 'search', city: 'Атлантида', like: ['jazz', 'vaporwave'], max_price: 600 }),
+    );
+    const intent = await withKey(() => readIntent('щось джазове недорого', { ask, log }));
+    assert.equal(intent?.action, 'search');
+    if (intent?.action !== 'search') return;
+    assert.deepEqual(intent.like, ['jazz']);
+    assert.equal(intent.city, undefined, 'a city that is not in config.yaml is not a city');
+    assert.equal(intent.maxPrice, 600);
+  });
+
+  it('refuses a date five years out instead of scraping a year nobody has listings for', async () => {
+    const { ask } = responder(JSON.stringify({ action: 'search', from: '2031-07-01', to: '2031-07-02' }));
+    assert.equal(await withKey(() => readIntent('щось у липні', { ask, log })), null);
+  });
+
+  it('comes back null for malformed JSON, for prose, and for a call that threw', async () => {
+    const broken = responder('{"action":');
+    assert.equal(await withKey(() => readIntent('щось цікаве сьогодні', { ask: broken.ask, log })), null);
+
+    const prose = responder('Привіт! Розкажи трохи більше, будь ласка.');
+    assert.equal(await withKey(() => readIntent('щось цікаве сьогодні', { ask: prose.ask, log })), null);
+
+    const thrown = responder(() => {
+      throw new Error('connection reset');
+    });
+    assert.equal(await withKey(() => readIntent('щось цікаве сьогодні', { ask: thrown.ask, log })), null);
+  });
+
+  it('is a clean no-op without a key: no call, no intent, no error', async () => {
+    const { ask, asked } = responder(JSON.stringify({ action: 'search' }));
+    assert.equal(process.env['ANTHROPIC_API_KEY'], '', 'the sandbox leaves the key empty');
+    assert.equal(await readIntent('куди піти з дівчиною на вечір, щось нешумне', { ask, log }), null);
+    assert.deepEqual(asked, [], 'the model is not asked anything when there is no key');
+  });
+
+  it('hands a prefs command to applyPrefsCommand, which changes nothing when it does not understand it', async () => {
+    const { ask } = responder(JSON.stringify({ action: 'prefs', command: 'зроби мене щасливим' }));
+    const intent = await withKey(() => readIntent('хочу бути щасливим', { ask, log }));
+    assert.equal(intent?.action, 'prefs');
+    if (intent?.action !== 'prefs') return;
+    const edit = applyPrefsCommand(intent.command, prefs);
+    assert.equal(edit.understood, false, 'the model does not get to invent a command shape');
+    assert.deepEqual(edit.changes, []);
+    assert.deepEqual(edit.prefs, prefs, 'and nothing about the person changed');
   });
 });
 
@@ -3184,11 +3328,23 @@ interface FakeCall {
   body: Record<string, unknown>;
 }
 
-/** Capture what the bot would say to one message. */
-async function say(store: StoreType, chatId: string, text: string, extra: Record<string, unknown> = {}): Promise<string> {
+/**
+ * Capture what the bot would say to one message.
+ *
+ * `intent` is the seam src/intent.ts takes: pass a canned `ask` to decide what
+ * the model would have said, or leave it out — without a key the layer is off
+ * and the handler behaves as it did before it existed.
+ */
+async function say(
+  store: StoreType,
+  chatId: string,
+  text: string,
+  extra: Record<string, unknown> = {},
+  intent?: { ask?: (system: string, text: string) => Promise<string> },
+): Promise<string> {
   return captureOutput(() =>
     handleMessage(
-      { store, log, dryRun: true },
+      { store, log, dryRun: true, ...(intent ? { intent } : {}) },
       TgMessageSchema.parse({
         message_id: Math.floor(Math.random() * 100000),
         date: Math.floor(Date.now() / 1000),
@@ -3339,6 +3495,12 @@ describe('bot handlers', () => {
       startsAt: `${today(loadConfig().timezone)}T23:00:00+03:00`, status: 'scheduled', ...extra,
     })!;
 
+  /** The same, for any city and window a free-text answer may land on. */
+  async function seedWindow(store: StoreType, city: string, from: string, to: string, items: Item[]): Promise<void> {
+    const key = cacheKey({ city, from, to }, ALL_SOURCE_NAMES, loadConfig().bot.interactive_pages);
+    await store.putCache(key, items, 600);
+  }
+
   /** Someone with taste, already past the walkthrough and the one-time nudge. */
   async function withTaste(store: StoreType, chatId: string, favourites: string[]): Promise<void> {
     await registerUser(store, { chatId, city: 'kharkiv' });
@@ -3346,6 +3508,77 @@ describe('bot handlers', () => {
     await saveUserPrefs(store, user, { ...user.prefs, favourite_categories: favourites });
     await store.setState(`setup_offered:${chatId}`, 'done');
   }
+
+  /**
+   * The gate, which is the whole reason this layer is affordable: the model
+   * only ever sees a message the regexes made nothing of. «на вихідних» they
+   * do understand, so this one must cost nothing — asserted, because a broken
+   * gate is invisible in every other test.
+   */
+  it('never asks the model about a message its own rules already understand', async () => {
+    await withTestStore(async (store) => {
+      const { ask, asked } = responder(JSON.stringify({ action: 'search', like: ['standup'] }));
+      await withTaste(store, '3060', ['standup']);
+      const base = today(loadConfig().timezone);
+      const weekend = weekendRange(base);
+      await seedWindow(store, 'kharkiv', weekend.from, weekend.to, []);
+
+      const out = await withKey(() => say(store, '3060', 'що цікавого на вихідних', {}, { ask }));
+      assert.deepEqual(asked, [], 'the rules read «вихідних», so the model is not a tax on this message');
+      assert.ok(out.includes('ці вихідні'), out.slice(0, 400));
+    });
+  });
+
+  it('asks the question of an unclear intent and searches nothing', async () => {
+    await withTestStore(async (store) => {
+      const question = 'Ти про сьогоднішній вечір чи про вихідні?';
+      const { ask, asked } = responder(JSON.stringify({ action: 'unclear', question }));
+      await withTaste(store, '3061', ['standup']);
+
+      const out = await withKey(() => say(store, '3061', 'хочу чогось такого отакого', {}, { ask }));
+      assert.deepEqual(asked, ['хочу чогось такого отакого'], 'this one the rules made nothing of');
+      assert.ok(out.includes(question), out.slice(0, 400));
+      assert.ok(!out.includes('🔎 Шукаю'), 'a question is not a search');
+    });
+  });
+
+  it('cannot spend a search on reading one sentence', async () => {
+    await withTestStore(async (store) => {
+      const { ask } = responder(JSON.stringify({ action: 'unclear', question: 'А це на сьогодні?' }));
+      await withTaste(store, '3063', ['standup']);
+      const before = await store.hitRateLimit('3063', 100);
+      await withKey(() => say(store, '3063', 'хочу чогось такого отакого', {}, { ask }));
+      const after = await store.hitRateLimit('3063', 100);
+      assert.equal(after.used, before.used + 1, 'the model has its own hourly bucket; only these two probes count');
+    });
+  });
+
+  it('searches on the parameters a search intent came back with, in the city it named', async () => {
+    await withTestStore(async (store) => {
+      const base = today(loadConfig().timezone);
+      const day = addDays(base, 2);
+      const { ask } = responder(
+        JSON.stringify({
+          action: 'search',
+          city: 'Львів',
+          from: day,
+          to: day,
+          range_label: 'у пʼятницю ввечері',
+          like: ['theatre'],
+          dislike: ['party'],
+          max_price: 400,
+        }),
+      );
+      await withTaste(store, '3062', ['standup']);
+      await seedWindow(store, 'lviv', day, day, []);
+
+      const out = await withKey(() => say(store, '3062', 'куди піти з дівчиною на вечір, щось нешумне', {}, { ask }));
+      assert.ok(out.includes('🔎 Шукаю: театр · у пʼятницю ввечері · Львів'), out.slice(0, 400));
+      // the window came from the intent, so the seeded Lviv cache answered it
+      // and no site was asked for anything
+      assert.ok(out.includes('Нічого не знайшлося'), out.slice(-400));
+    });
+  });
 
   it('answers with what the person likes, and says what it hid', async () => {
     await withTestStore(async (store) => {

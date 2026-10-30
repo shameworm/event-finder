@@ -114,6 +114,14 @@ export const ConfigSchema = z.strictObject({
        * channel pointing at one human still needs a floodgate.
        */
       feedback_per_hour: z.number().int().positive().default(5),
+      /**
+       * Messages per user per hour that may be read by the model (src/intent.ts),
+       * in a third hourly bucket for the same reason feedback has its own: a
+       * sentence nobody's regex understood must not be able to spend somebody's
+       * `searches_per_hour`. It is the higher of the two because a model call
+       * costs a fraction of a cent and asks no ticket site for anything.
+       */
+      intents_per_hour: z.number().int().positive().default(30),
       /** Items the header's "показати ще" hands out in one go. */
       max_results: z.number().int().positive().default(10),
       /**
