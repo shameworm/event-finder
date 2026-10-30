@@ -11,7 +11,12 @@ digests, alerts and reminders.
 - **Ukrainian**: the bot speaks Ukrainian only; it still understands requests typed in Russian or English
 - **One card you walk through**, digests included — one message per event shown, so a ❤️ on it means exactly that event
 
-TypeScript on Node 20+, run directly with `tsx` — no build step.
+TypeScript on Node 20+, run directly with `tsx` — no build step. 387 offline tests,
+no network and no database server needed to run them.
+
+Reading this for the engineering rather than to deploy it? Start at
+[§11 Design notes](#11-design-notes) — the decisions that shaped it, and the bugs that
+forced them.
 
 ## How it works
 
@@ -403,7 +408,7 @@ npx tsx scripts/telegram.ts --channel @some_channel --dump   # see raw posts
 ```bash
 npx tsx scripts/doctor.ts            # config, secrets, db, users, source health
 npx tsx scripts/doctor.ts --network  # also check every source site is reachable
-npm test                             # 330 offline checks (~15s, no network)
+npm test                             # 387 offline checks (~15s, no network)
 npm run check                        # typecheck + tests, same as CI
 ```
 
@@ -642,3 +647,74 @@ tests/                    offline suite and fixtures
 Data is validated with zod at every boundary: YAML config, scraped schema.org
 markup, Telegram API payloads, the web-search hand-off, stored preferences and
 anything read back out of the database.
+
+---
+
+## 11. Design notes
+
+The decisions that shaped this, and the bugs that forced them. Each one is a place
+where the obvious implementation was wrong.
+
+**An item's id is a hash, and the hash still starts with the word `event`.**
+`itemId` is `sha1('event', titleKey(title), city, day)`, so the same show scraped
+from three sites collapses into one row (`src/normalize.ts`). The literal `'event'`
+is dead weight — ids used to be keyed by kind — but every id already written into
+`deliveries`, `saved` and `reminders` was hashed with it. Dropping it would change
+every id there is and re-send everybody everything they have already seen. The
+constant stays.
+
+**Only what was shown counts as sent.** An answer is a header plus *one* card, with
+the rest of the ranked list in a stash behind it; «Далі →» swaps the event on that
+same message. Every message is recorded against the single event it displayed, which
+is what makes a ❤️ reaction unambiguous — there is no "which of these eight did you
+mean". An event still sitting in a stash was never sent, so it can turn up in a later
+digest.
+
+**schema.org markup is a dead end on Ukrainian venue sites.** The generic venue
+source reads `Event` JSON-LD, which is the right way to do it and works on the
+ticket aggregators. Probing real venue pages found almost none of them publish it.
+That is why `venues: []` ships empty with a note to probe a URL before adding it,
+rather than a list that looks supported and finds nothing.
+
+**A polite crawler needs a queue, not a clock.** Reading the last-hit time and then
+setting it let five concurrent requests sail through the same 1.5 s window and hit
+one site five times at once — `runPipeline` fires every city × source together.
+Each request now waits for the previous one on that host to claim its slot before
+claiming its own (`src/http.ts`).
+
+**The quiet failure is the dangerous one.** A scraper that stops matching its site
+returns 200 OK, parses nothing, and reports success. Nothing throws, so nothing
+alerts. `src/health.ts` counts the ok-but-empty runs and tells the owner after three
+consecutive fan-out ticks where that source found nothing *while others found events
+in the same cities* — about three hours, long enough to ride out a quiet afternoon,
+short enough not to lose a weekend digest to a source that died on Friday morning.
+
+**`\b` does not work on Cyrillic.** It is ASCII-only, so `/\bдодай/` never matches:
+`д` is not a `\w` character and the boundary it needs is never there. Every rule with
+a Ukrainian alternative is built from the `WORD_START` / `WORD_END` helpers in
+`src/util.ts` instead, with the `u` flag.
+
+**Dates people actually type.** «початок о 9.05» is five past nine, not the ninth of
+May — so date matching walks every candidate in the string instead of trusting the
+first, and skips one preceded by «о» or «в». An unparseable date is dropped rather
+than kept, so it renders as «дата уточнюється» instead of poisoning the ranking and
+the day grouping with `NaN`.
+
+**Negation order is load-bearing.** The regex that pulls disliked phrases out of a
+request lists a bare «не» *last*, after «не хочу» and «не люблю». Put it first and
+«не хочу класику» captures «хочу класику», no known tag is found inside it, and the
+dislike is silently lost — the phrasing that worked before the fix regresses.
+
+**The model only sees what the rules made nothing of.** Free text is matched by regex
+first: city, date range, tags, budget, negations. A model is called only when all of
+that came back empty — mood and occasion («щось нешумне», «з дівчиною на вечір»),
+which no keyword list reaches. It fills in search parameters and never picks events,
+so it cannot invent a concert, and ranking stays explainable. Without an API key the
+layer is a clean no-op and the bot behaves exactly as before. A test asserts that a
+message the rules *do* understand never reaches the model, because that gate is the
+only reason the layer is affordable.
+
+**Time of day is deliberately inexpressible.** A `Query` carries dates and nothing
+finer, so «на вечір» is understood and then dropped rather than smuggled into the
+start date. Honouring it would mean putting an hour through filtering, ranking and
+the cache key — a real feature, not a parsing tweak.
